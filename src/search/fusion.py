@@ -299,7 +299,8 @@ def fuse_hybrid(
       코사인). 한쪽에만 있는 자산은 **누락측 정규화 기여 0**(서버 hybrid 와 동일 시맨틱 — plan R2).
     - 자산 id 로 **합집합**한다. 같은 자산이 양쪽에 있으면 **한 행**으로 결합(점수만 합산). 행의 메타
       (file_uri·modality·summary)는 먼저 본 측(BM25 우선) hit 으로 채운다 — 같은 asset_id 라 내용 동일.
-    - 행은 ``os_hit_to_row`` 동형 + 내부키 ``_cos``(kNN 원시 코사인|없으면 None)·``_bm25``(BM25 매칭 여부).
+    - 행은 ``os_hit_to_row`` 동형 + 공개 키 ``tags``(083 — 색인된 keywords 원문 배열) + 내부키
+      ``_cos``(kNN 원시 코사인|없으면 None)·``_bm25``(BM25 매칭 여부).
       이 두 키가 게이트(gate_signal)·per-result 컷(cut_rows)의 **단일 코사인 스케일 신호**다(024 통일).
     Args:
         bm25_hits: BM25 서브검색 hit 들.
@@ -332,7 +333,8 @@ def fuse_hybrid(
 
         Returns:
             모아 둔 항목(같은 자산이면 같은 dict). 리랭크·증거 필터가 쓸 내부 키도 이때
-            붙는다 — **응답 직전에 제거되므로** 외부 계약에는 나타나지 않는다.
+            붙는다 — **응답 직전에 제거되므로** 외부 계약에는 나타나지 않는다. 반면 ``tags``
+            (083)는 ``_`` 없는 공개 키라 응답까지 남는다.
         """
         row = os_hit_to_row(hit)
         # 028: rerank 문서측 입력은 **구조화 텍스트**("요약: …\n키워드: …") — 입력 변형 4종
@@ -351,6 +353,13 @@ def fuse_hybrid(
         row["_kwtext"] = " ".join(
             [*(str(x) for x in _kw), str(src_.get("fs_uri") or "").split("/")[-1]]
         )
+        # 083 T106: 태그 칩·결과-스코프 패싯 집계의 원천 — **색인된 keywords 원문 배열**을 그대로
+        # 나른다(정규화·표시 라벨 결정은 결과 전역을 보는 aggregate_tag_facets 몫 · spec §⑥).
+        # 위 ``_kwtext`` 는 파일명까지 섞은 **공백 합본 문자열**이라 원천이 아니다(쓰면 태그가
+        # 어절 단위로 쪼개지고 파일명이 태그로 섞인다). ``_`` 없는 **공개 키**라 응답까지 남는다.
+        # keywords 부재·비-리스트면 빈 리스트 — 바로 위 ``_about`` 과 같은 결측 관례로, 키 자체는
+        # 항상 있어 프론트가 유무를 분기하지 않는다.
+        row["tags"] = [str(x) for x in _kw]
         aid = row["id"]
         e = merged.get(aid)
         if e is None:

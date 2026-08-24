@@ -648,10 +648,41 @@ class FuseHybridTest(unittest.TestCase):
             {"id", "file_uri", "modality", "domain_label", "summary", "similarity",
              "topics", "subtopics",  # 057-후속: topics/subtopics 통과
              "topic_pairs",  # 059: 부모>자식 짝 통과
+             "tags",  # 083 T106: 태그 원문 배열(공개 키 — 응답까지 살아남는다)
              "_cos", "_bm25", "_rrtext",
              "_about", "_kwtext"},  # 073: aboutness OR-증거 필터 내부키(bucket_policy clean 제거)
         )
         self.assertEqual(row["modality"], "text")
+
+    def test_tags_carry_original_keywords(self) -> None:
+        # 083 T106: 행의 tags 는 색인된 **원문 keywords 배열**을 그대로 나른다(정규화하지 않는다 —
+        # 표시 라벨 결정은 결과 전역을 보는 집계 함수 몫 · 083 spec §⑥).
+        hit = self._bm25_hit("a", 1.0)
+        hit["_source"]["keywords"] = ["전통 음식", "김치"]
+        row = fuse_hybrid([hit], [], weights=(0.5, 0.5))[0]
+        self.assertEqual(row["tags"], ["전통 음식", "김치"])
+
+    def test_tags_empty_when_keywords_missing(self) -> None:
+        # keywords 없는 문서(요약기 미부여)는 빈 리스트 — _about 과 같은 결측 관례(키는 항상 있다).
+        row = fuse_hybrid([self._bm25_hit("a", 1.0)], [], weights=(0.5, 0.5))[0]
+        self.assertEqual(row["tags"], [])
+
+    def test_tags_empty_when_keywords_not_list(self) -> None:
+        # 스키마 위반(문자열 하나)도 빈 리스트로 방어 — 글자 단위로 쪼개진 쓰레기 태그 금지.
+        hit = self._bm25_hit("a", 1.0)
+        hit["_source"]["keywords"] = "전통음식"
+        row = fuse_hybrid([hit], [], weights=(0.5, 0.5))[0]
+        self.assertEqual(row["tags"], [])
+
+    def test_tags_from_bm25_side_for_both_side_asset(self) -> None:
+        # 양쪽(BM25·kNN)에 나온 자산은 한 행으로 합쳐지고 메타는 먼저 본 측(BM25) 것을 쓴다 —
+        # tags 도 같은 규칙이라 같은 자산에서 값이 흔들리지 않는다.
+        b = self._bm25_hit("both", 10.0)
+        b["_source"]["keywords"] = ["자연"]
+        k = self._knn_hit("both", 0.8)
+        k["_source"]["keywords"] = ["다른값"]
+        row = fuse_hybrid([b], [k], weights=(0.5, 0.5))[0]
+        self.assertEqual(row["tags"], ["자연"])
 
     def test_sorted_by_similarity_desc_then_id_asc(self) -> None:
         # (-similarity, id) 결정 정렬: 점수 desc, 동점은 id asc(FR-002 tiebreaker).
@@ -970,7 +1001,8 @@ class SearchAssetsOsMsearchTest(unittest.TestCase):
                 set(r),
                 {"id", "file_uri", "modality", "domain_label", "summary", "similarity",
                  "topics", "subtopics",  # 057-후속: topics/subtopics 통과(내부키만 strip)
-                 "topic_pairs"},  # 059: 부모>자식 짝 통과
+                 "topic_pairs",  # 059: 부모>자식 짝 통과
+                 "tags"},  # 083 T106: 태그 원문 배열 통과(내부키가 아니라 응답 계약의 일부)
             )
 
     def test_gate_pass_keeps_bucket(self) -> None:

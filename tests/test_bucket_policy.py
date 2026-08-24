@@ -450,5 +450,33 @@ class AboutFilterPolicyTest(unittest.TestCase):
         self.assertEqual([r["id"] for r in out.rows], ["guitar", "violin"])
 
 
+class TagsPassThroughTest(unittest.TestCase):
+    """083 T106 — 행의 ``tags``(태그 원문 배열)는 **응답까지 살아남는다**.
+
+    응답 직전 정리 단계는 이름으로 지정한 **내부키만** 떼어낸다(``_`` 로 시작하는 것들). ``tags`` 는
+    내부키가 아니라 화면이 태그 칩을 그릴 때 쓰는 공개 필드이므로 그 목록에 들어가면 안 된다 —
+    실수로 넣으면 결과 행에서 태그가 조용히 사라진다. 그 경계를 여기서 못 박는다.
+    """
+
+    _call = ApplyBucketPolicyTest._call
+    _TUNING_FIELDS = ApplyBucketPolicyTest._TUNING_FIELDS
+
+    def test_tags_survive_and_internal_keys_stripped(self) -> None:
+        row = _row("a1", cos=0.85, similarity=0.85, bm25=True)
+        row["tags"] = ["전통 음식", "김치"]
+        out = self._call([row])
+        self.assertEqual(out.rows[0]["tags"], ["전통 음식", "김치"])
+        # 같은 행에서 내부키는 여전히 제거된다(공개키만 통과 — 두 규칙이 함께 성립).
+        for internal in ("_cos", "_bm25", "_rrtext", "_keep_reason", "_about", "_kwtext"):
+            self.assertNotIn(internal, out.rows[0])
+
+    def test_empty_tags_still_present(self) -> None:
+        # 태그가 없는 자산도 빈 배열로 키를 유지한다(프론트가 키 유무를 분기하지 않게).
+        row = _row("a2", cos=0.85, similarity=0.85, bm25=True)
+        row["tags"] = []
+        out = self._call([row])
+        self.assertEqual(out.rows[0]["tags"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

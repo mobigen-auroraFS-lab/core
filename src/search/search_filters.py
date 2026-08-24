@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
+from src.search.tag_facets import normalize_tag_key
+
 
 @dataclass(frozen=True, slots=True)
 class SearchFilters:
@@ -20,6 +22,11 @@ class SearchFilters:
     # terms 절로 변환해 bool.filter 에 넣는다 → **결정적·랭킹 무영향**(topics_text boost 철회).
     topic: str | None = None
     subtopic: str | None = None
+    # 083 FR-201 — 태그(키워드) 필터. **원문 표기를 그대로 보관**하고(서비스가 "선택한 태그"를
+    # 사용자에게 되돌려 보여줄 수 있어야 한다) 정규화는 절을 만들 때 한 번만 한다
+    # (``filters_to_opensearch_bool``). 기본값 ``()`` 라 기존 호출부는 손대지 않아도 되고, 비어
+    # 있으면 절 자체가 생기지 않아 **기존 질의 바디가 그대로**다(하위호환·동작 불변).
+    tags: tuple[str, ...] = ()
 
 
 def _norm_ext(value: str) -> str:
@@ -59,6 +66,7 @@ def parse_search_filters(
     created_to: str | None = None,
     topic: str | None = None,
     subtopic: str | None = None,
+    tag: list[str] | None = None,
 ) -> SearchFilters | None:
     """API 질의 파라미터를 ``SearchFilters`` 로 파싱한다(순수).
 
@@ -69,6 +77,9 @@ def parse_search_filters(
         topic: 주제 정확 일치 필터. 색인된 keyword 원문과 맞춰야 하므로 **소문자화하지 않고**
             앞뒤 공백만 자른다.
         subtopic: 세부주제 정확 일치 필터(같은 규칙).
+        tag: 태그 목록(반복 파라미터 ``tag`` · 083). 앞뒤 공백만 자르고 **원문 표기·입력 순서를
+            보존**한 채 중복만 없앤다 — 정규화는 절을 만들 때 하고(``filters_to_opensearch_bool``),
+            여기 값은 화면에 "선택한 태그"로 되돌려 보여줄 수 있어야 한다.
 
     Returns:
         ``SearchFilters``. **하나도 지정되지 않았으면 ``None``** — 호출부가 "필터 없음"을
@@ -85,7 +96,18 @@ def parse_search_filters(
     # 056: 주제/하위주제는 색인 keyword 원문과 정확 일치용이라 strip 만(casefold·소문자화 금지).
     topic_v = topic.strip() if topic and topic.strip() else None
     subtopic_v = subtopic.strip() if subtopic and subtopic.strip() else None
-    if not exts and cf is None and ct is None and topic_v is None and subtopic_v is None:
+    # 083: dict.fromkeys 는 **첫 등장 순서를 보존한 채** 중복을 없앤다(set 은 순서가 흔들린다).
+    tags_v = tuple(dict.fromkeys(x.strip() for x in (tag or []) if x and x.strip()))
+    # 🔴 "아무 필터도 없음"(None) 판정에 tags 를 **반드시** 포함한다 — 빼먹으면 태그만 지정한
+    # 요청이 여기서 None 이 되어 필터가 통째로 사라진다(태그 기능이 조용히 무력화).
+    if (
+        not exts
+        and cf is None
+        and ct is None
+        and topic_v is None
+        and subtopic_v is None
+        and not tags_v
+    ):
         return None
     return SearchFilters(
         file_exts=exts,
@@ -93,6 +115,7 @@ def parse_search_filters(
         created_to=ct,
         topic=topic_v,
         subtopic=subtopic_v,
+        tags=tags_v,
     )
 
 
@@ -139,6 +162,16 @@ def filters_to_opensearch_bool(filters: SearchFilters | None) -> list[dict[str, 
         clauses.append({"terms": {"topics": [filters.topic]}})
     if filters.subtopic:
         clauses.append({"terms": {"subtopics": [filters.subtopic]}})
+    # 083 FR-201 — 태그 필터. 색인 시점(``asset_to_doc``)이 ``keywords_norm`` 에 넣은 키와 **같은
+    # 함수**(normalize_tag_key)로 맞춘다 — 두 쪽이 다른 규칙을 쓰면 필터가 아무것도 못 찾는다.
+    # terms 는 **값들의 OR** 이므로 태그 여럿을 고르면 "이 중 하나라도 가진 자산"이 남는다
+    # (083 spec §④ — AND 아님). 값을 정렬해 두어 고른 순서가 달라도 질의 바디가 같아진다
+    # (결정적·OS 요청 캐시 친화). 정규화 결과가 빈 키는 버리고, 남는 키가 없으면 **절 자체를
+    # 만들지 않는다** — 빈 terms 는 모든 문서를 배제해 결과가 통째로 사라진다.
+    if filters.tags:
+        tag_keys = sorted({k for k in (normalize_tag_key(t) for t in filters.tags) if k})
+        if tag_keys:
+            clauses.append({"terms": {"keywords_norm": tag_keys}})
     return clauses
 
 
