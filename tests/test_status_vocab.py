@@ -20,6 +20,7 @@ from pathlib import Path
 from src.domain.status_vocab import (
     AccessTier,
     GraphEdgeStatus,
+    MmSkillStatus,
     RegistryFieldStatus,
     RelationResolutionStatus,
 )
@@ -54,6 +55,12 @@ class StatusVocabSyncTest(unittest.TestCase):
             frozenset(("active", "inactive")),
         )
 
+    def test_mm_skill_status_matches_check(self):
+        self.assertEqual(
+            frozenset(MmSkillStatus),
+            frozenset(("active", "disabled")),
+        )
+
 
 class GraphEdgeStatusDdlTest(unittest.TestCase):
     """어휘를 **실제 DDL 파일과** 대조한다 — 위 테스트는 사람이 적은 사본끼리 비교할 뿐이다.
@@ -68,6 +75,14 @@ class GraphEdgeStatusDdlTest(unittest.TestCase):
         self.assertIsNotNone(m, "230 DDL 에서 status CHECK 목록을 찾지 못했다")
         ddl_values = frozenset(v.strip().strip("'") for v in m.group(1).split(","))
         self.assertEqual(ddl_values, frozenset(GraphEdgeStatus))
+
+    def test_mm_skill_ddl_check_list_matches_enum(self):
+        # v302 신설 어휘 — DDL CHECK 와 MmSkillStatus 를 파일 파싱으로 교차검증(규약: 동시 갱신).
+        sql = (_SQL_DIR / "302_mm_skill.sql").read_text(encoding="utf-8")
+        m = re.search(r"CHECK \(status IN \(([^)]*)\)\)", sql)
+        self.assertIsNotNone(m, "302 DDL 에서 status CHECK 목록을 찾지 못했다")
+        ddl_values = frozenset(v.strip().strip("'") for v in m.group(1).split(","))
+        self.assertEqual(ddl_values, frozenset(MmSkillStatus))
 
     def test_terminal_statuses_are_all_known_vocabulary(self):
         """종결 상태 집합이 어휘 밖을 가리키면 그 값으로 UPDATE 할 때 CHECK 위반이 난다.

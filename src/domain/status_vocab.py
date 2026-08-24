@@ -57,3 +57,10 @@ class RegistryFieldStatus(StrEnum):
 
     ACTIVE = "active"  # ingest ``validate_ext_meta`` · read ``fetch_access_tiers`` 대상.
     INACTIVE = "inactive"  # 비활성 — 레지스트리 조회·검증 제외(행 보존).
+
+
+class MmSkillStatus(StrEnum):
+    """``mm_skill.status`` (085 · v302) — 분류 스킬 활성 상태."""
+
+    ACTIVE = "active"  # 분류 배치(run_mm_classify) 대상.
+    DISABLED = "disabled"  # 중단 — 배치 제외(판정 이력 asset_mm_skill_label 은 보존).
