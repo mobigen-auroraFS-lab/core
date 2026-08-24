@@ -827,6 +827,37 @@ class TestEmbedEnableClipSettings(unittest.TestCase):
                 _build_settings("dev")
 
 
+class TestSearchTagFacetSettings(unittest.TestCase):
+    """083 T107(FR-103): 결과-스코프 태그 패싯 노출 설정 2키.
+
+    ``search_tag_facet_top_n``(기본 **12**) = 태그 목록에 보여줄 상위 개수,
+    ``search_tag_facet_min_count``(기본 **2**) = 노출 하한 건수(1건짜리 태그를 감춘다 — 실측상
+    태그의 83.8% 가 1건짜리라 감추지 않으면 목록이 파편으로 찬다).
+
+    ``_opt_int`` 선택 필드 패턴(EMBED_API_BATCH_SIZE 동형) — 미설정 시 기본값, 값은 환경변수로
+    조정 가능. **집계 함수의 동작만 바꾸며 검색 랭킹에는 영향이 없다**(패싯 표시 전용).
+    """
+
+    def test_defaults_when_unset(self) -> None:
+        # 미설정 → 상위 12·하한 2. _BACKEND_KEYS 가 비워 실행 환경과 격리.
+        with _env():
+            s = _build_settings("dev")
+        self.assertEqual(s.search.tag_facet_top_n, 12)
+        self.assertEqual(s.search.tag_facet_min_count, 2)
+
+    def test_env_override(self) -> None:
+        with _env(SEARCH_TAG_FACET_TOP_N="20", SEARCH_TAG_FACET_MIN_COUNT="1"):
+            s = _build_settings("dev")
+        self.assertEqual(s.search.tag_facet_top_n, 20)
+        self.assertEqual(s.search.tag_facet_min_count, 1)
+
+    def test_invalid_int_fail_fast(self) -> None:
+        # 정수 아님은 기동 시점에 즉시 실패 — 검색 요청 한복판에서 터지지 않게(_env_int_default 계약).
+        with _env(SEARCH_TAG_FACET_TOP_N="열둘"):
+            with self.assertRaises(ValueError):
+                _build_settings("dev")
+
+
 class TestFieldSpecsSSOT(unittest.TestCase):
     """069 US-E FR-E4 — 필드 명세 단일 출처(``_FIELD_SPECS``·그룹 포함).
 

@@ -68,6 +68,9 @@ class SearchConfig:
     # 044: 필드 evidence 기반 lexical rescue 게이트(런타임 on/off·관측). 임계·가중은 search_constants.
     evidence_rescue_enabled: bool
     evidence_debug: bool            # 044: per-hit debug meta opt-in(keep_reason·matched_queries)
+    # 083: 결과-스코프 태그 패싯 표시(랭킹 무영향 — 목록 표시 전용). 집계는 src/search/tag_facets.py.
+    tag_facet_top_n: int            # 태그 목록 상위 노출 개수(기본 12). 잘린 나머지는 has_more 로 알린다.
+    tag_facet_min_count: int        # 노출 하한 건수(기본 2 = 1건짜리 태그 감춤 — 실측 83.8%가 1건짜리)
 
 
 @dataclass(frozen=True)
@@ -702,6 +705,8 @@ _FIELD_SPECS: tuple[_Spec, ...] = (
     _Spec("search", "os_bm25_operator", "SEARCH_OS_BM25_OPERATOR", lambda _k: _resolve_os_bm25_operator()),
     _Spec("search", "evidence_rescue_enabled", "SEARCH_EVIDENCE_RESCUE_ENABLED", _opt_bool(search_constants.SEARCH_EVIDENCE_RESCUE_ENABLED_DEFAULT)),
     _Spec("search", "evidence_debug", "SEARCH_EVIDENCE_DEBUG", _opt_bool(search_constants.SEARCH_EVIDENCE_DEBUG_DEFAULT)),
+    _Spec("search", "tag_facet_top_n", "SEARCH_TAG_FACET_TOP_N", _opt_int(12)),
+    _Spec("search", "tag_facet_min_count", "SEARCH_TAG_FACET_MIN_COUNT", _opt_int(2)),
     # ── opensearch(인프라·색인 빌더 교정) ──
     _Spec("opensearch", "url", "OPENSEARCH_URL", _opt_str("http://localhost:9200")),
     _Spec("opensearch", "index", "OPENSEARCH_INDEX", _opt_str("assets")),

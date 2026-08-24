@@ -49,6 +49,10 @@ def _cfg(**flat):
         os_bm25_operator=search_constants.OS_BM25_OPERATOR_DEFAULT,
         evidence_rescue_enabled=search_constants.SEARCH_EVIDENCE_RESCUE_ENABLED_DEFAULT,
         evidence_debug=search_constants.SEARCH_EVIDENCE_DEBUG_DEFAULT,
+        # 083: 태그 패싯 표시 설정. SearchTuning 이 읽지 않으므로(랭킹 무영향) 이 fake 에서는
+        # 값이 쓰이지 않는다 — 필드가 필수라 settings 기본값과 같은 수를 채운다.
+        tag_facet_top_n=12,
+        tag_facet_min_count=2,
     )
     index = "assets"
     over: dict = {}
