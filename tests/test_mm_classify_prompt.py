@@ -39,6 +39,7 @@ def _skill(selection: str = "multi") -> Any:
     return load_skill(
         {
             "skill": "샘플 분류",
+            "skill_code": "sample_skill",  # 필수 키(구현확정 G1) — 프롬프트에는 실리지 않는다.
             "version": 1,
             "policy": {"selection": selection, "unassigned": "해당없음", "max_labels": 30},
             "labels": [

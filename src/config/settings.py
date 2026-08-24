@@ -149,6 +149,16 @@ class TopicConfig:
 
 
 @dataclass(frozen=True)
+class MmClassifyConfig:
+    """분류 스킬(085) 배치 토글. 스킬 등록·판정은 적재와 분리된 별도 배치다."""
+
+    # 085: 분류 배치(파이프 run_mm_classify) 수행 여부. 기본 True — 스킬을 등록했는데 토글이 꺼져
+    # 판정 0건인 상태가 기본이면 원인 추적에 시간을 쓴다. 껐을 때는 **새 판정만 멈추고** 이미 쌓인
+    # 판정 행·색인은 보존된다(끄기 ≠ 삭제). 등록 CLI 는 경고로만 읽는다(등록 자체는 정상).
+    enabled: bool
+
+
+@dataclass(frozen=True)
 class PipelineSettings:
     """파이프라인 실행 설정. ``init_settings(profile)`` 이 한 번만 생성하며 이후 변경 불가(frozen).
 
@@ -176,6 +186,7 @@ class PipelineSettings:
     video: VideoConfig
     vlm: VlmConfig
     topic: TopicConfig
+    mm_classify: MmClassifyConfig
 
 
 _SETTINGS: PipelineSettings | None = None
@@ -655,6 +666,7 @@ _GROUP_CLASSES: dict[str, type] = {
     "video": VideoConfig,
     "vlm": VlmConfig,
     "topic": TopicConfig,
+    "mm_classify": MmClassifyConfig,
 }
 
 
@@ -762,6 +774,9 @@ _FIELD_SPECS: tuple[_Spec, ...] = (
     _Spec("vlm", "labels_score_min", "LABELS_SCORE_MIN", _opt_float(0.1)),
     # ── topic ──
     _Spec("topic", "canonicalize_enabled", "TOPIC_CANONICALIZE_ENABLED", _opt_bool(False)),
+    # ── mm_classify(085 분류 스킬) ──
+    # 기본 True = 등록된 활성 스킬이 있으면 배치가 돈다. 끄면 새 판정만 멈춘다(행·색인 보존).
+    _Spec("mm_classify", "enabled", "MM_CLASSIFY_ENABLED", _opt_bool(True)),
 )
 
 

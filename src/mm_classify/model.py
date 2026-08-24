@@ -102,9 +102,10 @@ class ClassificationSkill:
     version: int
     policy: SkillPolicy
     labels: tuple[SkillLabel, ...]
-    # DB PK(``mm_skill.skill_code``)로 쓸 코드. spec §1 설정 예시에는 없는 키라 **선택**이다 —
-    # 없으면 ``None`` 이고, 등록 경로(T107)가 값을 정해 준다. 있으면 코드 문법을 검사한다.
-    skill_code: str | None = None
+    # DB 자연키(``mm_skill.skill_code``)·OS 패싯 키(``"스킬코드/라벨코드"``)·API 파라미터로 그대로
+    # 나가는 코드. **필수**다(구현확정 G1) — 등록은 preview→apply 2단계이고 그 사이 재현의 단위가
+    # 파일 하나이므로, CLI 인자로 빼면 같은 파일이 다른 스킬로 등록될 수 있다.
+    skill_code: str
 
     @property
     def is_multi(self) -> bool:
@@ -385,8 +386,8 @@ def load_skill(raw: Mapping[str, Any]) -> ClassificationSkill:
     상한·이름 충돌을 판정할 수 있다.
 
     Args:
-        raw: 설정 dict. 필수 키는 ``skill``(스킬 표시명)·``version``(1 이상 정수)·``policy``·
-            ``labels``. 선택 키는 ``skill_code``(DB PK 로 쓸 코드 — 없으면 ``None``).
+        raw: 설정 dict. 필수 키는 ``skill``(스킬 표시명)·``skill_code``(DB 자연키 — 소문자 스네이크)·
+            ``version``(1 이상 정수)·``policy``·``labels``. 선택 키는 없다.
             모르는 키가 있으면 거부한다(오타 가드).
 
     Returns:
@@ -408,11 +409,10 @@ def load_skill(raw: Mapping[str, Any]) -> ClassificationSkill:
     version = _require_positive_int(skill, "version", where="(최상위)")
     policy = _parse_policy(skill["policy"])
     labels = _parse_labels(skill["labels"], policy=policy)
-    skill_code: str | None = None
-    if "skill_code" in skill:
-        skill_code = _require_code(
-            _require_text(skill, "skill_code", where="(최상위)"), where="(최상위).skill_code"
-        )
+    # 자연키는 필수다(구현확정 G1) — 없으면 어느 행으로 등록·개정할지 정할 수 없다.
+    skill_code = _require_code(
+        _require_text(skill, "skill_code", where="(최상위)"), where="(최상위).skill_code"
+    )
     return ClassificationSkill(
         name=name, version=version, policy=policy, labels=labels, skill_code=skill_code
     )
