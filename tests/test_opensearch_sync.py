@@ -17,6 +17,7 @@ from src.search.opensearch_sync import (
     build_index_body,
     clean_file_name,
     ensure_about_mapping,
+    ensure_keywords_norm_mapping,
     parse_vector,
     update_asset_about,
 )
@@ -617,6 +618,85 @@ class TestAboutField(unittest.TestCase):
         ensure_about_mapping(client, "assets")
         client.indices.put_mapping.assert_called_once_with(
             index="assets", body={"properties": {"about": {"type": "keyword"}}}
+        )
+
+
+class TestKeywordsNormField(unittest.TestCase):
+    """083 T104 — 태그 필터용 정규화 키 필드(``keywords_norm``)의 색인 표면.
+
+    왜 별 필드인가: 기존 ``keywords``(text·nori)는 형태소로 쪼개져 **정확 일치 필터**에 쓸 수 없다.
+    태그 필터는 "이 태그를 가진 자산만"을 정의상 100% 정확하게 골라야 하므로(083 spec §①),
+    표기 차이를 흡수한 키(``전통 음식``·``전통음식`` → ``전통음식``)를 keyword 로 따로 싣는다.
+    정규화는 **색인 시점 파이썬**에서 한다(ⓒ 방식 — OS normalizer 불사용).
+    """
+
+    def _row(self, keywords, **over):
+        row = {
+            "asset_id": "a1", "modality": "text", "domain_label": "general",
+            "fs_path": "/data/한식.txt",
+            "ext_meta": {"summary": "한식 소개", "keywords": keywords},
+            "emb": "[0.1,0.2]",
+        }
+        row["ext_meta"].update(over.pop("ext_meta", {}))
+        row.update(over)
+        return row
+
+    def test_mapping_has_keywords_norm_keyword(self) -> None:
+        # 정확 일치·terms 필터용이라 분석기 없는 keyword 여야 한다(text 면 토큰이 쪼개져 필터 불가).
+        props = build_index_body()["mappings"]["properties"]
+        self.assertEqual(props["keywords_norm"], {"type": "keyword"})
+
+    def test_existing_keywords_field_unchanged(self) -> None:
+        # 회귀 가드: 기존 keywords(text·nori) 매핑은 손대지 않는다(BM25 경로 불변).
+        props = build_index_body()["mappings"]["properties"]
+        self.assertEqual(props["keywords"], {"type": "text", "analyzer": "nori_user"})
+
+    def test_doc_carries_normalized_keys_in_order(self) -> None:
+        # 표기 차이(공백·대소문자)를 흡수한 키를 **첫 등장 순서대로** 싣는다(dedup).
+        doc = asset_to_doc(self._row(["전통 음식", "전통음식", "Kimchi", "kimchi"]), channel="st")
+        self.assertEqual(doc["keywords_norm"], ["전통음식", "kimchi"])
+
+    def test_original_keywords_field_preserved(self) -> None:
+        # 원문 keywords 는 그대로 — 표시 라벨(083 §⑥)·BM25 가 원문을 쓴다.
+        doc = asset_to_doc(self._row(["전통 음식", "전통음식"]), channel="st")
+        self.assertEqual(doc["keywords"], ["전통 음식", "전통음식"])
+
+    def test_blank_keys_dropped(self) -> None:
+        # 공백뿐인 태그는 키가 되지 못한다(정규화 결과 "" → 배제).
+        doc = asset_to_doc(self._row(["  ", "　", "자연"]), channel="st")
+        self.assertEqual(doc["keywords_norm"], ["자연"])
+
+    def test_field_omitted_when_no_keywords(self) -> None:
+        # 무키워드 자산은 **필드 자체를 생략**한다(기존 문서 형상 불변 · topics 3필드와 같은 관례).
+        doc = asset_to_doc(self._row([]), channel="st")
+        self.assertNotIn("keywords_norm", doc)
+
+    def test_field_omitted_when_ext_meta_missing(self) -> None:
+        row = {
+            "asset_id": "a2", "modality": "text", "domain_label": "general",
+            "fs_path": "/x.txt", "ext_meta": None, "emb": "[0.1]",
+        }
+        self.assertNotIn("keywords_norm", asset_to_doc(row, channel="st"))
+
+    def test_field_omitted_when_all_keys_blank(self) -> None:
+        # 태그가 있어도 전부 공백이면 실을 키가 없다 → 생략(빈 배열 색인 금지).
+        doc = asset_to_doc(self._row(["  ", ""]), channel="st")
+        self.assertNotIn("keywords_norm", doc)
+
+    def test_non_list_keywords_omits_field(self) -> None:
+        # 스키마 위반(문자열 하나)이면 기존 keywords 처리와 동형으로 방어 — 글자 단위 순회 금지.
+        doc = asset_to_doc(self._row("wrong"), channel="st")
+        self.assertEqual(doc["keywords"], [])
+        self.assertNotIn("keywords_norm", doc)
+
+    def test_ensure_keywords_norm_mapping_put_mapping(self) -> None:
+        # 이미 만들어진 인덱스에 필드를 더한다(put_mapping 은 멱등·재색인 없이 매핑만 확장).
+        from unittest.mock import MagicMock
+
+        client = MagicMock()
+        ensure_keywords_norm_mapping(client, "assets")
+        client.indices.put_mapping.assert_called_once_with(
+            index="assets", body={"properties": {"keywords_norm": {"type": "keyword"}}}
         )
 
 

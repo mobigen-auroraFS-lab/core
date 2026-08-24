@@ -28,6 +28,7 @@ from src.config.embedding_constants import FIX_EMBEDDING_DIMENSION
 from src.config.filename_util import basename_of
 from src.config.search_constants import NORI_USER_WORDS_DEFAULT
 from src.search.filter_index_fields import build_filter_index_fields
+from src.search.tag_facets import normalize_tag_key
 
 # ── 색인 대상 조회 SQL (읽기 전용 — PG 는 건드리지 않는다) ──
 # 자산 하나를 한 행으로 만든다: 메타 + **청크 임베딩의 평균**(자산당 1벡터).
@@ -230,6 +231,13 @@ def build_index_body(
                 "fs_uri": {"type": "keyword"},
                 "summary": {"type": "text", "analyzer": "nori_user"},
                 "keywords": {"type": "text", "analyzer": "nori_user"},
+                # 083 T104 — 태그 필터·패싯용 **정규화 키**(keyword·정확 일치). 위 ``keywords``
+                # (text·nori)는 형태소로 쪼개져 "이 태그를 가진 자산만" 을 못 고른다(terms 불가).
+                # 그래서 표기 차이를 흡수한 키(``전통 음식``·``전통음식`` → ``전통음식``)를 색인
+                # 시점 파이썬(``normalize_tag_key``)으로 만들어 따로 싣는다 — OS normalizer 를 쓰지
+                # 않는 이유는 icu 플러그인 미설치 실측(083 spec §① ⓒ)이고, 필터 값도 **같은 함수**를
+                # 거쳐야 키가 갈라지지 않는다. 분석기 없는 keyword 라 랭킹(BM25)에는 기여하지 않는다.
+                "keywords_norm": {"type": "keyword"},
                 "labels": {"type": "keyword"},
                 # 065 자기주제 — 자산 자기주제 정본(fetch_asset_topic)을 색인한 값(관계-이웃 투영 은퇴).
                 # 패싯·정확필터용 keyword(terms)만 색인한다. BM25 관련도 보강(topics_text)은
@@ -405,9 +413,13 @@ def asset_to_doc(
         noise_patterns: 파일명 정제용 잡음 정규식(설정에서 주입).
         topics: 자기주제 정본 리스트. ``None``·빈 리스트면 주제 3필드를 **아예 넣지 않는다**.
 
+    ``keywords_norm``(083)은 원문 ``keywords`` 를 표기 정규화한 키 배열이다(태그 필터·패싯 전용·
+    keyword). **키가 하나도 없으면 필드를 넣지 않는다**(무키워드 자산의 문서 형상 불변).
+
     Returns:
         색인용 문서 dict. **0-노름 임베딩이면 ``embedding`` 필드를 생략**한다 — 코사인 kNN 이
         거부하는 값이라, 색인 자체를 실패시키는 대신 그 자산을 BM25 로만 찾히게 둔다.
+        태그 키가 없으면 ``keywords_norm`` 도 생략한다(같은 "필드 생략" 관례).
     """
     _ = channel  # resync SQL·call-site 호환 — 문서 필드 아님(단일 active channel 인덱스).
     ext = row.get("ext_meta") or {}
@@ -431,6 +443,16 @@ def asset_to_doc(
         # amatch 만 비활성(kmatch·fail-safe 는 동작)이라 백필 전에도 안전.
         "about": [str(a) for a in (ext.get("about") or [])],
     }
+    # 083 T104 — 태그 필터용 정규화 키. 원문 ``keywords`` 는 위에서 그대로 싣고(표시·BM25),
+    # 여기서는 표기 차이를 흡수한 키만 따로 만든다. ``_dedup_in_order`` 가 **정규화 결과가 빈
+    # 문자열인 태그(공백뿐)를 걸러 주고**(빈 값 스킵) 첫 등장 순서를 보존한 채 중복을 없앤다.
+    # 키가 하나도 없으면 **필드를 아예 넣지 않는다** — 주제 3필드(065)와 같은 관례로, 무키워드
+    # 자산의 문서 형상을 지금과 똑같이 유지한다(빈 배열을 색인하면 문서가 달라진다).
+    # ``str(k)`` 는 위 원문 필드와 **같은 변환**이다(문자열 아닌 값도 같은 방식으로 문자열화) —
+    # 여기서만 다르게 걸러내면 화면 패싯(원문에서 센 건수)과 필터(이 키)가 어긋난다(SC-02).
+    keywords_norm = _dedup_in_order(normalize_tag_key(str(k)) for k in keywords)
+    if keywords_norm:
+        doc["keywords_norm"] = keywords_norm
     # 영벡터(퇴화 임베딩 — 빈 STT 등)는 cosinesimil knn 이 거부하므로 embedding 필드를 **생략**한다.
     # 해당 자산은 텍스트(BM25)로만 검색되고 벡터 검색 대상에서만 빠진다(색인 실패 대신 우아한 처리).
     vec = parse_vector(row["emb"])
@@ -735,6 +757,24 @@ def ensure_about_mapping(client: Any, index: str) -> None:
         index: 대상 인덱스.
     """
     client.indices.put_mapping(index=index, body={"properties": {"about": {"type": "keyword"}}})
+
+
+def ensure_keywords_norm_mapping(client: Any, index: str) -> None:
+    """기존 인덱스에 ``keywords_norm``(keyword) 매핑을 추가한다(083 T104 · ``ensure_about_mapping`` 동형).
+
+    새 인덱스는 ``build_index_body`` 가 이미 포함하므로, 이 함수는 **이미 돌고 있는 인덱스에 1회**
+    호출한다. ``put_mapping`` 은 없는 필드를 더하기만 하므로 멱등이고 기존 문서를 건드리지 않는다 —
+    다만 **이 필드의 값은 재색인해야 채워진다**(색인 시점 계산 필드이므로. 083 T108 · 사람이 시점을 정한다).
+
+    **OpenSearch 매핑을 바꾼다**(문서 재색인은 이 함수가 하지 않는다).
+
+    Args:
+        client: OpenSearch 클라이언트.
+        index: 대상 인덱스.
+    """
+    client.indices.put_mapping(
+        index=index, body={"properties": {"keywords_norm": {"type": "keyword"}}}
+    )
 
 
 def _bulk_actions(index: str, docs: Iterable[dict[str, Any]]) -> Iterator[dict[str, Any]]:
