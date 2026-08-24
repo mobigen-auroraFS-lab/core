@@ -43,6 +43,9 @@ def _scheme(**over: Any) -> dict[str, Any]:
     """
     base: dict[str, Any] = {
         "skill": "샘플 분류",
+        # skill_code 는 **필수 키**다(구현확정 G1) — preview→apply 가 이 파일 하나로 재현돼야 하고,
+        # 스킬명이 한국어라 코드를 자동 파생할 수도 없다.
+        "skill_code": "sample_skill",
         "version": 1,
         "policy": {"selection": "multi", "unassigned": "해당없음", "max_labels": 30},
         "labels": [
@@ -146,14 +149,22 @@ class TestLoadSkillHappyPath(unittest.TestCase):
         self.assertEqual(load_skill(_scheme()), load_skill(_scheme()))
 
 
-class TestSkillCodeOptional(unittest.TestCase):
-    """``skill_code``(DB PK)는 spec §1 예시에 없다 — 있으면 검증하고 없으면 ``None``."""
+class TestSkillCodeRequired(unittest.TestCase):
+    """``skill_code``(자연키·DB 행 식별)는 **필수 키**다(구현확정 G1 · 2026-08-24).
 
-    def test_없으면_None(self) -> None:
-        self.assertIsNone(load_skill(_scheme()).skill_code)
+    왜 필수로 올렸나: 등록은 ``--preview`` 로 확인한 그 파일이 ``--apply`` 로 그대로 등록돼야
+    하는 2단계 절차다(spec §3). 코드를 CLI 인자로 빼면 파일만으로 재현되지 않고(같은 파일이 다른
+    스킬로 등록될 수 있다), 스킬명이 한국어라 코드를 기계적으로 파생할 수도 없다.
+    """
 
     def test_있으면_담는다(self) -> None:
         self.assertEqual(load_skill(_scheme(skill_code="food_content")).skill_code, "food_content")
+
+    def test_없으면_거부한다(self) -> None:
+        scheme = _scheme()
+        del scheme["skill_code"]
+        with self.assertRaises(SkillConfigError):
+            load_skill(scheme)
 
     def test_문법_위반은_거부(self) -> None:
         with self.assertRaises(SkillConfigError):

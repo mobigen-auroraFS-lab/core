@@ -858,6 +858,41 @@ class TestSearchTagFacetSettings(unittest.TestCase):
                 _build_settings("dev")
 
 
+class TestMmClassifyEnabledSettings(unittest.TestCase):
+    """085 T107 — 분류 스킬 배치 토글 ``mm_classify.enabled``(env ``MM_CLASSIFY_ENABLED``).
+
+    기본 **True**: 스킬을 등록해 뒀는데 토글이 꺼져 있어 판정이 0건인 상태가 기본이면, "왜 패싯이
+    비었나"를 매번 다시 조사하게 된다. 반대로 껐을 때는 판정 배치만 멈추고 **이미 쌓인 판정 행·색인은
+    그대로 남는다**(끄는 것은 새 판정을 만들지 않는다는 뜻일 뿐 — 데이터를 지우지 않는다).
+
+    소비처는 분류 배치(파이프 ``run_mm_classify`` · 085 T110)이고, 코어 등록 CLI 는 이 값을 **경고로만**
+    읽는다(꺼진 상태에서도 등록 자체는 정상 — 먼저 등록하고 나중에 켜는 순서가 실제 운영 순서다).
+    ``_env_bool_default`` 선택 필드 패턴(063/058 동형)이라 불리언 형식 오류만 fail-fast.
+    """
+
+    def test_default_on_when_unset(self) -> None:
+        # 미설정 → 기본 True. _BACKEND_KEYS 가 비워 실행 환경과 격리.
+        with _env():
+            s = _build_settings("dev")
+        self.assertIs(s.mm_classify.enabled, True)
+
+    def test_env_override_false(self) -> None:
+        with _env(MM_CLASSIFY_ENABLED="false"):
+            s = _build_settings("dev")
+        self.assertIs(s.mm_classify.enabled, False)
+
+    def test_env_override_true_explicit(self) -> None:
+        with _env(MM_CLASSIFY_ENABLED="1"):
+            s = _build_settings("dev")
+        self.assertIs(s.mm_classify.enabled, True)
+
+    def test_invalid_bool_fail_fast(self) -> None:
+        # 오타를 False 로 조용히 해석하면 배치가 꺼진 줄 모르고 판정 0건을 의심하게 된다.
+        with _env(MM_CLASSIFY_ENABLED="maybe"):
+            with self.assertRaises(ValueError):
+                _build_settings("dev")
+
+
 class TestFieldSpecsSSOT(unittest.TestCase):
     """069 US-E FR-E4 — 필드 명세 단일 출처(``_FIELD_SPECS``·그룹 포함).
 

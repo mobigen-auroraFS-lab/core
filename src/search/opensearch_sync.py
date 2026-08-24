@@ -27,6 +27,10 @@ from typing import Any
 from src.config.embedding_constants import FIX_EMBEDDING_DIMENSION
 from src.config.filename_util import basename_of
 from src.config.search_constants import NORI_USER_WORDS_DEFAULT
+
+# 085 — 미부여(해당없음) 라벨 코드의 단일 출처. 패싯 축에서 제외할 값이라 문자열을 여기 다시
+# 적지 않고 정본을 가져온다(값이 갈리면 "해당없음"이 축에 새어 나온다).
+from src.mm_classify.model import UNASSIGNED_LABEL_CODE
 from src.search.filter_index_fields import build_filter_index_fields
 from src.search.tag_facets import normalize_tag_key
 
@@ -251,6 +255,14 @@ def build_index_body(
                 # 073 aboutness 개체 — 적재시 LLM 1회로 확정한 "이 자산이 무엇에 관한 것인가" 명사
                 # 1~3개(ext_meta['about']). 검색 OR-증거 필터(about_or_filter)의 매칭 소스(랭킹 미반영).
                 "about": {"type": "keyword"},
+                # 085 T106 — 분류 스킬 판정 라벨. 키는 ``"스킬코드/라벨코드"``(``skill_label_key``)로
+                # 스킬 소속을 함께 담는다 — 여러 스킬의 라벨이 한 필드에 실리므로 소속을 잃으면
+                # 축이 뒤섞인다(스킬 A 의 recipe 와 스킬 B 의 recipe 는 다른 것).
+                # 패싯·terms 필터 전용 keyword(랭킹 미반영 · topics/keywords_norm 과 같은 결).
+                # 🔴 이 필드는 **적재 경로가 채우지 않는다** — 판정은 별도 배치(085 T110)이므로
+                # 색인 시점에는 판정이 없다. 배치가 ``update_asset_mm_skill_labels`` 로 부분 갱신한다
+                # (기존 파이프라인 변경 0 원칙 — ``asset_to_doc`` 무접촉).
+                "mm_skill_labels": {"type": "keyword"},
                 "filter_kw": {
                     "properties": {
                         "file_ext": {"type": "keyword"},
@@ -382,6 +394,54 @@ def _topics_doc_fields(topics: list[dict[str, Any]]) -> dict[str, Any]:
             _topic_pair(t.get("topic_ko"), t.get("subtopic_ko")) for t in topics
         ),
     }
+
+
+# ── 085 분류 스킬 라벨 키(``mm_skill_labels``) ────────────────────────────────
+# 구분자 ``/`` 를 쓰는 근거: 스킬·라벨 코드는 둘 다 ``^[a-z][a-z0-9_]{0,99}$``(model.``_CODE_RE``)라
+# ``/`` 를 포함할 수 없다 → 충돌 0. **파싱 계약: 첫 ``/`` 로만 분할한다**(``split("/", 1)``) —
+# 소비처(서비스 ``skill_label=스킬코드/라벨코드`` 파라미터 · spec §6)가 같은 규칙을 쓴다.
+SKILL_LABEL_KEY_SEP = "/"
+
+
+def skill_label_key(skill_code: Any, label_code: Any) -> str:
+    """``(스킬코드, 라벨코드)`` → OS 색인·필터 키 한 문자열(순수·결정적).
+
+    Args:
+        skill_code: 스킬 자연키(``mm_skill.skill_code``).
+        label_code: 판정 라벨 코드(``asset_mm_skill_label.label_code``).
+
+    Returns:
+        ``"스킬코드/라벨코드"``. **한쪽이라도 비면 빈 문자열** — 반쪽 키(``"sk_a/"``)는 어떤 필터도
+        맞히지 못하는 쓰레기라 만들지 않고, 호출부의 ``_dedup_in_order`` 가 빈 값을 걸러 낸다
+        (``_topic_pair`` 의 빈 대주제 처리와 동형).
+    """
+    sk = str(skill_code) if skill_code else ""
+    lb = str(label_code) if label_code else ""
+    if not sk or not lb:
+        return ""
+    return f"{sk}{SKILL_LABEL_KEY_SEP}{lb}"
+
+
+def mm_skill_label_keys(rows: Iterable[dict[str, Any]]) -> list[str]:
+    """판정 행들 → ``mm_skill_labels`` 색인 값(순수·결정적).
+
+    🔴 **미부여(``unassigned``) 라벨은 키에 넣지 않는다.** DB 에는 "판정했고 해당 없음"이라는 이력
+    으로 남지만(spec §2), 패싯 축에 "해당없음 N건"을 띄우는 것은 기본 노출 규칙이 아니다(spec §6).
+    조용한 필터링이 아니라 **명시된 노출 정책**이며, 그래서 그 판단을 이 한 곳에만 둔다.
+
+    Args:
+        rows: ``[{skill_code, label_code}]`` — ``asset_mm_skill_label`` 조회 행 모양. 자산 하나의
+            **여러 스킬·여러 라벨**이 섞여 들어올 수 있다(multi 정책).
+
+    Returns:
+        키 목록 — 입력 순서를 보존한 채 중복만 제거한다(정렬하지 않는다 · ``_dedup_in_order``
+        관례). 실을 키가 없으면 빈 리스트다(호출부가 빈 값으로 덮어써 옛 라벨을 지운다).
+    """
+    return _dedup_in_order(
+        skill_label_key(r.get("skill_code"), r.get("label_code"))
+        for r in rows
+        if r.get("label_code") != UNASSIGNED_LABEL_CODE
+    )
 
 
 def asset_to_doc(
@@ -774,6 +834,55 @@ def ensure_keywords_norm_mapping(client: Any, index: str) -> None:
     """
     client.indices.put_mapping(
         index=index, body={"properties": {"keywords_norm": {"type": "keyword"}}}
+    )
+
+
+def update_asset_mm_skill_labels(
+    client: Any, index: str, asset_id: Any, keys: list[str]
+) -> None:
+    """자산 문서의 ``mm_skill_labels`` 필드만 부분 갱신한다(085 T106 · 전체 재색인 아님).
+
+    분류 배치(085 T110)가 판정 뒤 이 seam 으로 색인을 맞춘다. ``update_asset_topics``·
+    ``update_asset_about`` 과 **같은 방식**(부분 문서 ``body={"doc": …}``)이라 문서의 다른 필드·
+    임베딩은 건드리지 않는다.
+
+    🔴 **빈 리스트도 그대로 실어 보낸다.** 필드를 생략하면 이전 판정의 라벨이 색인에 남아 패싯에서
+    계속 보인다 — 스킬을 중단(``disabled``)했거나 개정으로 라벨이 사라졌을 때 그 잔재를 지우는 것이
+    이 함수의 절반이다(``update_asset_topics`` 와 같은 이유로 전체문서 색인과 의도적으로 다르다:
+    ``asset_to_doc`` 은 이 필드를 아예 넣지 않는다).
+
+    **OpenSearch 에 쓴다**(부분 갱신).
+
+    Args:
+        client: OpenSearch 클라이언트.
+        index: 대상 인덱스.
+        asset_id: 갱신할 자산.
+        keys: ``mm_skill_label_keys`` 가 만든 ``"스킬코드/라벨코드"`` 목록. **빈 리스트를 주면 그
+            자산의 스킬 라벨을 전부 지운다**(의도적 동작).
+    """
+    client.update(
+        index=index,
+        id=str(asset_id),
+        body={"doc": {"mm_skill_labels": [str(k) for k in keys]}},
+    )
+
+
+def ensure_mm_skill_labels_mapping(client: Any, index: str) -> None:
+    """기존 인덱스에 ``mm_skill_labels``(keyword) 매핑을 추가한다(085 T106 · 083 동형).
+
+    새 인덱스는 ``build_index_body`` 가 이미 포함하므로, 이 함수는 **이미 돌고 있는 인덱스에 1회**
+    호출한다. ``put_mapping`` 은 없는 필드를 더하기만 하므로 멱등이고 기존 문서를 건드리지 않는다 —
+    값은 분류 배치의 부분 갱신이 채우므로 **재색인이 필요 없다**(083 ``keywords_norm`` 과 달리 색인
+    시점 계산 필드가 아니다).
+
+    **OpenSearch 매핑을 바꾼다**(문서는 건드리지 않는다).
+
+    Args:
+        client: OpenSearch 클라이언트.
+        index: 대상 인덱스.
+    """
+    client.indices.put_mapping(
+        index=index, body={"properties": {"mm_skill_labels": {"type": "keyword"}}}
     )
 
 

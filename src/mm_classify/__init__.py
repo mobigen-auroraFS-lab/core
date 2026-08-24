@@ -16,14 +16,17 @@
        ⚠️ 스킬을 여러 개 섞지 않는다 — 스킬마다 별도 호출(격리·버전 분리).
     3. ``judge_asset_labels``: LLM 단일 seam 경유 판정 → **성공/실패를 명시 구분**해 반환(``judge``).
        실패를 "해당없음"으로 뭉개지 않는 것이 이 패키지의 핵심 계약이다(spec §4).
-    4. (후속 T105) ``persist``: 판정 결과를 ``asset_mm_skill_label`` 에 영속 — 행 존재 = 판정 이력.
+    4. ``persist``: 스킬 등록·개정(``upsert_skill``)과 판정 행 교체(``replace_asset_labels``)·대상
+       선별(``fetch_pending_asset_ids``). **행 존재 = 판정 이력**이며 실패는 행을 남기지 않는다.
+       정본은 DB 등록 행이라 배치는 파일이 아니라 행에서 스킬을 복원한다(``skill_from_row``).
 
 의존성
     ``model``·``prompt``·``judge`` 는 표준 라이브러리만 쓰는 순수 모듈이다. LLM 클라이언트
     (``openai``)는 ``judge`` 가 **호출 시점에** import 하므로 이 패키지를 불러오는 것만으로
-    무거운 의존성이 딸려오지 않는다(``src.relations`` 지연 로드 관례와 같다).
+    무거운 의존성이 딸려오지 않는다(``src.relations`` 지연 로드 관례와 같다). ``persist`` 는
+    psycopg(코어 런타임 필수 의존)만 쓰며 커넥션은 호출부가 준다 — 풀을 열지 않는다.
 
-설계 배경: `specs/085-classification-skill`(spec §1~§4 · plan §파일 배치)
+설계 배경: `specs/085-classification-skill`(spec §1~§5 · plan §파일 배치)
 """
 
 from __future__ import annotations
@@ -44,9 +47,22 @@ from src.mm_classify.model import (
     SkillPolicy,
     load_skill,
 )
+from src.mm_classify.persist import (
+    DECIDED_BY_LLM,
+    SkillPersistError,
+    fetch_active_skills,
+    fetch_asset_label_rows,
+    fetch_asset_materials,
+    fetch_pending_asset_ids,
+    replace_asset_labels,
+    skill_declaration,
+    skill_from_row,
+    upsert_skill,
+)
 from src.mm_classify.prompt import PROMPT_VERSION, build_classification_prompt
 
 __all__ = [
+    "DECIDED_BY_LLM",
     "DEFAULT_MAX_LABELS",
     "PROMPT_VERSION",
     "SELECTION_MODES",
@@ -56,9 +72,18 @@ __all__ = [
     "SkillConfigError",
     "SkillJudgement",
     "SkillLabel",
+    "SkillPersistError",
     "SkillPolicy",
     "build_classification_prompt",
+    "fetch_active_skills",
+    "fetch_asset_label_rows",
+    "fetch_asset_materials",
+    "fetch_pending_asset_ids",
     "interpret_response",
     "judge_asset_labels",
     "load_skill",
+    "replace_asset_labels",
+    "skill_declaration",
+    "skill_from_row",
+    "upsert_skill",
 ]

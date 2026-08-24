@@ -700,5 +700,135 @@ class TestKeywordsNormField(unittest.TestCase):
         )
 
 
+class TestMmSkillLabelsField(unittest.TestCase):
+    """085 T106 — 분류 스킬 판정의 색인 표면(``mm_skill_labels``).
+
+    왜 별 필드이고 왜 keyword 인가: 스킬 축은 주제·태그와 나란한 **패싯 축**이라 "이 라벨을 가진
+    자산만" 을 정확히 골라야 한다(terms 필터). 분석기가 붙은 text 면 토큰이 쪼개져 필터가 성립하지
+    않는다(083 ``keywords_norm`` 과 같은 이유).
+
+    왜 키가 ``"스킬코드/라벨코드"`` 한 문자열인가: 여러 스킬의 라벨이 한 필드에 함께 실리므로
+    (스킬 A 의 ``recipe`` 와 스킬 B 의 ``recipe`` 는 다른 것) 스킬 소속을 잃으면 축이 뒤섞인다.
+    ``_topic_pair`` 의 ``"topic>subtopic"`` 과 같은 결의 합성 키다.
+
+    🔴 이 필드는 **적재 경로를 건드리지 않는다**. 판정은 별도 배치(T110)라서 색인 시점에는 아직
+    판정이 없다 — 그래서 ``asset_to_doc``(전체 문서)에는 넣지 않고 배치가 부분 갱신으로만 채운다
+    (085 "기존 파이프라인 변경 0" 원칙).
+    """
+
+    def test_mapping_has_mm_skill_labels_keyword(self) -> None:
+        props = build_index_body()["mappings"]["properties"]
+        self.assertEqual(props["mm_skill_labels"], {"type": "keyword"})
+
+    def test_existing_facet_fields_unchanged(self) -> None:
+        # 회귀 가드 — 기존 축(주제·태그·라벨) 매핑은 손대지 않는다(랭킹·필터 불변).
+        props = build_index_body()["mappings"]["properties"]
+        self.assertEqual(props["keywords"], {"type": "text", "analyzer": "nori_user"})
+        self.assertEqual(props["keywords_norm"], {"type": "keyword"})
+        self.assertEqual(props["topics"], {"type": "keyword"})
+        self.assertEqual(props["topic_pairs"], {"type": "keyword"})
+        self.assertEqual(props["labels"], {"type": "keyword"})
+
+    def test_key_joins_skill_and_label_codes(self) -> None:
+        from src.search.opensearch_sync import skill_label_key
+
+        self.assertEqual(skill_label_key("food_content", "recipe"), "food_content/recipe")
+
+    def test_keys_from_rows_preserve_order_and_dedup(self) -> None:
+        from src.search.opensearch_sync import mm_skill_label_keys
+
+        rows = [
+            {"skill_code": "sk_b", "label_code": "beta"},
+            {"skill_code": "sk_a", "label_code": "alpha"},
+            {"skill_code": "sk_b", "label_code": "beta"},  # 중복
+        ]
+        self.assertEqual(mm_skill_label_keys(rows), ["sk_b/beta", "sk_a/alpha"])
+
+    def test_unassigned_label_is_not_indexed(self) -> None:
+        # "해당없음"은 판정 이력(DB 행)으로는 남지만 패싯 축에는 노출하지 않는다(spec §6 기본).
+        from src.mm_classify.model import UNASSIGNED_LABEL_CODE
+        from src.search.opensearch_sync import mm_skill_label_keys
+
+        rows = [
+            {"skill_code": "sk_a", "label_code": UNASSIGNED_LABEL_CODE},
+            {"skill_code": "sk_b", "label_code": "beta"},
+        ]
+        self.assertEqual(mm_skill_label_keys(rows), ["sk_b/beta"])
+
+    def test_keys_from_empty_rows(self) -> None:
+        from src.search.opensearch_sync import mm_skill_label_keys
+
+        self.assertEqual(mm_skill_label_keys([]), [])
+
+    def test_rows_missing_codes_are_skipped(self) -> None:
+        # 반쪽 키("sk_a/")는 필터에서 아무 것도 맞히지 못하는 쓰레기라 만들지 않는다.
+        from src.search.opensearch_sync import mm_skill_label_keys
+
+        rows = [
+            {"skill_code": "sk_a", "label_code": ""},
+            {"skill_code": None, "label_code": "beta"},
+            {"skill_code": "sk_c", "label_code": "gamma"},
+        ]
+        self.assertEqual(mm_skill_label_keys(rows), ["sk_c/gamma"])
+
+    def test_asset_to_doc_does_not_carry_skill_labels(self) -> None:
+        # 🔴 적재 경로 무변경 봉인 — 판정은 별도 배치이므로 전체 문서에는 이 필드가 없다.
+        row = {
+            "asset_id": "a1", "modality": "text", "domain_label": "general",
+            "fs_path": "/x.txt", "ext_meta": {"summary": "s", "keywords": ["가"]},
+            "emb": "[0.1]",
+        }
+        self.assertNotIn("mm_skill_labels", asset_to_doc(row, channel="st"))
+
+    def test_update_partial_doc(self) -> None:
+        from unittest.mock import MagicMock
+
+        from src.search.opensearch_sync import update_asset_mm_skill_labels
+
+        client = MagicMock()
+        update_asset_mm_skill_labels(client, "assets", "aid-1", ["sk_a/alpha", "sk_b/beta"])
+        client.update.assert_called_once_with(
+            index="assets",
+            id="aid-1",
+            body={"doc": {"mm_skill_labels": ["sk_a/alpha", "sk_b/beta"]}},
+        )
+
+    def test_empty_keys_overwrite_with_empty(self) -> None:
+        # 🔴 빈 리스트도 **그대로 실어 보낸다** — 필드를 생략하면 강등·비활성 스킬의 옛 라벨이
+        # 색인에 남아 패싯에서 계속 보인다(``update_asset_topics``·``update_asset_about`` 동형).
+        from unittest.mock import MagicMock
+
+        from src.search.opensearch_sync import update_asset_mm_skill_labels
+
+        client = MagicMock()
+        update_asset_mm_skill_labels(client, "assets", "aid-2", [])
+        client.update.assert_called_once_with(
+            index="assets", id="aid-2", body={"doc": {"mm_skill_labels": []}}
+        )
+
+    def test_asset_id_is_stringified(self) -> None:
+        import uuid
+        from unittest.mock import MagicMock
+
+        from src.search.opensearch_sync import update_asset_mm_skill_labels
+
+        client = MagicMock()
+        aid = uuid.UUID("018f0000-0000-7000-8000-0000000000a1")
+        update_asset_mm_skill_labels(client, "assets", aid, ["sk_a/alpha"])
+        self.assertEqual(client.update.call_args.kwargs["id"], str(aid))
+
+    def test_ensure_mm_skill_labels_mapping_put_mapping(self) -> None:
+        # 구 인덱스용 1회 호출(083 ``ensure_keywords_norm_mapping`` 동형·멱등).
+        from unittest.mock import MagicMock
+
+        from src.search.opensearch_sync import ensure_mm_skill_labels_mapping
+
+        client = MagicMock()
+        ensure_mm_skill_labels_mapping(client, "assets")
+        client.indices.put_mapping.assert_called_once_with(
+            index="assets", body={"properties": {"mm_skill_labels": {"type": "keyword"}}}
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
