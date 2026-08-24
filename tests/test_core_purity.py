@@ -22,6 +22,9 @@ _SRC = _ROOT / "src"
 _CORE_PKGS = {
     "config", "database", "llm", "embedders", "search",
     "relations", "topic", "registry", "domain", "file",
+    # 085 분류 스킬(순수 로직·LLM 단일 seam 경유) — 신규 코어 패키지는 여기 등재해야 봉인 대상이
+    # 된다(빠뜨리면 그 패키지의 cross-boundary 결합을 아무도 막지 않는다).
+    "mm_classify",
 }
 # 파이프라인 전용(코어 레포에 없어야 함) — 코어 폐쇄가 이 중 하나라도 포함하면 위반.
 _PIPELINE_ONLY = {
