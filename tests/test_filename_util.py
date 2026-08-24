@@ -39,6 +39,21 @@ class BasenameOfTest(unittest.TestCase):
         # 쿼리만 남아 앞이 비면 마지막 세그먼트로 폴백(기존 3벌 공통 ``or tail``).
         self.assertEqual(basename_of("http://h/?q=1"), "?q=1")
 
+    def test_local_path_hash_is_literal(self):
+        # 🔴 회귀 방지(2026-08-24 실사고): 유튜브 수집 파일명의 해시태그(#)를 URI 프래그먼트로
+        # 오인해 잘라내면, 재색인 시 file_name 이 통째로 비어 BM25 신호가 사라진다(9자산 실측).
+        # 로컬 경로(스킴 없음)의 # 과 ? 는 파일명 문자 그대로다.
+        self.assertEqual(
+            basename_of("/inbox/#식혜#전통식혜 (식혜).mp3"), "#식혜#전통식혜 (식혜).mp3"
+        )
+
+    def test_local_path_question_is_literal(self):
+        self.assertEqual(basename_of("/inbox/뭐지?.txt"), "뭐지?.txt")
+
+    def test_url_fragment_still_removed(self):
+        # URL(스킴 있음)에서는 종전대로 쿼리·프래그먼트를 제거한다.
+        self.assertEqual(basename_of("file:///v/a.mp4#frag"), "a.mp4")
+
     def test_asset_id_prefix_not_stripped(self):
         # basename_of 는 표시용 strip 을 하지 않는다(색인·원본 경로 보존).
         self.assertEqual(basename_of(f"/a/{_AID}__orig.txt"), f"{_AID}__orig.txt")
