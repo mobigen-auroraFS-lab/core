@@ -40,6 +40,22 @@ SELECTION_MODES = ("multi", "single")
 # 배포 전체에서 하나로 고정한다 — 스킬별로 다르면 "미부여 비율" 집계가 스킬마다 갈라진다.
 UNASSIGNED_LABEL_CODE = "unassigned"
 
+# 084 F05 — **타입 어휘 저장용 예약 skill_code**(spec §10). 개체 타입 5종(인물·장소·조직·작품·사건)의
+# 정의문을 담는 행이며, ``mm_skill`` 테이블을 **저장소로만** 빌려 쓴다(마이그레이션 0).
+MM_META_TYPE_SKILL_CODE = "mm_meta_type"
+
+# 🔴 **분류 배치가 집으면 안 되는 skill_code 집합**(엔진 격리 · spec §10 표).
+#   왜 필요한가: 085 배치는 ``mm_skill`` 의 active 행을 전부 집어 **자산마다 LLM 판정**을 돈다.
+#   그런데 위 어휘 행은 분류 대상이 **자산이 아니라 개체**이고, 판정도 별도 배치가 아니라 개체 추출과
+#   같은 호출에서 난다(문맥이 있어야 동음이의를 가르므로). 방어가 없으면 어휘를 등록하는 순간 전
+#   자산이 "인물/장소/…"로 분류되기 시작한다 — 쓰이지도 않는 판정에 LLM 비용이 들고 패싯 축이 오염된다.
+#   비유하면 창고를 같이 쓰는 것과 같은 기계를 쓰는 것의 차이다. 선반(테이블)은 나눠 써도, 남의 물건을
+#   내 컨베이어에 올리면 안 된다.
+#   같은 결의 선례: 관계 카탈로그의 ``PROMPT_EXCLUDED_KIND_CODES``(``src/relations/schema.py``) —
+#   ``mm_member`` 종류가 active 라는 이유로 LLM 관계 프롬프트에 실리던 문제를 같은 방식으로 막았다.
+#   기준을 한 집합으로 모아 두는 이유는 사본이 생기면 언젠가 한쪽만 고쳐지기 때문이다.
+NON_CLASSIFY_SKILL_CODES: frozenset[str] = frozenset({MM_META_TYPE_SKILL_CODE})
+
 # 코드 문법 — 소문자 스네이크. 문자 집합은 관계 ``kind_code``(``src/relations/schema.py``)와 같은
 # 규칙을 쓰고, 길이 상한 100 자는 그 컬럼(``relation_kind.kind_code VARCHAR(100)``) 관례를 따른다.
 # 코드는 DB PK·OpenSearch 패싯 키(``"스킬코드/라벨코드"``)·API 파라미터로 그대로 나가므로,
@@ -178,7 +194,9 @@ def _require_mapping(value: Any, *, where: str) -> Mapping[str, Any]:
     return value
 
 
-def _reject_unknown_keys(container: Mapping[str, Any], allowed: frozenset[str], *, where: str) -> None:
+def _reject_unknown_keys(
+    container: Mapping[str, Any], allowed: frozenset[str], *, where: str
+) -> None:
     """허용 키 밖의 키가 있으면 거부한다(오타 가드).
 
     Args:
@@ -310,8 +328,12 @@ def _parse_policy(raw: Any) -> SkillPolicy:
     # 미부여 라벨명은 필수다 — 없으면 "어디에도 해당 안 됨"을 표현할 수단이 사라져 판정이 억지
     # 배정으로 흐른다(파일럿 발견 2: 미부여가 정직하게 작동하는 것이 커버리지 갭을 드러낸다).
     unassigned = _require_text(policy, "unassigned", where="policy")
-    max_labels = _require_positive_int(policy, "max_labels", where="policy", default=DEFAULT_MAX_LABELS)
-    return SkillPolicy(selection=selection_raw.strip(), unassigned=unassigned, max_labels=max_labels)
+    max_labels = _require_positive_int(
+        policy, "max_labels", where="policy", default=DEFAULT_MAX_LABELS
+    )
+    return SkillPolicy(
+        selection=selection_raw.strip(), unassigned=unassigned, max_labels=max_labels
+    )
 
 
 def _parse_labels(raw: Any, *, policy: SkillPolicy) -> tuple[SkillLabel, ...]:
@@ -420,6 +442,8 @@ def load_skill(raw: Mapping[str, Any]) -> ClassificationSkill:
 
 __all__ = [
     "DEFAULT_MAX_LABELS",
+    "MM_META_TYPE_SKILL_CODE",
+    "NON_CLASSIFY_SKILL_CODES",
     "SELECTION_MODES",
     "UNASSIGNED_LABEL_CODE",
     "ClassificationSkill",

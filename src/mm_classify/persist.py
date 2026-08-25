@@ -39,6 +39,7 @@ from psycopg.rows import dict_row
 from src.database.ids import uuid7_str
 from src.domain.status_vocab import MmSkillStatus
 from src.mm_classify.model import (
+    NON_CLASSIFY_SKILL_CODES,
     UNASSIGNED_LABEL_CODE,
     ClassificationSkill,
     load_skill,
@@ -104,7 +105,8 @@ def skill_from_row(row: dict[str, Any]) -> ClassificationSkill:
     이유: 손 SQL·구버전 행이 섞여 들어와도 조용히 쓰지 않고 그 자리에서 드러나게 하려는 것이다.
 
     Args:
-        row: ``fetch_active_skills`` 형상의 행(``skill_code``·``name``·``version``·``policy``·``labels``).
+        row: ``fetch_active_skills`` 형상의 행(``skill_code``·``name``·``version``·
+            ``policy``·``labels``).
 
     Returns:
         복원된 ``ClassificationSkill``. ``version`` 은 **행의 값**이다(파일이 아니라 DB 카운터가
@@ -344,13 +346,22 @@ def fetch_active_skills(conn: Any) -> list[dict[str, Any]]:
 
     ``disabled`` 스킬은 판정 이력을 남긴 채 배치에서만 빠진다(행은 보존 · v302 주석).
 
+    🔴 **예약 코드는 제외한다**(``NON_CLASSIFY_SKILL_CODES`` — 현재 084 타입 어휘 ``mm_meta_type``
+    하나). 그 행은 ``mm_skill`` 을 **저장소로만** 빌려 쓰는 어휘이고 분류 대상이 자산이 아니라
+    개체다(spec 084 §10). 걸러 내지 않으면 어휘를 등록하는 순간 배치가 전 자산을 그 라벨로 판정한다.
+    걸러 내는 자리를 SQL 이 아니라 파이썬에 둔 이유 셋: ①대상이 한 줌(스킬 몇 행)이라 질의 최적화
+    이득이 없다 ②모의 커넥션 단위 테스트가 "그 행이 배치로 나가지 않는다"를 **행동으로** 봉인할 수
+    있다(SQL 문자열 검사보다 강하다) ③기존 질의·바인딩을 건드리지 않아 회귀 0 이다.
+    하위 조회(``fetch_asset_label_rows``)에 같은 가드를 두지 않은 것은, 라벨 행이 생기는 유일한 경로가
+    이 배치이고 그 배치가 여기서 이미 걸러지기 때문이다(행이 없으므로 조인 결과도 비어 있다).
+
     Args:
         conn: DB 커넥션.
 
     Returns:
         ``[{skill_id(str), skill_code, name, version(int), policy, labels, status}]`` —
         ``skill_code`` 오름차순. ``skill_id`` 는 문자열로 정규화한다(조회행 id → str 관례).
-        각 행은 ``skill_from_row`` 로 스킬 객체가 된다.
+        각 행은 ``skill_from_row`` 로 스킬 객체가 된다. 예약 코드 행은 포함되지 않는다.
     """
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
@@ -374,6 +385,7 @@ def fetch_active_skills(conn: Any) -> list[dict[str, Any]]:
             "status": str(r["status"]),
         }
         for r in rows
+        if str(r["skill_code"]) not in NON_CLASSIFY_SKILL_CODES
     ]
 
 
