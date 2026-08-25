@@ -42,6 +42,7 @@ from typing import Any
 
 from src.mm_classify.judge import judge_asset_labels
 from src.mm_classify.model import (
+    NON_CLASSIFY_SKILL_CODES,
     UNASSIGNED_LABEL_CODE,
     ClassificationSkill,
     SkillConfigError,
@@ -175,7 +176,8 @@ def sample_report(
             ``None``(기본)이면 운영 경로 ``judge_asset_labels``(LLM 단일 seam·temperature=0)를 쓴다.
 
     Returns:
-        ``{n_sample, n_ok, n_failed, n_unassigned, unassigned_ratio, by_label, examples, failures}``.
+        ``{n_sample, n_ok, n_failed, n_unassigned, unassigned_ratio, by_label,
+        examples, failures}``.
         ``by_label`` 은 설정 라벨 순서 + 마지막에 미부여이며(multi 라 **합이 판정 수보다 클 수 있다**),
         ``failures`` 는 사유 문자열별 건수다.
     """
@@ -304,7 +306,9 @@ def format_apply_lines(result: dict[str, Any]) -> list[str]:
     code = result["skill_code"]
     version = result["version"]
     if action == "registered":
-        lines = [f"[APPLY] 신규 등록: {code} v{version} (status=active · skill_id={result['skill_id']})"]
+        lines = [
+        f"[APPLY] 신규 등록: {code} v{version} (status=active · skill_id={result['skill_id']})"
+    ]
     elif action == "revised":
         lines = [
             f"[APPLY] 개정: {code} v{result['previous_version']} → v{version}",
@@ -489,6 +493,17 @@ def main(argv: list[str] | None = None) -> int:
         skill = load_skill_file(Path(args.skill_file))
     except SkillConfigError as e:
         print(f"🔴 스킴 설정 오류 — 등록하지 않았다.\n  {e}")
+        return 1
+
+    # 예약 코드 가드(084 F05) — ``mm_skill`` 테이블은 타입 어휘와 저장소를 공유하지만 **엔진은
+    # 공유하지 않는다**(spec 084 §10 표). 이 CLI 로 예약 코드를 쓰면 어휘 행이 자산 분류표로 덮여
+    # 개체 판정의 타입 정의가 사라진다. 미리보기든 등록이든 **DB 를 열기 전에** 끊는다.
+    if skill.skill_code in NON_CLASSIFY_SKILL_CODES:
+        print(
+            f"🔴 예약된 skill_code 다: {skill.skill_code} — 분류 스킬로 등록할 수 없다.\n"
+            "  이 코드는 084 멀티모달 메타 **타입 어휘** 전용이며(자산이 아니라 개체를 나눈다),\n"
+            "  등록 경로도 따로 있다: python -m scripts.register_mm_meta_types --apply"
+        )
         return 1
 
     if args.apply:
