@@ -893,6 +893,86 @@ class TestMmClassifyEnabledSettings(unittest.TestCase):
                 _build_settings("dev")
 
 
+class TestMmMetaSettings(unittest.TestCase):
+    """084 T005·T015 — 멀티모달 메타 배치 설정 3키(``MM_META_*``).
+
+    ``binding_enabled`` 기본 **True**: 껐을 때는 **새 소속 판정만 멈추고** 이미 쌓인 엣지·묶음
+    조회는 그대로 남는다(끄기 ≠ 삭제 · 085 토글과 같은 규율). 롤백 수단이 env 하나여야 배포를
+    되돌리지 않고 멈출 수 있다(038 "적재=색인 기본 on" 관례).
+
+    ``judge_summary_chars`` 기본 **250**: 사전 검증(1,385자산)이 이 길이로 측정됐다 — 합격선
+    수치(묶음 120~140 등)의 기준선이므로 기본값이 곧 재현 조건이다.
+    """
+
+    def test_defaults_when_unset(self) -> None:
+        # 미설정 → 배치 on · 요약 250자. _BACKEND_KEYS 가 비워 실행 환경과 격리.
+        with _env():
+            s = _build_settings("dev")
+        self.assertIs(s.mm_meta.binding_enabled, True)
+        self.assertEqual(s.mm_meta.judge_summary_chars, 250)
+
+    def test_binding_can_be_turned_off(self) -> None:
+        with _env(MM_META_BINDING_ENABLED="false"):
+            s = _build_settings("dev")
+        self.assertIs(s.mm_meta.binding_enabled, False)
+
+    def test_summary_chars_env_override(self) -> None:
+        with _env(MM_META_JUDGE_SUMMARY_CHARS="180"):
+            s = _build_settings("dev")
+        self.assertEqual(s.mm_meta.judge_summary_chars, 180)
+
+    def test_invalid_bool_fail_fast(self) -> None:
+        # 오타를 False 로 조용히 해석하면 배치가 꺼진 줄 모르고 "묶음 0건"을 의심하게 된다.
+        with _env(MM_META_BINDING_ENABLED="maybe"):
+            with self.assertRaises(ValueError):
+                _build_settings("dev")
+
+    def test_invalid_int_fail_fast(self) -> None:
+        with _env(MM_META_JUDGE_SUMMARY_CHARS="이백오십"):
+            with self.assertRaises(ValueError):
+                _build_settings("dev")
+
+    def test_describe_default_is_on(self) -> None:
+        # T015: 미설정 → 설명 생성 on. 껐을 때는 **새 설명만 멈추고** 이미 저장된 설명은 카드에
+        # 그대로 남는다(끄기 ≠ 삭제 · 소속 토글과 같은 규율).
+        with _env():
+            s = _build_settings("dev")
+        self.assertIs(s.mm_meta.describe_enabled, True)
+
+    def test_describe_can_be_turned_off(self) -> None:
+        with _env(MM_META_DESCRIBE_ENABLED="false"):
+            s = _build_settings("dev")
+        self.assertIs(s.mm_meta.describe_enabled, False)
+
+    def test_describe_invalid_bool_fail_fast(self) -> None:
+        # 오타를 False 로 조용히 해석하면 설명이 왜 안 생기는지 다시 조사하게 된다.
+        with _env(MM_META_DESCRIBE_ENABLED="maybe"):
+            with self.assertRaises(ValueError):
+                _build_settings("dev")
+
+    def test_describe_toggle_is_independent_of_binding(self) -> None:
+        # 두 배치는 따로 끈다 — 소속은 돌리면서 설명(LLM 호출)만 멈추는 운영이 실제로 필요하다
+        # (설명은 묶음당 1회 호출이라 비용·지연이 소속 판정과 다르다).
+        with _env(MM_META_BINDING_ENABLED="false"):
+            s = _build_settings("dev")
+        self.assertIs(s.mm_meta.binding_enabled, False)
+        self.assertIs(s.mm_meta.describe_enabled, True)
+
+    def test_default_matches_judge_prompt_constant(self) -> None:
+        """🔴 드리프트 가드 — 기본값은 **판정 문안 상한**(``judge.SUMMARY_MAX_CHARS``)과 같아야 한다.
+
+        문안 상한이 실제로 요약을 자르는 값이고 이 설정은 배치가 넘겨 주는 값이다. 둘이 어긋나면
+        설정을 올려도 문안이 다시 자르기 때문에 **조용히 무효**가 된다(설정을 import 로 잇지 않는
+        이유는 ``src.config`` → ``src.mm_meta`` 방향 의존을 새로 만들지 않기 위해서다 — 대신 이
+        테스트가 두 값을 묶어 둔다).
+        """
+        from src.mm_meta.judge import SUMMARY_MAX_CHARS
+
+        with _env():
+            s = _build_settings("dev")
+        self.assertEqual(s.mm_meta.judge_summary_chars, SUMMARY_MAX_CHARS)
+
+
 class TestFieldSpecsSSOT(unittest.TestCase):
     """069 US-E FR-E4 — 필드 명세 단일 출처(``_FIELD_SPECS``·그룹 포함).
 

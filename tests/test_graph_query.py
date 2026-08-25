@@ -431,3 +431,292 @@ class TestNeighborFolding(unittest.TestCase):
                          [("a2", "strong"), ("a3", "weak")])
         self.assertEqual(rows[0]["folded_kind_codes"], ["same_domain"])
 
+
+
+def _conn_seq(results: list[list[dict]]):
+    """실행 순서대로 **다른 결과**를 돌려주는 mock conn(질의 2개 이상인 함수용).
+
+    위의 ``_conn_returning`` 은 모든 execute 에 같은 행을 준다. 메타 묶음 조회는 "노드 1건 →
+    구성 자산 N건" 두 질의라 순서별 결과가 필요하다.
+
+    Args:
+        results: execute 순서대로 돌려줄 행 목록. 다 쓰면 빈 목록을 준다.
+
+    Returns:
+        ``(conn, cur)`` — ``cur.execute.call_args_list`` 로 SQL·바인딩을 검증한다.
+    """
+    from unittest.mock import MagicMock
+
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__.return_value = cur
+    queue = list(results)
+    state: dict[str, list[dict]] = {"rows": []}
+
+    def _execute(_sql, _params=None):
+        state["rows"] = queue.pop(0) if queue else []
+        return cur
+
+    cur.execute.side_effect = _execute
+    cur.fetchall.side_effect = lambda: list(state["rows"])
+    cur.fetchone.side_effect = lambda: state["rows"][0] if state["rows"] else None
+    conn.cursor.return_value = cur
+    return conn, cur
+
+
+class TestMmMetaOfAsset(unittest.TestCase):
+    """084 T004 — 자산이 속한 **멀티모달 메타 목록**(``mm_meta_of_asset``).
+
+    소속 엣지는 ``자산 → 개체`` **비대칭**이라 대칭 접힘(캐논 정렬)과 무관하다 — 그래서 여기서는
+    양방향 매칭을 하지 않는다. 대신 조건 두 개가 반드시 SQL 에 있어야 한다: ``kind_code='mm_member'``
+    (다른 종류 엣지가 섞이면 자산↔자산 관계가 메타로 보인다)와 ``dst 는 entity 노드``.
+
+    노출 상태 기본값에 **``proposed`` 를 포함**하는 것이 이 기능의 생사다 — 초기에는 전건 proposed
+    이므로 active 만 보면 화면이 영구히 빈다(081 번들 active-0 무동작의 재발 방지 · spec §7).
+    """
+
+    def _row(self, **over):
+        """``mm_meta_of_asset`` SQL(dict_row) 한 행을 흉내.
+
+        Args:
+            **over: 덮어쓸 컬럼.
+
+        Returns:
+            행 dict.
+        """
+        base = {
+            "entity_type": "장소",
+            "entity_uid": "제주도",
+            "name": "제주도",
+            "edge_id": "018f0000-0000-7000-8000-0000000000e1",
+            "status": "proposed",
+            "reason": "kw=제주 장마|pv=mm_meta.v1|rv=1",
+            "bundle_size": 14,
+        }
+        base.update(over)
+        return base
+
+    def test_sql_filters_kind_and_entity_dst(self) -> None:
+        from src.relations.graph_query import mm_meta_of_asset
+
+        conn, cur = _conn_seq([[]])
+        mm_meta_of_asset(conn, asset_id="A")
+        sql, params = cur.execute.call_args[0][0], cur.execute.call_args[0][1]
+        compact = " ".join(sql.split())
+
+        self.assertIn("rk.kind_code = %s", compact)          # 종류는 바인딩(하드코딩 금지)
+        self.assertIn("node_kind = 'entity'", compact)        # dst 는 개체 노드
+        self.assertIn("node_kind = 'asset'", compact)         # src 는 자산 노드
+        self.assertIn("ge.status = ANY(%s)", compact)
+        self.assertIn("mm_member", params)
+        # 대칭 접힘 대상이 아니므로 양방향 매칭을 하지 않는다(했다면 개체가 src 인 엣지를 찾게 된다).
+        self.assertNotIn("OR dn.asset_id", compact)
+
+    def test_default_statuses_include_proposed(self) -> None:
+        from src.relations.graph_query import mm_meta_of_asset
+
+        conn, cur = _conn_seq([[]])
+        mm_meta_of_asset(conn, asset_id="A")
+        params = cur.execute.call_args[0][1]
+        statuses = [p for p in params if isinstance(p, list)]
+        self.assertTrue(statuses)
+        for wanted in statuses:
+            self.assertIn("proposed", wanted)
+
+    def test_statuses_are_overridable(self) -> None:
+        from src.relations.graph_query import mm_meta_of_asset
+
+        conn, cur = _conn_seq([[]])
+        mm_meta_of_asset(conn, asset_id="A", statuses=["active"])
+        for param in cur.execute.call_args[0][1]:
+            if isinstance(param, list):
+                self.assertEqual(param, ["active"])
+
+    def test_order_is_deterministic(self) -> None:
+        from src.relations.graph_query import mm_meta_of_asset
+
+        conn, cur = _conn_seq([[]])
+        mm_meta_of_asset(conn, asset_id="A")
+        compact = " ".join(cur.execute.call_args[0][0].split())
+        self.assertIn("ORDER BY", compact)
+        self.assertIn("en.entity_type, en.entity_uid", compact)
+
+    def test_row_contract_and_uuid_to_str(self) -> None:
+        import uuid as _uuid
+
+        from src.relations.graph_query import mm_meta_of_asset
+
+        edge_id = _uuid.UUID("018f0000-0000-7000-8000-0000000000e1")
+        conn, _ = _conn_seq([[self._row(edge_id=edge_id)]])
+        out = mm_meta_of_asset(conn, asset_id="A")
+
+        self.assertEqual(set(out[0]), {"entity_type", "entity_uid", "name", "bundle_size",
+                                      "edge_id", "status", "reason"})
+        # 조회행 id → str(graph_query 관례 — 모의로는 못 잡는 실 DB 결함의 예방선).
+        self.assertIsInstance(out[0]["edge_id"], str)
+        self.assertEqual(out[0]["edge_id"], str(edge_id))
+        self.assertEqual(out[0]["bundle_size"], 14)
+        self.assertEqual(out[0]["name"], "제주도")
+
+    def test_name_falls_back_to_uid(self) -> None:
+        # canonical.name 이 없는 행(손 SQL·구버전)이라도 빈 라벨을 내보내지 않는다.
+        from src.relations.graph_query import mm_meta_of_asset
+
+        conn, _ = _conn_seq([[self._row(name=None)]])
+        out = mm_meta_of_asset(conn, asset_id="A")
+        self.assertEqual(out[0]["name"], "제주도")
+
+    def test_bundle_size_counts_with_same_status_filter(self) -> None:
+        # "확인된 N건"의 N 은 묶음 화면이 보여 줄 건수와 같은 기준이어야 한다 — 상태 필터를 함께 쓴다.
+        from src.relations.graph_query import mm_meta_of_asset
+
+        conn, cur = _conn_seq([[]])
+        mm_meta_of_asset(conn, asset_id="A", statuses=["active", "proposed"])
+        compact = " ".join(cur.execute.call_args[0][0].split())
+        self.assertIn("count(*)", compact)
+        self.assertEqual(sum(1 for p in cur.execute.call_args[0][1]
+                             if p == ["active", "proposed"]), 2)
+
+
+class TestMmMetaBundle(unittest.TestCase):
+    """084 T004 — 메타 하나의 **구성 자산**(모달리티별 그룹 · ``mm_meta_bundle``).
+
+    이 기능의 존재 이유가 크로스모달 응집이므로(텍스트·이미지·영상·오디오가 한 묶음) 반환은
+    **모달리티별 그룹 + 건수**다. 두 가지 빈 경우를 구분한다: 메타 자체가 없으면 ``None``(호출부는
+    404), 메타는 있고 자산이 0건이면 ``total=0``(수동 선등록한 빈 메타 · spec §6-1).
+    """
+
+    def _node_row(self, **over):
+        """개체 노드 조회 행.
+
+        Args:
+            **over: 덮어쓸 컬럼.
+
+        Returns:
+            행 dict.
+        """
+        base = {"node_id": "018f0000-0000-7000-8000-0000000000f1",
+                "name": "제주도",
+                "canonical": {"name": "제주도"}}
+        base.update(over)
+        return base
+
+    def _member(self, asset_id: str, modality: str, fs_path: str, **over):
+        """구성 자산 행.
+
+        Args:
+            asset_id: 자산 id.
+            modality: 모달리티.
+            fs_path: 원본 경로(파일명 표시용).
+            **over: 덮어쓸 컬럼.
+
+        Returns:
+            행 dict.
+        """
+        base = {"edge_id": f"e-{asset_id}", "status": "proposed",
+                "reason": "kw=제주 장마|pv=mm_meta.v1|rv=1",
+                "asset_id": asset_id, "modality": modality, "fs_path": fs_path}
+        base.update(over)
+        return base
+
+    def test_missing_meta_returns_none(self) -> None:
+        from src.relations.graph_query import mm_meta_bundle
+
+        conn, cur = _conn_seq([[]])
+        self.assertIsNone(mm_meta_bundle(conn, entity_type="장소", entity_uid="없는곳"))
+        # 없는 메타에 구성 자산을 묻지 않는다(질의 1회로 끝난다).
+        self.assertEqual(len(cur.execute.call_args_list), 1)
+
+    def test_empty_meta_returns_zero_bundle(self) -> None:
+        from src.relations.graph_query import mm_meta_bundle
+
+        conn, _ = _conn_seq([[self._node_row()], []])
+        out = mm_meta_bundle(conn, entity_type="장소", entity_uid="제주도")
+        assert out is not None
+        self.assertEqual(out["total"], 0)
+        self.assertEqual(out["modalities"], [])
+        self.assertEqual(out["name"], "제주도")
+        # 등록/발굴 구분(spec §6-1) — canonical.source 부재는 발굴(auto)이다.
+        self.assertEqual(out["source"], "auto")
+
+    def test_groups_by_modality_with_counts(self) -> None:
+        from src.relations.graph_query import mm_meta_bundle
+
+        conn, _ = _conn_seq([
+            [self._node_row()],
+            [self._member("a1", "image", "/data/raw/사진1.png"),
+             self._member("a2", "image", "/data/raw/사진2.png"),
+             self._member("a3", "text", "/data/raw/문서.txt")],
+        ])
+        out = mm_meta_bundle(conn, entity_type="장소", entity_uid="제주도")
+        assert out is not None
+        self.assertEqual(out["total"], 3)
+        self.assertEqual([(g["modality"], g["count"]) for g in out["modalities"]],
+                         [("image", 2), ("text", 1)])
+        first = out["modalities"][0]["assets"][0]
+        self.assertEqual(first["file_name"], "사진1.png")   # fs_path basename(기존 관례)
+        self.assertEqual(first["asset_id"], "a1")
+        self.assertEqual(set(first), {"asset_id", "modality", "file_name", "edge_id",
+                                      "status", "reason"})
+
+    def test_uuid_to_str_contract(self) -> None:
+        import uuid as _uuid
+
+        from src.relations.graph_query import mm_meta_bundle
+
+        asset_id = _uuid.UUID("018f0000-0000-7000-8000-0000000000a1")
+        edge_id = _uuid.UUID("018f0000-0000-7000-8000-0000000000e1")
+        conn, _ = _conn_seq([
+            [self._node_row()],
+            [self._member(asset_id, "audio", "/data/raw/소리.mp3", edge_id=edge_id)],
+        ])
+        out = mm_meta_bundle(conn, entity_type="장소", entity_uid="제주도")
+        assert out is not None
+        row = out["modalities"][0]["assets"][0]
+        self.assertEqual(row["asset_id"], str(asset_id))
+        self.assertEqual(row["edge_id"], str(edge_id))
+
+    def test_sql_binds_kind_and_statuses(self) -> None:
+        from src.relations.graph_query import mm_meta_bundle
+
+        conn, cur = _conn_seq([[self._node_row()], []])
+        mm_meta_bundle(conn, entity_type="장소", entity_uid="제주도", statuses=["active"])
+        member_sql, member_params = (cur.execute.call_args_list[1][0][0],
+                                     cur.execute.call_args_list[1][0][1])
+        compact = " ".join(member_sql.split())
+        self.assertIn("rk.kind_code = %s", compact)
+        self.assertIn("node_kind = 'asset'", compact)
+        self.assertIn("ge.status = ANY(%s)", compact)
+        self.assertIn("mm_member", member_params)
+        self.assertIn(["active"], member_params)
+        # 모달리티·자산 순 결정적 정렬(같은 묶음이 매번 같은 순서로 보여야 한다).
+        self.assertIn("ORDER BY", compact)
+
+    def test_uid_is_matched_as_normalized_key(self) -> None:
+        # entity_uid 컬럼에는 **정규화 키**만 들어 있다(persist 계약). 표기 그대로 들어온 값도
+        # 같은 규칙으로 눌러 대조한다 — 멱등이라 이미 키인 값은 그대로다.
+        from src.relations.graph_query import mm_meta_bundle
+
+        conn, cur = _conn_seq([[]])
+        mm_meta_bundle(conn, entity_type="장소", entity_uid=" 제주 도 ")
+        self.assertIn("제주도", cur.execute.call_args_list[0][0][1])
+
+
+class TestMmMetaDoesNotDisturbSymmetricQueries(unittest.TestCase):
+    """084 회귀 가드 — 신규 조회가 기존 **대칭 엣지** 경로를 건드리지 않는다."""
+
+    def test_existing_sql_constant_unchanged(self) -> None:
+        from src.relations.graph_query import _FETCH_RELATIONS_SQL
+
+        compact = " ".join(_FETCH_RELATIONS_SQL.split())
+        # ADR 2026-05-28 의 핵심 두 줄이 그대로 있는가(양방향 매칭 · 양끝 asset 노드 조인).
+        self.assertIn("sn.asset_id = %s OR dn.asset_id = %s", compact)
+        self.assertIn("JOIN node dn ON dn.node_id = ge.dst_node AND dn.node_kind = 'asset'",
+                      compact)
+
+    def test_mm_meta_sql_is_separate_statement(self) -> None:
+        # 두 경로가 같은 SQL 을 공유하면 한쪽 수정이 다른 쪽을 조용히 바꾼다 — 별 상수여야 한다.
+        from src.relations import graph_query
+
+        self.assertNotIn("mm_member", graph_query._FETCH_RELATIONS_SQL)
+        self.assertNotEqual(graph_query._FETCH_RELATIONS_SQL, graph_query._MM_META_OF_ASSET_SQL)

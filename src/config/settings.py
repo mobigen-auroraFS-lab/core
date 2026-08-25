@@ -159,6 +159,28 @@ class MmClassifyConfig:
 
 
 @dataclass(frozen=True)
+class MmMetaConfig:
+    """멀티모달 메타(084) 배치 토글 2종·판정 입력 상한. 적재와 분리된 **별도 배치**다."""
+
+    # 084: 소속 배치(파이프 run_mm_meta_binding) 수행 여부. 기본 True — 데이터가 들어오는데 토글이
+    # 꺼져 묶음이 0건인 상태가 기본이면 원인 추적에 시간을 쓴다(085 토글과 같은 규율). 껐을 때는
+    # **새 판정만 멈추고** 이미 쌓인 소속 엣지·묶음 조회는 보존된다(끄기 ≠ 삭제 · 롤백은 env 하나).
+    binding_enabled: bool
+    # 084: 판정 프롬프트에 싣는 요약 길이 상한. 기본 250 = 사전 검증(1,385자산)이 측정된 값이라
+    # 합격선 수치(묶음 120~140 등)의 기준선이다. 🔴 **문안 상한**(``src/mm_meta/judge.py`` 의
+    # ``SUMMARY_MAX_CHARS``)과 같은 값을 유지해야 한다 — 실제로 요약을 자르는 것은 문안 쪽이라
+    # 이 값을 더 크게 줘도 문안이 다시 자른다(조용한 무효). 두 값은 테스트가 묶어 둔다
+    # (`tests/test_settings.TestMmMetaSettings.test_default_matches_judge_prompt_constant`).
+    judge_summary_chars: int
+    # 084 T015: 메타 설명 생성(``src/mm_meta/describe.py``) 수행 여부. 기본 True — 카드에 설명이 없는
+    # 상태가 기본이면 "왜 안 보이나"를 조사하게 된다. **소속 토글과 별개**인 이유: 설명은 묶음당
+    # LLM 호출 1회라 비용·지연 성격이 소속 판정과 다르고, 소속은 돌리면서 설명만 멈추는 운영이
+    # 필요할 수 있다. 껐을 때는 **새 설명만 멈추고** 이미 저장된 설명은 카드에 그대로 남는다
+    # (끄기 ≠ 삭제 · 롤백은 env 하나).
+    describe_enabled: bool
+
+
+@dataclass(frozen=True)
 class PipelineSettings:
     """파이프라인 실행 설정. ``init_settings(profile)`` 이 한 번만 생성하며 이후 변경 불가(frozen).
 
@@ -187,6 +209,7 @@ class PipelineSettings:
     vlm: VlmConfig
     topic: TopicConfig
     mm_classify: MmClassifyConfig
+    mm_meta: MmMetaConfig
 
 
 _SETTINGS: PipelineSettings | None = None
@@ -667,6 +690,7 @@ _GROUP_CLASSES: dict[str, type] = {
     "vlm": VlmConfig,
     "topic": TopicConfig,
     "mm_classify": MmClassifyConfig,
+    "mm_meta": MmMetaConfig,
 }
 
 
@@ -777,6 +801,13 @@ _FIELD_SPECS: tuple[_Spec, ...] = (
     # ── mm_classify(085 분류 스킬) ──
     # 기본 True = 등록된 활성 스킬이 있으면 배치가 돈다. 끄면 새 판정만 멈춘다(행·색인 보존).
     _Spec("mm_classify", "enabled", "MM_CLASSIFY_ENABLED", _opt_bool(True)),
+    # ── mm_meta(084 멀티모달 메타 소속) ──
+    # 기본 True = 데이터가 들어오면 소속 배치가 돈다. 끄면 새 판정만 멈춘다(엣지·조회 보존).
+    _Spec("mm_meta", "binding_enabled", "MM_META_BINDING_ENABLED", _opt_bool(True)),
+    # 기본 250 = 사전 검증 측정값(합격선의 기준선). judge.SUMMARY_MAX_CHARS 와 같은 값을 유지한다.
+    _Spec("mm_meta", "judge_summary_chars", "MM_META_JUDGE_SUMMARY_CHARS", _opt_int(250)),
+    # 기본 True = 묶음이 생기면 설명도 만든다(카드 한 문장). 끄면 새 설명만 멈춘다(저장분 보존).
+    _Spec("mm_meta", "describe_enabled", "MM_META_DESCRIBE_ENABLED", _opt_bool(True)),
 )
 
 

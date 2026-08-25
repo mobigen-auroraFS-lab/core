@@ -12,6 +12,12 @@
 `tests/test_graph_persist_approval.py`·`scripts/judge_snapshot.py:collect_pairs` 가 대신 지킨다).
 계획서에 이 항목을 적었으나 검증 불가로 제외했다 — 못 재는 것을 잰 것처럼 두면 안 된다.
 
+**검사 축이 둘이다**(2026-08-24 · spec 084 착수 전 결정 ①): 자산↔자산 **관계** 엣지 축과, 자산→개체
+**소속**(``mm_member``) 엣지 축. 소속 엣지는 dst 가 entity 노드인 것이 정의라서 관계 축의
+`비-asset_노드_참조` 에 그대로 걸린다 — 그래서 관계 축은 소속 kind 를 빼고(asset↔asset 한정),
+소속 엣지는 자기 불변식(방향 고정·kind 등록 형태)을 ``MM_MEMBER_CHECK_NAMES`` 축에서 센다.
+**양쪽 다 검사한다** — 어느 쪽도 "예외"로 무검사 통과시키지 않는 것이 이 분리의 조건이다.
+
 읽기 전용 — 모든 SQL 이 SELECT 다(테스트가 봉인한다).
 
 실행
@@ -34,9 +40,23 @@ if str(_REPO_ROOT) not in sys.path:
 
 from src.domain.status_vocab import GraphEdgeStatus  # noqa: E402
 from src.relations.approval_policy import SIMILARITY_KINDS, parse_kind_set  # noqa: E402
+from src.relations.schema import MM_MEMBER_KIND_CODE  # noqa: E402
+
+# 084 소속 엣지(자산→개체) 전용 검사 축 — **관계 검사와 갈라 둔 이유**(spec 084 착수 전 결정 ①):
+#   기존 `비-asset_노드_참조` 는 "양 끝이 asset 이어야 한다"를 전수로 셌다. 소속 엣지는 정의상
+#   dst 가 entity 노드라서 그 검사에 그대로 걸리면 저장 즉시 게이트가 빨간불이 되고, 반대로 검사를
+#   지우면 자산↔자산 엣지에 entity 가 섞이는 **실제 결함**을 놓친다. 그래서 기존 검사는 asset↔asset
+#   한정으로 좁히고(소속 kind 제외), 소속 엣지에는 그 엣지에 맞는 불변식을 새로 센다.
+#   비유하면 검표 창구를 나눈 것이다 — 같은 줄에 세워 두면 "표가 다르다"는 이유로 정상 승객이
+#   계속 걸린다. 줄을 나누되 **양쪽 다 검표한다**(어느 쪽도 무검사로 통과시키지 않는다).
+MM_MEMBER_CHECK_NAMES: tuple[str, ...] = (
+    "소속_엣지_방향_위반",
+    "소속_kind_등록_위반",
+)
 
 # 검사 이름의 정본 순서 — 테스트가 이 목록과 `build_checks` 결과의 일치를 봉인한다.
-# 조건부 검사(게이트를 끄면 빠지는 것)는 앞쪽 셋이다.
+# 조건부 검사(게이트를 끄면 빠지는 것)는 앞쪽 셋이고, 소속 축은 **맨 뒤에 덧붙인다**
+# (기존 이름·순서를 유지해 운영 보고 줄과 과거 실행 결과를 그대로 비교할 수 있게).
 CHECK_NAMES: tuple[str, ...] = (
     "유사도_계열_저신뢰_잔존",
     "자동승인_꺼졌는데_기계승인_active",
@@ -47,6 +67,7 @@ CHECK_NAMES: tuple[str, ...] = (
     "대칭_캐논순서_위반",
     "비활성_kind_엣지",
     "비-asset_노드_참조",
+    *MM_MEMBER_CHECK_NAMES,
 )
 
 
@@ -162,17 +183,52 @@ WHERE rk.status <> 'active'
 -- check:비활성_kind_엣지""",
         "params": [],
     })
-    # 양 끝은 asset 노드여야 한다. entity 노드(단계 D 의료 ER)는 asset_id 가 NULL 이므로
-    # 섞이면 조회에서 None 자산이 튀어나온다.
+    # 자산↔자산 엣지의 양 끝은 asset 노드여야 한다. entity 노드는 asset_id 가 NULL 이므로 섞이면
+    # 조회에서 None 자산이 튀어나온다.
+    #   ⚠️ **소속 kind(mm_member)는 이 검사에서 뺀다** — 그 엣지는 dst 가 entity 인 것이 정의다
+    #   (spec 084 §4). 빼는 것은 무검사가 아니라 **다른 창구로 보내는 것**이고, 그 창구가 아래
+    #   `소속_엣지_방향_위반` 이다. 종류를 알아야 갈라낼 수 있어 relation_kind 조인이 추가됐다.
     checks.append({
         "name": "비-asset_노드_참조",
         "sql": """SELECT count(*) AS n
 FROM graph_edge ge
+JOIN relation_kind rk ON rk.relation_kind_id = ge.relation_kind_id
 JOIN node n1 ON n1.node_id = ge.src_node
 JOIN node n2 ON n2.node_id = ge.dst_node
-WHERE n1.node_kind <> 'asset' OR n2.node_kind <> 'asset'
+WHERE rk.kind_code <> %s
+  AND (n1.node_kind <> 'asset' OR n2.node_kind <> 'asset')
 -- check:비-asset_노드_참조""",
-        "params": [],
+        "params": [MM_MEMBER_KIND_CODE],
+    })
+    # ── 084 소속 엣지 축 ────────────────────────────────────────────────────────
+    # 소속 엣지의 방향은 **자산 → 개체 한 방향**이다(비대칭 kind). 역방향(entity→asset)이나
+    # 개체↔개체는 이 spec 의 비범위이므로 존재 자체가 위반이다 — 조회(`mm_meta_of_asset`)가
+    # src=asset·dst=entity 를 가정하고 짜여 있어, 뒤집힌 행은 조용히 안 보이거나 두 번 세어진다.
+    checks.append({
+        "name": "소속_엣지_방향_위반",
+        "sql": """SELECT count(*) AS n
+FROM graph_edge ge
+JOIN relation_kind rk ON rk.relation_kind_id = ge.relation_kind_id
+JOIN node sn ON sn.node_id = ge.src_node
+JOIN node dn ON dn.node_id = ge.dst_node
+WHERE rk.kind_code = %s
+  AND (sn.node_kind <> 'asset' OR dn.node_kind <> 'entity')
+-- check:소속_엣지_방향_위반""",
+        "params": [MM_MEMBER_KIND_CODE],
+    })
+    # 카탈로그 행 자체의 형태 — **비대칭·active** 여야 한다(`ensure_mm_member_kind` 가 보장하고
+    # 어긋난 행은 교정한다). 손 SQL 로 대칭으로 바뀌면 대칭 검사 두 개(중복행·캐논순서)가 소속
+    # 엣지를 위반으로 세기 시작하고, inactive 로 내려가면 `비활성_kind_엣지` 가 전건을 잡는다.
+    # 원인을 그 두 검사에서 역추적하는 것보다 여기서 한 줄로 보여 주는 편이 빠르다.
+    # mm_member 행이 아직 없는 환경(현행 dev)에서는 0건 — 조건부 검사로 만들 이유가 없다.
+    checks.append({
+        "name": "소속_kind_등록_위반",
+        "sql": """SELECT count(*) AS n
+FROM relation_kind
+WHERE kind_code = %s
+  AND (is_symmetric IS DISTINCT FROM FALSE OR status <> 'active')
+-- check:소속_kind_등록_위반""",
+        "params": [MM_MEMBER_KIND_CODE],
     })
     return checks
 

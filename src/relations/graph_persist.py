@@ -3,6 +3,12 @@
 엣지 종류는 relation_kind(통제 어휘)를 직접 참조하고, 주제는 graph_edge.topic jsonb 에 저장한다.
 대칭 kind 는 (src,dst) 캐논 순서로 1행만 저장하고, 신뢰도는 충돌 시 GREATEST 로 화해한다.
 후보 집합 안의 타깃만, active kind 만 적재(환각·미검토 kind 방지).
+
+**자산↔자산 관계 전용 경로다**(2026-08-24 명시): ``PROMPT_EXCLUDED_KIND_CODES`` 에 든 종류는 여기서
+엣지가 되지 않는다. ``mm_member``(084 소속)는 **active** 로 등록돼 있어 "active kind 만" 검사를
+그냥 통과하므로, 관계 제안이 그 종류를 붙이는 것을 코드로 막는다 — 그렇지 않으면 자산 쌍에
+"멀티모달 메타 소속" 이름표가 달리고 소속 조회(dst=entity 가정)·불변식이 함께 깨진다.
+소속 엣지를 쓰는 정본 경로는 ``src/mm_meta/persist.upsert_entity_edges`` 다.
 """
 from __future__ import annotations
 
@@ -15,7 +21,7 @@ from psycopg import Connection
 from src.database.ids import uuid7_str
 from src.relations.approval_policy import is_auto_approvable, should_persist
 from src.relations.relation_type_catalog import fetch_relation_kind
-from src.relations.schema import coerce_topic_fields_mvp
+from src.relations.schema import PROMPT_EXCLUDED_KIND_CODES, coerce_topic_fields_mvp
 from src.relations.topic_canonicalize import canonicalize_subtopic, canonicalize_topic
 
 
@@ -176,8 +182,10 @@ def sync_graph_edges(
     """LLM이 제안한 엣지들을 검증해 ``graph_edge`` 에 upsert 한다.
 
     **DB에 쓴다**: 필요한 ``node`` 생성 + ``graph_edge`` INSERT/UPDATE. 호출자의 트랜잭션 안에서
-    돈다(``asset_entry._run``). 세 가지를 걸러낸다 — 후보 집합 밖 타깃(LLM 환각) · 자기 자신 참조 ·
-    아직 ``active`` 가 아닌 관계 종류(미검토 kind).
+    돈다(``asset_entry._run``). 네 가지를 걸러낸다 — 후보 집합 밖 타깃(LLM 환각) · 자기 자신 참조 ·
+    **프롬프트 제외 종류**(``PROMPT_EXCLUDED_KIND_CODES`` — 레거시 도메인 코드와 084 소속
+    ``mm_member``. 후자는 active 라서 아래 검사로는 안 걸린다) · 아직 ``active`` 가 아닌 관계 종류
+    (미검토 kind).
 
     같은 쌍이 다시 제안되면(ON CONFLICT) **신뢰도는 더 큰 값으로**, topic·reason 은 더 높은 신뢰도
     쪽으로 갱신하되 **status 는 건드리지 않는다** — 사람이 내린 검토 결정(특히 ``rejected``)을 LLM
@@ -233,6 +241,12 @@ def sync_graph_edges(
             skipped += 1
             continue
         kind_code = str(code).strip().lower()
+        # 🔴 프롬프트 제외 종류는 **조회 전에** 기각한다(084 방어 ② 2단). 순서가 계약이다 —
+        # ``mm_member`` 는 active 이므로 아래 "active 인가?" 검사만으로는 통과해 버린다.
+        # 여기서 걸러야 노드도 만들지 않고(고아 방지) 카탈로그 상태가 판정에 끼어들지 않는다.
+        if kind_code in PROMPT_EXCLUDED_KIND_CODES:
+            skipped += 1
+            continue
         # active 상태인 kind만 허용 — 미검토(inactive) kind가 그래프에 섞이는 것을 방지.
         # register_new_relation_kinds 가 신규 kind를 inactive로 등록하므로,
         # 같은 사이클 내에서 방금 등록된 kind는 여기서 걸러져 다음 검토 사이클 이후에야 엣지화된다.

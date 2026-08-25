@@ -158,6 +158,83 @@ class TestPersistGate(unittest.TestCase):
         self.assertEqual(created, ["018f0000-0000-7000-8000-000000000253"])
 
 
+class TestPromptExcludedKindGate(unittest.TestCase):
+    """084 방어 ② — 프롬프트 제외 종류는 **엣지가 되지 않는다**(이중 방어 2단).
+
+    1단은 프롬프트 카탈로그 제외(``fetch_active_relation_kinds``)이고, 2단이 여기다. 왜 2단이
+    필요한가: LLM 은 카탈로그에 없는 코드도 지어낼 수 있다. ``mm_member`` 가 **active** 로
+    등록돼 있으므로(소속 엣지가 되려면 active 여야 한다) 기존 검사(active 인가?)만으로는 자산↔자산
+    쌍에 그 종류가 붙는 것을 막지 못한다 — 그러면 관계 화면에 "멀티모달 메타 소속"이라는 이름표가
+    달린 자산 쌍이 생기고, 소속 조회(dst=entity 가정)와 불변식이 함께 깨진다.
+
+    🔴 회귀: 현 카탈로그 5종은 전부 그대로 통과해야 한다(조이기가 기존 관계 경로를 건드리지 않음).
+    """
+
+    def test_제외_종류_제안은_엣지가_되지_않는다(self):
+        from src.relations.schema import MM_MEMBER_KIND_CODE
+
+        # 카탈로그에 active 로 있어도(소속 kind 는 active 다) 관계 경로에서는 기각된다.
+        with mock.patch.dict(_KIND_ROWS,
+                             {MM_MEMBER_KIND_CODE: {"relation_kind_id": "k-mm",
+                                                    "is_symmetric": False}}):
+            conn, (upserted, skipped), _ = _run([_edge(MM_MEMBER_KIND_CODE, 0.9)])
+        self.assertEqual(_inserted(conn), 0)
+        self.assertEqual((upserted, skipped), (0, 1))
+
+    def test_레거시_도메인_코드도_같은_기준으로_막힌다(self):
+        # 기준을 PROMPT_EXCLUDED_KIND_CODES 하나로 모은 결과 — 사본 없이 같은 값을 쓴다.
+        with mock.patch.dict(_KIND_ROWS,
+                             {"medical": {"relation_kind_id": "k-md", "is_symmetric": True}}):
+            conn, (upserted, skipped), _ = _run([_edge("medical", 0.9)])
+        self.assertEqual(_inserted(conn), 0)
+        self.assertEqual((upserted, skipped), (0, 1))
+
+    def test_제외_종류는_노드도_만들지_않는다(self):
+        # 게이트가 ensure_asset_node 보다 뒤에 있으면 엣지 없는 고아 노드가 남는다.
+        from src.relations.schema import MM_MEMBER_KIND_CODE
+
+        conn = _Conn()
+        created: list[str] = []
+        with mock.patch.object(gp, "ensure_asset_node",
+                               side_effect=lambda _c, a: created.append(a) or f"node-{a}"), \
+             mock.patch.object(gp, "fetch_relation_kind",
+                               side_effect=lambda _c, *, kind_code, status: {
+                                   "relation_kind_id": "k-mm", "is_symmetric": False}), \
+             mock.patch.object(gp, "_topic_canonicalize_enabled", return_value=False):
+            gp.sync_graph_edges(
+                conn, source_asset_id="018f0000-0000-7000-8000-000000000253",
+                edges=[_edge(MM_MEMBER_KIND_CODE, 0.9)],
+                allowed_target_ids=frozenset({"018f0000-0000-7000-8000-000000000257"}))
+        # 소스 노드 1건만(그 호출은 게이트보다 앞이다) — 타깃 노드는 만들지 않았다.
+        self.assertEqual(created, ["018f0000-0000-7000-8000-000000000253"])
+
+    def test_카탈로그_5종은_그대로_통과한다(self):
+        # 🔴 회귀 증명 — 조이기 전후 동작이 같다(제외 집합에 든 코드만 달라진다).
+        conn, (upserted, skipped), _ = _run(
+            [_edge("same_domain", 0.9, tid="018f0000-0000-7000-8000-000000000261"),
+             _edge("duplicate_near", 0.9, tid="018f0000-0000-7000-8000-000000000262"),
+             _edge("references", 0.9, tid="018f0000-0000-7000-8000-000000000263")])
+        self.assertEqual(_inserted(conn), 3)
+        self.assertEqual((upserted, skipped), (3, 0))
+
+    def test_제외_종류는_kind_조회조차_하지_않는다(self):
+        # 조회 전에 걸러야 "active 로 등록된 종류"라는 사실이 판정에 끼어들지 않는다(순서가 계약).
+        from src.relations.schema import MM_MEMBER_KIND_CODE
+
+        conn = _Conn()
+        looked: list[str] = []
+        with mock.patch.object(gp, "ensure_asset_node", side_effect=lambda _c, a: f"node-{a}"), \
+             mock.patch.object(gp, "fetch_relation_kind",
+                               side_effect=lambda _c, *, kind_code, status: (
+                                   looked.append(kind_code) or _KIND_ROWS.get(kind_code))), \
+             mock.patch.object(gp, "_topic_canonicalize_enabled", return_value=False):
+            gp.sync_graph_edges(
+                conn, source_asset_id="018f0000-0000-7000-8000-000000000253",
+                edges=[_edge(MM_MEMBER_KIND_CODE, 0.9)],
+                allowed_target_ids=frozenset({"018f0000-0000-7000-8000-000000000257"}))
+        self.assertEqual(looked, [])
+
+
 class TestGateOffIsUnchanged(unittest.TestCase):
     """🔴 정지점 요구: 게이트를 끈 설정에서 기존 동작과 **완전히 같다**(롤백 경로 증명)."""
 
