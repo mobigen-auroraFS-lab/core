@@ -274,6 +274,26 @@ VALUES (%s, %s, %s, %s, %s, %s)
 """
 
 
+def _reject_reserved(skill_code: str) -> None:
+    """예약 코드로 분류 판정을 쓰거나 대상 선별하려는 호출을 막는다 — 순수 검사(DB 안 본다).
+
+    ``mm_skill`` 테이블은 두 기능이 나눠 쓴다: 자산 분류 스킬(085)과 개체 타입 어휘(084). 후자는
+    분류 대상이 아니므로 분류 경로에 들어오면 안 되는데, FK 만 보면 둘이 구분되지 않는다(둘 다
+    정상 등록된 행이다). 그래서 코드 값으로 막는다.
+
+    Args:
+        skill_code: 검사할 스킬 자연키.
+
+    Raises:
+        SkillPersistError: 예약 코드일 때. 조용히 무시하지 않는 이유는, 이 경로로 들어왔다는 것
+            자체가 호출부의 착각이기 때문이다(막고 알려야 고쳐진다).
+    """
+    if skill_code in NON_CLASSIFY_SKILL_CODES:
+        raise SkillPersistError(
+            f"예약 코드는 분류 경로에 쓸 수 없다: {skill_code} — 이 행은 084 개체 타입 어휘다"
+        )
+
+
 def replace_asset_labels(
     conn: Any,
     *,
@@ -312,7 +332,12 @@ def replace_asset_labels(
     Raises:
         SkillPersistError: 성공 판정인데 라벨이 없거나, ``unassigned`` 가 다른 라벨과 함께 왔거나
             (불변식 ②), 같은 라벨이 중복일 때(PK 충돌 예정). 세 경우 모두 **쓰기 전에** 막는다.
+            예약 코드(``NON_CLASSIFY_SKILL_CODES``)로 쓰려 할 때도 막는다 — 아래 참조.
     """
+    # 🔴 예약 코드는 여기서도 막는다. ``fetch_active_skills`` 가 이미 걸러내지만 그 함수를 거치지
+    # 않고 이 쓰기를 직접 부르면 FK 가 성립해(``mm_skill`` 에 행이 있으므로) 조용히 써진다 —
+    # 타입 어휘가 자산 분류표로 오염되는 경로다. 진입점 하나에만 두면 우회가 남는다.
+    _reject_reserved(skill_code)
     if not judgement.ok:
         # 실패는 흔적을 남기지 않는다 — 다음 배치가 이 자산을 자연히 다시 집는다.
         return 0
@@ -430,7 +455,13 @@ def fetch_pending_asset_ids(
 
     Returns:
         ``asset_id`` 문자열 목록(오름차순·결정적). 문자열 정규화는 조회행 id 관례를 따른다.
+
+    Raises:
+        SkillPersistError: 예약 코드로 선별하려 할 때(``_reject_reserved``). 여기서 막지 않으면
+            "타입 어휘로 분류할 자산 전량"이라는 무의미한 대상 목록이 나오고, 배치가 그것을 그대로
+            판정해 버린다.
     """
+    _reject_reserved(skill_code)
     sql = _PENDING_ASSETS_SQL
     params: list[Any] = [skill_code, skill_version]
     if limit is not None:

@@ -307,8 +307,8 @@ def format_apply_lines(result: dict[str, Any]) -> list[str]:
     version = result["version"]
     if action == "registered":
         lines = [
-        f"[APPLY] 신규 등록: {code} v{version} (status=active · skill_id={result['skill_id']})"
-    ]
+            f"[APPLY] 신규 등록: {code} v{version} (status=active · skill_id={result['skill_id']})"
+        ]
     elif action == "revised":
         lines = [
             f"[APPLY] 개정: {code} v{result['previous_version']} → v{version}",

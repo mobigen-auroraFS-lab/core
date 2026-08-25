@@ -300,7 +300,8 @@ def _run_compare(a_path: Path, b_path: Path) -> int:
         n = len(_results_of(a, "before"))
         print(f"✅ 랭킹 불변 — 질의 {n}건의 결과 id·순위가 완전히 같다(SC-04).")
         return 0
-    print(f"❌ 랭킹 변화 {len(diffs)}건 / 질의 {len(set(_results_of(a, 'before')) | set(_results_of(b, 'after')))}건")
+    n_all = len(set(_results_of(a, "before")) | set(_results_of(b, "after")))
+    print(f"❌ 랭킹 변화 {len(diffs)}건 / 질의 {n_all}건")
     for line in diffs:
         print(f"  {line}")
     return 1
