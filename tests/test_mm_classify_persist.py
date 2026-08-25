@@ -30,7 +30,12 @@ import uuid
 from typing import Any
 
 from src.mm_classify.judge import SkillJudgement
-from src.mm_classify.model import UNASSIGNED_LABEL_CODE, SkillConfigError, load_skill
+from src.mm_classify.model import (
+    MM_META_TYPE_SKILL_CODE,
+    UNASSIGNED_LABEL_CODE,
+    SkillConfigError,
+    load_skill,
+)
 from src.mm_classify.persist import (
     DECIDED_BY_LLM,
     SkillPersistError,
@@ -435,6 +440,28 @@ class TestReplaceAssetLabelsGuards(unittest.TestCase):
             judgement=SkillJudgement(ok=False),
         )
         self.assertEqual(n, 0)
+        self.assertEqual(conn.log, [])
+
+    def test_예약_코드로는_쓸_수_없다(self) -> None:
+        # 진입점(fetch_active_skills)만 막으면 이 쓰기를 직접 부르는 경로로 우회된다 —
+        # FK 는 성립하므로(mm_skill 에 행이 있다) DB 가 막아주지 않는다. 앱이 막아야 한다.
+        conn = _Conn()
+        with self.assertRaises(SkillPersistError):
+            replace_asset_labels(
+                conn,
+                asset_id=_ASSET,
+                skill_code=MM_META_TYPE_SKILL_CODE,
+                skill_version=1,
+                judgement=SkillJudgement(ok=True, label_names=("인물",), label_codes=("person",)),
+            )
+        self.assertEqual(conn.log, [])  # 검사가 쓰기보다 먼저다
+
+    def test_예약_코드로는_대상_선별도_못_한다(self) -> None:
+        # 여기서 안 막으면 "타입 어휘로 분류할 자산 전량"이라는 무의미한 목록이 나오고
+        # 배치가 그것을 그대로 LLM 판정에 태운다(실제 사고 직전까지 갔던 경로).
+        conn = _Conn()
+        with self.assertRaises(SkillPersistError):
+            fetch_pending_asset_ids(conn, skill_code=MM_META_TYPE_SKILL_CODE, skill_version=1)
         self.assertEqual(conn.log, [])
 
     def test_미부여와_다른_라벨_공존은_거부한다(self) -> None:
