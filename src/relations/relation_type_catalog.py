@@ -11,22 +11,27 @@ from typing import Any
 from psycopg import Connection
 from psycopg.rows import dict_row
 
-from src.relations.schema import LEGACY_DOMAIN_TYPE_CODES
+from src.relations.schema import PROMPT_EXCLUDED_KIND_CODES
 
 
 def fetch_active_relation_kinds(conn: Connection[Any]) -> list[dict[str, Any]]:
-    """LLM 프롬프트에 노출할 **active** relation_kind 목록(레거시 코드 제외).
+    """LLM 프롬프트에 노출할 **active** relation_kind 목록(제외 목록 코드 빼고).
 
-    레거시 제외 이유
-        ``LEGACY_DOMAIN_TYPE_CODES``(medical·computer 등)는 과거 MVP에서 도메인을 kind_code로
-        쓰던 잔재다. 이 값들을 프롬프트에 포함하면 LLM이 도메인을 관계 종류로 혼용해 제안한다.
+    제외 이유 — 기준은 ``PROMPT_EXCLUDED_KIND_CODES``(``src/relations/schema.py`` 단일 정본)
+        ① **레거시 도메인 코드**(medical·computer 등)는 과거 MVP에서 도메인을 kind_code로 쓰던
+           잔재다. 프롬프트에 포함하면 LLM이 도메인을 관계 종류로 혼용해 제안한다.
+        ② **``mm_member``**(084 멀티모달 메타 소속)는 자산↔자산 관계가 아니라 자산→개체 소속이다.
+           엣지가 되려면 ``active`` 여야 하는데(``graph_persist`` 는 active kind 만 받는다), active
+           라는 이유로 이 목록에 실리면 LLM 이 자산 쌍에 이 종류를 제안하고 그 오염이 영속된다.
         prompt.py 가 이 결과를 그대로 카탈로그 블록에 넣으므로 여기서 배제해야 한다.
 
     Returns:
         ``{type_code, type_name, description, is_symmetric}`` 행 리스트. ``kind_code`` 오름차순
         고정(결정적). 활성 종류가 없으면 빈 리스트.
     """
-    legacy = list(LEGACY_DOMAIN_TYPE_CODES)
+    # 정렬해 넘긴다 — frozenset 을 그대로 list() 하면 실행마다 원소 순서가 달라져(문자열 해시 seed)
+    # 같은 질의의 바인딩이 흔들린다. 결과는 같지만 로그·비교가 재현되지 않는다(헌법 3조).
+    excluded = sorted(PROMPT_EXCLUDED_KIND_CODES)
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
@@ -39,7 +44,7 @@ def fetch_active_relation_kinds(conn: Connection[Any]) -> list[dict[str, Any]]:
               AND kind_code <> ALL(%s::text[])
             ORDER BY kind_code
             """,
-            (legacy,),
+            (excluded,),
         )
         return [dict(r) for r in cur.fetchall()]
 

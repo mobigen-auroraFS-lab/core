@@ -7,9 +7,29 @@ from __future__ import annotations
 
 import unittest
 
-from scripts.verify_relation_invariants import CHECK_NAMES, build_checks, run_verify
+from scripts.verify_relation_invariants import (
+    CHECK_NAMES,
+    MM_MEMBER_CHECK_NAMES,
+    build_checks,
+    run_verify,
+)
+
+from src.relations.schema import MM_MEMBER_KIND_CODE
 
 _EXCLUDE = frozenset({"same_domain"})
+
+# 084 전 검사 목록 — 기존 검사 이름·순서가 **그대로 앞에** 남아야 한다(운영 보고 줄·비교 대상).
+_LEGACY_CHECK_NAMES = (
+    "유사도_계열_저신뢰_잔존",
+    "자동승인_꺼졌는데_기계승인_active",
+    "자동승인_제외_kind가_active",
+    "자기참조_엣지",
+    "닫힌_status_어휘_위반",
+    "대칭_중복행",
+    "대칭_캐논순서_위반",
+    "비활성_kind_엣지",
+    "비-asset_노드_참조",
+)
 
 
 class TestCheckList(unittest.TestCase):
@@ -68,6 +88,72 @@ class TestCheckList(unittest.TestCase):
             min_conf_similarity=0.75, exclude_kinds=frozenset({"same_domain", "duplicate_near"}))}
         self.assertIn(["duplicate_near", "same_domain"],
                       checks["자동승인_제외_kind가_active"]["params"])
+
+
+class TestMmMemberAxis(unittest.TestCase):
+    """084 착수 전 결정 ① — 소속 엣지(``mm_member``)는 **별도 검사 축**이다.
+
+    왜 축을 갈랐나: 기존 ``비-asset_노드_참조`` 는 "양 끝이 asset 이어야 한다"를 전수로 셌다.
+    084 가 만드는 소속 엣지는 **dst 가 entity 노드**라서 그 검사에 걸리면 저장 즉시 게이트가
+    빨간불이 된다 — 그렇다고 검사를 지우면 자산↔자산 엣지에 entity 가 섞이는 실제 결함을 놓친다.
+    그래서 기존 검사는 **asset↔asset 한정**으로 좁히고, 소속 엣지에는 그 엣지에 맞는 불변식
+    (방향 고정·kind 등록 형태)을 새 축으로 세운다.
+    """
+
+    _KW = {"min_conf_similarity": 0.75, "exclude_kinds": _EXCLUDE, "auto_approve_min": 1.01}
+
+    def _checks(self) -> dict[str, dict]:
+        return {c["name"]: c for c in build_checks(**self._KW)}
+
+    def test_기존_검사_이름과_순서가_앞에_그대로_남는다(self):
+        names = [c["name"] for c in build_checks(**self._KW)]
+        self.assertEqual(names[: len(_LEGACY_CHECK_NAMES)], list(_LEGACY_CHECK_NAMES))
+
+    def test_소속_검사축이_목록_끝에_추가된다(self):
+        names = [c["name"] for c in build_checks(**self._KW)]
+        self.assertEqual(names[len(_LEGACY_CHECK_NAMES):], list(MM_MEMBER_CHECK_NAMES))
+        self.assertEqual(list(CHECK_NAMES), names)
+
+    def test_비asset_노드_참조는_소속_엣지를_제외한다(self):
+        # 소속 엣지는 정의상 dst 가 entity 다 — 이 검사에 걸리면 게이트가 영구히 빨간불이 된다.
+        check = self._checks()["비-asset_노드_참조"]
+        self.assertIn("kind_code <> %s", check["sql"])
+        self.assertIn(MM_MEMBER_KIND_CODE, check["params"])
+
+    def test_비asset_노드_참조는_소속_밖_엣지는_여전히_잡는다(self):
+        # 좁히기가 "검사 무력화"로 새지 않았는지 — 양 끝 asset 조건 자체는 남아 있어야 한다.
+        sql = self._checks()["비-asset_노드_참조"]["sql"]
+        self.assertIn("n1.node_kind <> 'asset'", sql)
+        self.assertIn("n2.node_kind <> 'asset'", sql)
+
+    def test_소속_엣지_방향_검사는_kind와_양끝을_고정한다(self):
+        check = self._checks()["소속_엣지_방향_위반"]
+        self.assertIn("kind_code = %s", check["sql"])
+        self.assertIn(MM_MEMBER_KIND_CODE, check["params"])
+        # src=asset · dst=entity 고정 → 역방향(entity→asset)도 이 조건에서 위반으로 잡힌다.
+        self.assertIn("sn.node_kind <> 'asset'", check["sql"])
+        self.assertIn("dn.node_kind <> 'entity'", check["sql"])
+
+    def test_소속_kind_등록_검사는_비대칭_active를_요구한다(self):
+        check = self._checks()["소속_kind_등록_위반"]
+        self.assertIn(MM_MEMBER_KIND_CODE, check["params"])
+        self.assertIn("is_symmetric", check["sql"])
+        self.assertIn("status <> 'active'", check["sql"])
+
+    def test_소속_검사도_kind_코드를_상수로_바인딩한다(self):
+        # 문자열 하드코딩 금지 — 영속(persist)과 같은 정본 상수를 쓴다.
+        for name in MM_MEMBER_CHECK_NAMES:
+            with self.subTest(name):
+                check = self._checks()[name]
+                self.assertEqual(check["params"], [MM_MEMBER_KIND_CODE])
+                self.assertNotIn(f"'{MM_MEMBER_KIND_CODE}'", check["sql"])
+
+    def test_게이트를_끈_설정에서도_소속_검사는_남는다(self):
+        # 소속 엣지 불변식은 관계 게이트 설정과 무관하다(끄고 켤 축이 아니다).
+        names = [c["name"] for c in build_checks(min_conf_similarity=0.0,
+                                                 exclude_kinds=frozenset())]
+        for name in MM_MEMBER_CHECK_NAMES:
+            self.assertIn(name, names)
 
 
 class _FakeDb:
@@ -142,6 +228,15 @@ class TestRunVerify(unittest.TestCase):
         checks = build_checks(**self._CHECKS_KW)
         rep = run_verify(_FakeDb({}), checks=checks)
         self.assertEqual([r["name"] for r in rep["results"]], [c["name"] for c in checks])
+
+    def test_소속_엣지_위반도_실패로_집계된다(self):
+        # 새 축이 목록에만 있고 집계에서 빠지면 "통과"가 거짓이 된다.
+        rep = run_verify(_FakeDb({"소속_엣지_방향_위반": 2, "소속_kind_등록_위반": 1}),
+                         checks=build_checks(**self._CHECKS_KW))
+        self.assertFalse(rep["ok"])
+        self.assertEqual(rep["violations"], 3)
+        self.assertEqual({v["name"] for v in rep["failed"]},
+                         {"소속_엣지_방향_위반", "소속_kind_등록_위반"})
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@
 **절차 — 두 갈래** (각 단계는 별도 실행 · 재생성은 파이프라인 레포):
 
 **A. 백지 재생성(권장 · ``--phase clear``)** — "진짜 결과"를 보려면 이 쪽이다.
-  ① ``--phase clear`` : 전량 백업(JSON) 후 ``graph_edge`` **전량 DELETE** +
+  ① ``--phase clear`` : 전량 백업(JSON) 후 ``graph_edge`` **전량 DELETE**(소속 엣지 제외) +
      ``relation_resolution`` 전량 DELETE(재처리 대상으로 되돌림). ``node`` 는 **지우지 않는다**
      (자산 노드는 재생성이 그대로 재사용).
   ② run_relations 전량 재생성 — DB 에 남는 모든 엣지가 새 프롬프트 산물이다.
@@ -32,6 +32,12 @@
 세 phase 모두 ``reviewed_by IS NOT NULL``(사람이 만진) 행은 건드리지 않는다 — 현재 0건
 실측이나 원칙을 코드로 박는다. 기본은 dry-run(건수만 출력·DB 무변경) · 실제 실행은 ``--apply``
 명시 필요 · 파괴적 phase 는 **백업 파일 생성 성공이 선행 조건**이다.
+
+🔴 **소속 엣지(``mm_member``·084)는 세 phase 모두에서 제외한다**(spec 084 착수 전 결정 ③).
+``graph_edge`` 를 함께 쓰지만 **점수 축이 다른 데이터**다 — 소속 엣지는 신뢰도를 매기지 않아
+(``confidence`` NULL) 사람이 만지지 않은 전건이 위 purge 술어에 그대로 걸린다. 관계 점수를
+되돌리는 작업이 남의 기능 데이터를 통째로 지우는 셈이라, 술어마다 가드를 붙였다. 비유하면 연도별
+서류 폐기인데 같은 캐비닛에 든 다른 부서 서류까지 버리는 것 — 캐비닛이 같을 뿐 폐기 대상이 아니다.
 """
 from __future__ import annotations
 
@@ -43,6 +49,7 @@ from pathlib import Path
 
 from src.config.bootstrap import bootstrap_env
 from src.database.postgres_util import PostgresUtil
+from src.relations.schema import MM_MEMBER_KIND_CODE
 
 # 백업·리셋 대상 열 — graph_edge 전 열(복원 시 INSERT 로 그대로 되돌릴 수 있어야 한다).
 _BACKUP_SQL = """
@@ -56,13 +63,40 @@ JOIN relation_kind rk ON rk.relation_kind_id = ge.relation_kind_id
 ORDER BY ge.edge_id
 """
 
-_RESET_SQL = """
+# 소속 엣지 보호 가드 — **kind_code 를 하위질의로 푼다**. ``relation_kind_id`` 는 환경마다 다른
+# UUID 라 스크립트에 박을 수 없고, 코드 문자열은 ``src/relations/schema.py`` 상수를 바인딩한다
+# (사본을 만들면 언젠가 한쪽만 고쳐진다). 행이 아직 없는 환경에서는 하위질의가 비어 가드가
+# 아무 것도 빼지 않는다 = 기존 동작 그대로다(현행 dev 에 mm_member 행이 없다).
+_MM_MEMBER_GUARD = (
+    "relation_kind_id NOT IN "
+    "(SELECT relation_kind_id FROM relation_kind WHERE kind_code = %s)"
+)
+# 파라미터는 항상 이 한 값 — 세 phase 가 같은 튜플을 쓴다(형태를 통일해 빠뜨림을 눈에 띄게).
+_GUARD_PARAMS = (MM_MEMBER_KIND_CODE,)
+
+_RESET_SQL = f"""
 UPDATE graph_edge
 SET status = 'proposed', confidence = NULL, updated_at = now()
 WHERE reviewed_by IS NULL
+  AND {_MM_MEMBER_GUARD}
 """
+# 리셋 대상 건수도 **같은 술어**로 센다 — 보고 숫자와 실제 갱신 행수가 갈리면 진행 보고를 신뢰할
+# 수 없다(가드를 넣은 뒤 "대상 500건 → 350행 갱신"으로 어긋나는 것을 막는다).
+_RESET_TARGET_COUNT_SQL = (
+    f"SELECT COUNT(*) FROM graph_edge WHERE reviewed_by IS NULL AND {_MM_MEMBER_GUARD}"
+)
 
-_PURGE_SQL = "DELETE FROM graph_edge WHERE confidence IS NULL AND reviewed_by IS NULL"
+_PURGE_SQL = (
+    "DELETE FROM graph_edge WHERE confidence IS NULL AND reviewed_by IS NULL "
+    f"AND {_MM_MEMBER_GUARD}"
+)
+_PURGE_TARGET_COUNT_SQL = (
+    "SELECT COUNT(*) FROM graph_edge WHERE confidence IS NULL AND reviewed_by IS NULL "
+    f"AND {_MM_MEMBER_GUARD}"
+)
+# 백지화도 전량이 아니다 — 소속 엣지는 남긴다(관계 재생성이 다시 만들어 주지 않는 데이터다).
+_CLEAR_EDGES_SQL = f"DELETE FROM graph_edge WHERE {_MM_MEMBER_GUARD}"
+_CLEAR_TARGET_COUNT_SQL = f"SELECT COUNT(*) FROM graph_edge WHERE {_MM_MEMBER_GUARD}"
 
 
 def _counts(cur) -> dict[str, int]:
@@ -81,6 +115,10 @@ def _counts(cur) -> dict[str, int]:
 def phase_reset(db: PostgresUtil, *, apply: bool, backup_dir: Path) -> int:
     """①리셋 — 전량 백업 후 status/confidence 초기화. 반환값은 대상 행 수.
 
+    소속 엣지(``mm_member``)는 **대상이 아니다** — 그 엣지의 ``status``·``confidence`` 는 관계 점수
+    축이 아니라 소속 판정의 결과다(spec 084 §4). 값이 같아 무해해 보이지만 ``updated_at`` 이 밀려
+    "언제 판정됐나"가 흐려지고, 이어지는 purge 대상 판정에도 섞인다.
+
     Args:
         db: DB 유틸(트랜잭션은 apply 시에만 연다).
         apply: False(기본)면 dry-run — 대상 건수만 출력하고 아무것도 바꾸지 않는다.
@@ -88,11 +126,12 @@ def phase_reset(db: PostgresUtil, *, apply: bool, backup_dir: Path) -> int:
     """
     with db.connection() as conn, conn.cursor() as cur:
         print("현재 분포:", _counts(cur))
-        cur.execute("SELECT COUNT(*) FROM graph_edge WHERE reviewed_by IS NULL")
+        cur.execute(_RESET_TARGET_COUNT_SQL, _GUARD_PARAMS)
         target = int(cur.fetchone()[0])
         cur.execute("SELECT COUNT(*) FROM graph_edge WHERE reviewed_by IS NOT NULL")
         protected = int(cur.fetchone()[0])
-    print(f"리셋 대상 {target}건 · 사람 결정 보호 {protected}건")
+    print(f"리셋 대상 {target}건 · 사람 결정 보호 {protected}건 "
+          f"· 소속({MM_MEMBER_KIND_CODE}) 엣지 제외")
     if not apply:
         print("[dry-run] 변경 없음. 실행하려면 --apply")
         return 0
@@ -102,7 +141,7 @@ def phase_reset(db: PostgresUtil, *, apply: bool, backup_dir: Path) -> int:
         return 1
 
     with db.transaction() as conn, conn.cursor() as cur:
-        cur.execute(_RESET_SQL)
+        cur.execute(_RESET_SQL, _GUARD_PARAMS)
         print(f"리셋 완료: {cur.rowcount}행 → status='proposed' · confidence=NULL")
     return 0
 
@@ -140,6 +179,10 @@ def phase_clear(db: PostgresUtil, *, apply: bool, backup_dir: Path) -> int:
     ``node`` 는 지우지 않는다 — 자산 노드는 재생성이 그대로 재사용하며, 지우면 노드 재생성
     비용만 늘고 얻는 것이 없다. ``graph_edge`` 를 참조하는 FK 는 없음을 실측 확인했다.
 
+    🔴 **소속 엣지(``mm_member``)도 지우지 않는다**: 관계 재생성(``run_relations``)이 다시 만들어
+    주는 데이터가 아니다(소속은 별도 배치 ``run_mm_meta_binding`` 산물이다). 함께 지우면 백지화
+    후 재생성이 끝나도 소속만 영구히 빈 상태로 남는다.
+
     Args:
         db: DB 유틸.
         apply: False(기본)면 dry-run — 대상 건수만 출력하고 아무것도 지우지 않는다.
@@ -149,12 +192,12 @@ def phase_clear(db: PostgresUtil, *, apply: bool, backup_dir: Path) -> int:
         print("현재 분포:", _counts(cur))
         cur.execute("SELECT COUNT(*) FROM graph_edge WHERE reviewed_by IS NOT NULL")
         protected = int(cur.fetchone()[0])
-        cur.execute("SELECT COUNT(*) FROM graph_edge")
+        cur.execute(_CLEAR_TARGET_COUNT_SQL, _GUARD_PARAMS)
         edges = int(cur.fetchone()[0])
         cur.execute("SELECT COUNT(*) FROM relation_resolution")
         res = int(cur.fetchone()[0])
     print(f"삭제 대상: graph_edge {edges}건 · relation_resolution {res}건 "
-          f"(node 는 유지) · 사람 결정 {protected}건")
+          f"(node·소속({MM_MEMBER_KIND_CODE}) 엣지는 유지) · 사람 결정 {protected}건")
     if protected:
         print("🔴 사람 검토 흔적이 있다 — 백지화를 중단한다(보존 정책 재검토 필요)")
         return 1
@@ -165,7 +208,7 @@ def phase_clear(db: PostgresUtil, *, apply: bool, backup_dir: Path) -> int:
         print("🔴 백업 생성 실패 — 삭제를 중단한다(백업 없는 삭제 금지)")
         return 1
     with db.transaction() as conn, conn.cursor() as cur:
-        cur.execute("DELETE FROM graph_edge")
+        cur.execute(_CLEAR_EDGES_SQL, _GUARD_PARAMS)
         n_edges = cur.rowcount
         cur.execute("DELETE FROM relation_resolution")
         n_res = cur.rowcount
@@ -179,6 +222,10 @@ def phase_purge(db: PostgresUtil, *, apply: bool) -> int:
     ⚠️ 반드시 ②(전량 재생성)가 **완주한 뒤** 실행한다 — 중간에 돌리면 아직 순번이 안 온
     자산의 멀쩡한 관계까지 지운다. 완주 판정은 relation_resolution 미해소 0 으로 확인.
 
+    🔴 소속 엣지(``mm_member``)는 술어에서 **제외**한다: 소속은 신뢰도를 매기지 않으므로
+    (``confidence`` NULL · spec 084 §4) 가드가 없으면 사람이 만지지 않은 전건이 이 DELETE 에
+    걸려 사라진다. 084 백필 전에 이 phase 를 돌려도, 뒤에 돌려도 안전하게 만든 것이 이 가드다.
+
     Args:
         db: DB 유틸.
         apply: False(기본)면 dry-run.
@@ -188,19 +235,17 @@ def phase_purge(db: PostgresUtil, *, apply: bool) -> int:
         # 완주 가드 — pending 이 남아 있으면 재생성 미완주로 보고 중단한다.
         cur.execute("SELECT COUNT(*) FROM relation_resolution WHERE status = 'pending'")
         pending = int(cur.fetchone()[0])
-        cur.execute(
-            "SELECT COUNT(*) FROM graph_edge WHERE confidence IS NULL AND reviewed_by IS NULL"
-        )
+        cur.execute(_PURGE_TARGET_COUNT_SQL, _GUARD_PARAMS)
         target = int(cur.fetchone()[0])
     if pending > 0:
         print(f"🔴 relation_resolution pending {pending}건 — 재생성 미완주. purge 를 중단한다")
         return 1
-    print(f"소거 대상(재제안 안 된 엣지) {target}건")
+    print(f"소거 대상(재제안 안 된 엣지) {target}건 · 소속({MM_MEMBER_KIND_CODE}) 엣지 제외")
     if not apply:
         print("[dry-run] 변경 없음. 실행하려면 --apply")
         return 0
     with db.transaction() as conn, conn.cursor() as cur:
-        cur.execute(_PURGE_SQL)
+        cur.execute(_PURGE_SQL, _GUARD_PARAMS)
         print(f"소거 완료: {cur.rowcount}행 DELETE")
     return 0
 

@@ -12,6 +12,13 @@
 
 읽기 전용
     스키마·쓰기 경로 변경 0(헌법 6조). VIEW 미사용 — ``src/relations/`` 파이썬 쿼리 함수 관례.
+
+두 갈래가 한 파일에 있다(파일 아래쪽 ``084 멀티모달 메타`` 절)
+    - **자산 ↔ 자산 관계**(대칭 kind 포함) — 위에서 말한 양방향 매칭·방향 정규화가 필요하다.
+    - **자산 → 개체 소속**(``mm_member`` · 084) — **비대칭**이라 양방향 매칭을 하지 않는다. 같은
+      파일에 두는 이유는 소비자(자산 상세·묶음 카드)가 그래프 읽기를 여기 하나로만 하게 하려는
+      것이고(모듈이 존재하는 이유와 같다), SQL 상수는 서로 **갈라 둔다** — 공유하면 한쪽 수정이
+      다른 쪽을 조용히 바꾼다.
 """
 from __future__ import annotations
 
@@ -21,7 +28,9 @@ from typing import Any
 from psycopg import Connection
 from psycopg.rows import dict_row
 
+from src.domain.text_norm import normalize_text_key
 from src.relations.approval_policy import choose_folded_edge, exposure_tier
+from src.relations.schema import MM_MEMBER_KIND_CODE
 
 # 엣지 양 끝을 node → asset 으로 두 번 조인한다. 앞의 조인은 asset_id 를 얻기 위한 것이고,
 # 뒤의 조인은 화면에 보일 파일명·모달리티를 함께 가져오기 위한 것이다 — 이게 없으면 소비자가
@@ -188,3 +197,192 @@ def fetch_active_relations_for_asset(
         적용하지 않는다 — 호출자가 원한 상태를 조용히 걸러내면 "왜 안 나오나"를 추적할 수 없다.
     """
     return fetch_relations_for_asset(conn, asset_id=asset_id, statuses=[status])
+
+
+# ── 084 멀티모달 메타(mm_meta) 조회 ─────────────────────────────────────────────
+# 소속 엣지는 ``자산 → 개체``(``mm_member``) **비대칭**이다. 그래서 위의 관계 조회와 달리 양방향
+# 매칭을 하지 않는다 — 개체 노드가 src 인 엣지는 존재하지 않으므로 찾을 필요가 없고, 찾으려 들면
+# 나중에 붙을 개체↔개체 엣지(비범위)까지 섞여 든다.
+#
+# 노출 상태 기본값에 **``proposed`` 를 포함**하는 것이 이 기능의 생사다: 초기에는 전건 proposed
+# 이므로 active 만 보면 화면이 영구히 빈다(081 번들이 active 0건으로 무동작이던 재발 방지 · spec §7).
+# 승격 경로는 084 범위 밖이라 "확인된 N건"은 **승인 상태가 아니라 판정 사실**을 가리킨다.
+_MM_META_DEFAULT_STATUSES = ("active", "proposed")
+
+# 자산 → 속한 메타 목록. ``bundle_size`` 는 그 메타에 달린 소속 엣지 수(= "확인된 N건")이며
+# **같은 상태 필터 + 같은 asset 노드 조건**을 쓴다 — 목록의 건수와 묶음 화면(``mm_meta_bundle``)의
+# 건수가 어긋나면 사용자가 둘 중 무엇을 믿어야 할지 알 수 없다. 하위질의에 asset 노드 조인을
+# 넣은 이유가 그 일치다(소속 엣지의 src 는 늘 자산이지만, 조건이 없으면 나중에 붙는 개체↔개체
+# 엣지가 이 셈에 섞여 두 화면의 숫자가 갈린다).
+# ⚠️ 바인딩 순서 주의: 상관 하위질의가 SELECT 절에 있어 그 ``%s`` 가 **가장 먼저** 온다
+#    (statuses, asset_id, kind_code, statuses).
+_MM_META_OF_ASSET_SQL = """
+SELECT en.entity_type,
+       en.entity_uid,
+       COALESCE(NULLIF(en.canonical->>'name', ''), en.entity_uid) AS name,
+       ge.edge_id, ge.status, ge.reason,
+       (SELECT count(*) FROM graph_edge be
+          JOIN node bn ON bn.node_id = be.src_node AND bn.node_kind = 'asset'
+         WHERE be.dst_node = en.node_id
+           AND be.relation_kind_id = ge.relation_kind_id
+           AND be.status = ANY(%s)) AS bundle_size
+FROM graph_edge ge
+JOIN relation_kind rk ON rk.relation_kind_id = ge.relation_kind_id
+JOIN node an ON an.node_id = ge.src_node AND an.node_kind = 'asset'
+JOIN node en ON en.node_id = ge.dst_node AND en.node_kind = 'entity'
+WHERE an.asset_id = %s
+  AND rk.kind_code = %s
+  AND ge.status = ANY(%s)
+ORDER BY en.entity_type, en.entity_uid
+"""
+
+# 메타 노드 1건. 엣지가 0건이어도 메타는 존재할 수 있으므로(수동 선등록한 빈 메타 · spec §6-1)
+# 노드 조회와 구성 자산 조회를 **갈라 둔다** — 한 질의로 합치면 "없는 메타"와 "빈 메타"를 구분할 수 없다.
+_MM_META_NODE_SQL = """
+SELECT node_id,
+       COALESCE(NULLIF(canonical->>'name', ''), entity_uid) AS name,
+       canonical
+FROM node
+WHERE node_kind = 'entity' AND entity_type = %s AND entity_uid = %s
+LIMIT 1
+"""
+
+# 메타의 구성 자산. 파일명·모달리티는 ``asset`` 에만 있으므로 node→asset 조인이 필요하다
+# (위 관계 조회와 같은 이유). 정렬은 모달리티 → 자산 id 로 결정적이다.
+_MM_META_MEMBERS_SQL = """
+SELECT ge.edge_id, ge.status, ge.reason,
+       a.asset_id, a.modality, a.fs_path
+FROM graph_edge ge
+JOIN relation_kind rk ON rk.relation_kind_id = ge.relation_kind_id
+JOIN node an ON an.node_id = ge.src_node AND an.node_kind = 'asset'
+JOIN asset a ON a.asset_id = an.asset_id
+WHERE ge.dst_node = %s
+  AND rk.kind_code = %s
+  AND ge.status = ANY(%s)
+ORDER BY a.modality NULLS LAST, a.asset_id
+"""
+
+
+def _wanted_statuses(statuses: list[str] | None) -> list[str]:
+    """노출 대상 상태 목록을 정한다(기본값에 ``proposed`` 포함).
+
+    Args:
+        statuses: 호출자가 지정한 상태 목록. ``None`` 이면 기본값(active+proposed)을 쓴다.
+            빈 목록을 주면 **빈 결과**가 나온다 — 조용히 기본값으로 되돌리지 않는다(호출자가
+            원한 필터를 함수가 덮으면 "왜 다 보이나"를 추적할 수 없다).
+
+    Returns:
+        바인딩용 리스트(psycopg 가 ``ANY(%s)`` 배열로 적응시킨다).
+    """
+    return list(_MM_META_DEFAULT_STATUSES) if statuses is None else list(statuses)
+
+
+def mm_meta_of_asset(
+    conn: Connection[Any], *, asset_id: str, statuses: list[str] | None = None
+) -> list[dict[str, Any]]:
+    """자산이 속한 **멀티모달 메타 목록**을 조회한다(읽기 전용 · spec §5).
+
+    자산 상세의 "이 파일이 속한 메타" 진입점이 쓰는 통로다. 메타마다 묶음 크기를 함께 주므로
+    소비자가 추가 질의 없이 "확인된 N건"을 표시할 수 있다.
+
+    ⚠️ **1건짜리 메타(묶음 미성립)를 감추는 것은 소비자 몫**이다(spec §7 리뷰 지점 ②). 여기서
+    걸러 내면 "왜 이 메타가 자산 상세에 없나"를 조회 계층에서 다시 파야 하고, 화면 정책이 SQL 에
+    숨는다.
+
+    Args:
+        asset_id: 관점이 되는 자산. 소속 엣지의 **src** 쪽으로만 매칭한다(비대칭 kind).
+        statuses: 조회할 엣지 상태 목록. ``None``(기본) 이면 ``active``+``proposed`` — 초기에는
+            전건 proposed 라 이 기본값이 없으면 기능이 무동작이다(spec §7).
+
+    Returns:
+        ``[{entity_type, entity_uid, name, bundle_size, edge_id, status, reason}]`` —
+        ``(entity_type, entity_uid)`` 오름차순(결정적). ``edge_id`` 는 **문자열**이다(조회행 id →
+        str 관례). ``reason`` 은 스탬프 원문이며 해석은 ``src.mm_meta.persist.parse_member_reason``
+        가 한다(조회 계층이 스탬프 형식을 알 필요는 없다). 소속이 없으면 빈 리스트.
+    """
+    wanted = _wanted_statuses(statuses)
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(_MM_META_OF_ASSET_SQL,
+                    (wanted, asset_id, MM_MEMBER_KIND_CODE, wanted))
+        rows = cur.fetchall()
+    return [
+        {
+            "entity_type": str(r["entity_type"]),
+            "entity_uid": str(r["entity_uid"]),
+            # SQL 이 이미 폴백하지만 파이썬에서도 한 번 더 받는다 — 빈 라벨은 화면에서 "이름 없는
+            # 묶음"이 되어 클릭할 수 없게 된다.
+            "name": str(r["name"] or r["entity_uid"]),
+            "bundle_size": int(r["bundle_size"] or 0),
+            "edge_id": str(r["edge_id"]),
+            "status": str(r["status"]),
+            "reason": r["reason"],
+        }
+        for r in rows
+    ]
+
+
+def mm_meta_bundle(
+    conn: Connection[Any],
+    *,
+    entity_type: str,
+    entity_uid: str,
+    statuses: list[str] | None = None,
+) -> dict[str, Any] | None:
+    """메타 하나의 **구성 자산을 모달리티별로 묶어** 조회한다(읽기 전용 · spec §5).
+
+    메타 카드가 쓰는 통로다. 이 기능의 존재 이유가 크로스모달 응집(텍스트·이미지·영상·오디오가
+    한 묶음)이므로 반환도 모달리티별 그룹 + 건수다.
+
+    빈 경우를 **두 가지로 구분**한다 — 메타 자체가 없으면 ``None``(호출부는 404), 메타는 있고 자산이
+    0건이면 ``total=0``(수동 선등록한 빈 메타 · spec §6-1). 구분하지 않으면 "등록했는데 안 보인다"와
+    "주소가 틀렸다"가 같은 응답이 된다.
+
+    Args:
+        entity_type: 개체 타입(닫힌 5종). 같은 표기·다른 타입은 별개 메타다(동음이의 분리).
+        entity_uid: 표기 키. 컬럼에는 정규화 키만 저장되므로 입력도 같은 규칙으로 눌러 대조한다
+            (``normalize_text_key`` 는 멱등이라 이미 키인 값은 그대로다 — URL 로 오는 값의 표기
+            차이를 흡수한다).
+        statuses: 조회할 엣지 상태 목록. ``None``(기본) 이면 ``active``+``proposed``.
+
+    Returns:
+        ``{entity_type, entity_uid, name, source, total, modalities}`` 또는 메타가 없으면 ``None``.
+        ``source`` 는 ``user``(수동 선등록)·``auto``(배치 발굴) — ``canonical.source`` 부재는
+        ``auto`` 다(spec §6-1). ``modalities`` 는
+        ``[{modality, count, assets: [{asset_id, modality, file_name, edge_id, status, reason}]}]``
+        이며 모달리티 → 자산 id 오름차순이다. id 는 전부 **문자열**이다(조회행 id → str 관례).
+    """
+    uid = normalize_text_key(entity_uid)
+    wanted = _wanted_statuses(statuses)
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(_MM_META_NODE_SQL, (entity_type, uid))
+        node = cur.fetchone()
+        if node is None:
+            return None  # 없는 메타 — 빈 메타(아래 total=0)와 구분한다
+        cur.execute(_MM_META_MEMBERS_SQL,
+                    (node["node_id"], MM_MEMBER_KIND_CODE, wanted))
+        rows = cur.fetchall()
+
+    canonical = node["canonical"] if isinstance(node["canonical"], dict) else {}
+    # 그룹은 SQL 정렬 순서(모달리티 오름차순)를 그대로 따른다 — dict 는 삽입 순서를 보존하므로
+    # 파이썬에서 다시 정렬하지 않아도 결정적이다.
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        modality = str(r["modality"] or "")
+        groups.setdefault(modality, []).append({
+            "asset_id": str(r["asset_id"]),
+            "modality": modality,
+            # 표시용 파일명 — 경로 전체를 내려보내지 않는다(기존 관계 조회와 같은 관례).
+            "file_name": os.path.basename(r["fs_path"] or ""),
+            "edge_id": str(r["edge_id"]),
+            "status": str(r["status"]),
+            "reason": r["reason"],
+        })
+    return {
+        "entity_type": str(entity_type),
+        "entity_uid": uid,
+        "name": str(node["name"] or uid),
+        "source": str(canonical.get("source") or "auto"),
+        "total": len(rows),
+        "modalities": [{"modality": m, "count": len(items), "assets": items}
+                       for m, items in groups.items()],
+    }

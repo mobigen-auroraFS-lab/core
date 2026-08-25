@@ -26,6 +26,27 @@ from typing import Any
 # 과거 MVP: 도메인을 kind_code 로 쓰던 값 — 프롬프트·sanitize 에서 제외.
 LEGACY_DOMAIN_TYPE_CODES: frozenset[str] = frozenset({"medical", "computer", "marriage", "general"})
 
+# 084 멀티모달 메타 **소속** 엣지의 종류 코드(자산 → 개체 노드·비대칭).
+#   왜 여기 있나: 이 값을 읽는 곳이 둘이다 — 프롬프트 제외 목록(바로 아래·``src/relations/``)과
+#   영속 층(``src/mm_meta/persist.py``). 순수 모듈인 이 파일에 두면 양쪽이 사본 없이 같은 값을
+#   쓴다(mm_meta 쪽에 두면 relations → mm_meta → relations 순환 import 가 된다).
+MM_MEMBER_KIND_CODE = "mm_member"
+
+# LLM 관계 프롬프트 카탈로그에서 **빼는** 종류 코드 집합.
+#   두 갈래가 섞여 있다:
+#     ① 레거시 도메인 코드 — 프롬프트에 실으면 LLM 이 도메인을 관계 종류로 혼용해 제안한다.
+#     ② ``mm_member``(084) — 자산↔자산 관계가 아니라 **자산→개체 소속**이다. active 로 등록해야
+#        엣지가 될 수 있는데(graph_persist 는 active kind 만 받는다), active 라는 이유로 프롬프트
+#        카탈로그에 실리면 LLM 이 자산 쌍에 이 종류를 제안하고 그 오염이 그래프에 영속된다.
+#        그래서 "active 등록 + 프롬프트 제외"로 갈랐다(spec 084 착수 전 결정 ② 확정 2026-08-24).
+#   이 집합은 **세 곳에서 같은 기준**으로 쓰인다(사본 없음 · 2026-08-24 G3 완결):
+#     ① 프롬프트 카탈로그 조회(`fetch_active_relation_kinds`) — LLM 에게 보여 주지 않는다.
+#     ② 신규 종류 제안 검사(`sanitize_llm_proposed_type_code`) — 지어낸 코드도 등록하지 않는다.
+#     ③ 엣지 저장(`graph_persist.sync_graph_edges`) — 어떤 경로로 새 들어와도 엣지가 되지 않는다.
+#   ①만 있으면 LLM 이 카탈로그 밖 코드를 지어내는 경로가 남고, ``mm_member`` 는 **active** 라서
+#   "active kind 만 저장" 검사도 통과해 버린다 — 그래서 ③이 필요하다.
+PROMPT_EXCLUDED_KIND_CODES: frozenset[str] = LEGACY_DOMAIN_TYPE_CODES | {MM_MEMBER_KIND_CODE}
+
 # LLM이 제안한 신규 relation kind 코드(비활성 자동 등록용): 소문자 영문·숫자·밑줄, 최대 100자
 _LLM_PROPOSED_TYPE_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,99}$")
 
@@ -117,9 +138,16 @@ def sanitize_llm_proposed_type_code(code: str) -> str | None:
 
     거부 조건
         - 길이 0 또는 100 초과
-        - ``LEGACY_DOMAIN_TYPE_CODES``(도메인을 관계 종류로 쓰던 과거 코드 — 섞이면 LLM이 도메인과
-          관계를 혼동해 제안한다)
+        - ``PROMPT_EXCLUDED_KIND_CODES`` — **프롬프트에 싣지 않는 코드는 제안으로도 받지 않는다.**
+          두 갈래가 같은 이유로 묶인다: ①레거시 도메인 코드(섞이면 LLM 이 도메인과 관계를 혼동해
+          제안한다) ②``mm_member``(084 소속) — LLM 이 이 코드를 새 종류로 제안하면 자동 등록이
+          같은 ``kind_code`` 행의 **이름·설명을 LLM 문구로 덮어써** 소속 엣지의 카탈로그가 오염된다.
+          기준을 한 집합으로 모아 둔 이유는 사본이 생기면 언젠가 한쪽만 고쳐지기 때문이다.
         - 정규식 ``[a-z][a-z0-9_]{0,99}`` 불일치
+
+    현 카탈로그 5종(``same_domain``·``same_series``·``duplicate_near``·``references``·
+    ``derived_from``)은 제외 집합에 없으므로 **전부 그대로 통과한다** — 이 조이기는 기존 관계 경로의
+    동작을 바꾸지 않는다(테스트가 그 회귀를 못 박는다).
 
     Args:
         code: 검사할 코드. **호출 전에** ``normalize_relation_type_code`` 로 소문자화해 두어야
@@ -130,7 +158,7 @@ def sanitize_llm_proposed_type_code(code: str) -> str | None:
     """
     if not code or len(code) > 100:
         return None
-    if code in LEGACY_DOMAIN_TYPE_CODES:
+    if code in PROMPT_EXCLUDED_KIND_CODES:
         return None
     if not _LLM_PROPOSED_TYPE_CODE_RE.fullmatch(code):
         return None

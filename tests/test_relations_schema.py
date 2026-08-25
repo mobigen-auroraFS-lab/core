@@ -159,6 +159,22 @@ class TestSanitizeLlmProposedTypeCode(unittest.TestCase):
         self.assertIsNone(sanitize_llm_proposed_type_code("computer"))
         self.assertIsNone(sanitize_llm_proposed_type_code("medical"))
 
+    def test_rejects_prompt_excluded_codes(self) -> None:
+        # 084 방어 ② — 기준을 **프롬프트 제외 집합**으로 통일한다. LLM 이 'mm_member' 를 새 종류로
+        # 제안하면 inactive 자동 등록이 그 코드의 이름·설명을 LLM 문구로 덮어쓸 수 있고(같은
+        # kind_code 유니크), 그러면 소속 엣지의 카탈로그 행이 오염된다. 제안 자체를 기각한다.
+        from src.relations.schema import PROMPT_EXCLUDED_KIND_CODES
+
+        for code in sorted(PROMPT_EXCLUDED_KIND_CODES):
+            with self.subTest(code=code):
+                self.assertIsNone(sanitize_llm_proposed_type_code(code))
+
+    def test_catalog_kinds_still_pass(self) -> None:
+        # 🔴 회귀 증명 — 현 카탈로그 5종은 **전부 통과**한다(조이기가 기존 경로를 건드리지 않았다).
+        for code in ("same_domain", "same_series", "duplicate_near", "references", "derived_from"):
+            with self.subTest(code=code):
+                self.assertEqual(sanitize_llm_proposed_type_code(code), code)
+
     def test_rejects_hyphen(self) -> None:
         self.assertIsNone(sanitize_llm_proposed_type_code("my-type"))
 
