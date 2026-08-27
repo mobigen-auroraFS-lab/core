@@ -22,12 +22,12 @@
 """
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from psycopg import Connection
 from psycopg.rows import dict_row
 
+from src.config.filename_util import display_file_name
 from src.domain.text_norm import normalize_text_key
 from src.relations.approval_policy import choose_folded_edge, exposure_tier
 from src.relations.schema import MM_MEMBER_KIND_CODE
@@ -129,7 +129,10 @@ def fetch_relations_for_asset(
                 "reason": r["reason"],
                 "edge_id": str(r["edge_id"]),
                 # 이웃의 표시 정보를 함께 내려 준다 — 없으면 소비자가 이웃마다 자산을 다시 조회해야 한다.
-                "file_name": os.path.basename(other_fs_path or ""),
+                # 🔴 표시용 파일명은 정본 함수를 거친다(065 T605) — `basename` 만 쓰면
+                #    아카이브 이동으로 붙은 `{asset_id}__` 프리픽스가 화면에 노출된다.
+                #    2026-08-27 실측: 상세 화면에 `019f490f-…__Han_River.jpg` 가 그대로 보였다.
+                "file_name": display_file_name(other_fs_path),
                 "modality": other_modality,
                 # 강칸/약칸 구분. 기존 키는 그대로 두고 **추가**만 한다(하위호환).
                 "tier": tier,
@@ -372,7 +375,8 @@ def mm_meta_bundle(
             "asset_id": str(r["asset_id"]),
             "modality": modality,
             # 표시용 파일명 — 경로 전체를 내려보내지 않는다(기존 관계 조회와 같은 관례).
-            "file_name": os.path.basename(r["fs_path"] or ""),
+            # 표시용 파일명 — 정본 함수 경유(위 주석과 같은 이유).
+            "file_name": display_file_name(r["fs_path"]),
             "edge_id": str(r["edge_id"]),
             "status": str(r["status"]),
             "reason": r["reason"],

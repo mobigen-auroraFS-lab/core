@@ -15,12 +15,12 @@
 """
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from psycopg import Connection
 from psycopg.rows import dict_row
 
+from src.config.filename_util import display_file_name
 from src.relations.path_signal import like_escape  # LIKE 메타문자 이스케이프 공용(B9·SSOT)
 
 # 노출·전이가 허용되는 상태 셋. 검토 대기(proposed) · 승인(active) · 반려(rejected).
@@ -252,12 +252,13 @@ def _review_row(r: dict[str, Any]) -> dict[str, Any]:
         "created_at": r["created_at"],
         "src": {
             "asset_id": str(r["src_asset_id"]),
-            "file_name": os.path.basename(r["src_fs_path"] or ""),
+            # 표시용 파일명은 정본 함수 경유(065 T605) — asset_id 프리픽스를 노출하지 않는다.
+            "file_name": display_file_name(r["src_fs_path"]),
             "modality": r["src_modality"],
         },
         "dst": {
             "asset_id": str(r["dst_asset_id"]),
-            "file_name": os.path.basename(r["dst_fs_path"] or ""),
+            "file_name": display_file_name(r["dst_fs_path"]),
             "modality": r["dst_modality"],
         },
     }
