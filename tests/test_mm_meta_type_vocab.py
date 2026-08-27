@@ -51,9 +51,11 @@ from src.mm_classify.persist import (
 )
 from src import mm_meta as _mm_meta_pkg  # noqa: F401  (패키지 초기화 순서 고정)
 from src.mm_meta import persist as vocab_persist
+from src.mm_meta.judge import interpret_response
 from src.mm_meta.persist import (
     DEFAULT_VOCAB_CODE,
     MmMetaPersistError,
+    ensure_entity_node,
     fetch_meta_type_vocab,
 )
 from src.mm_meta.rules import (
@@ -61,6 +63,8 @@ from src.mm_meta.rules import (
     ENTITY_TYPE_ORDER,
     ENTITY_TYPES,
     EntityTypeDef,
+    ExtractedEntity,
+    type_names,
 )
 
 # 더미 식별자(실 자산 id 금지 — 형태만 UUIDv7).
@@ -139,6 +143,61 @@ def _vocab_row(*, version: int = 1, status: str = "active") -> dict[str, Any]:
         "types": _labels(),
         "status": status,
     }
+
+
+class _WriteConn:
+    """``ensure_entity_node`` 쓰기 경로 흉내 — 노드가 없다고 답하고 INSERT 횟수를 센다.
+
+    거부 경로에서 **쓰기 시도조차 없는지**를 보려고 카운터를 둔다(예외 문구만 보면 그 사실이
+    드러나지 않는다).
+    """
+
+    def __init__(self) -> None:
+        self.writes = 0
+
+    def cursor(self, **_kw: Any) -> Any:
+        """커서 컨텍스트를 돌려준다.
+
+        Returns:
+            자기 자신(컨텍스트 매니저 겸 커서).
+        """
+        return self
+
+    def __enter__(self) -> _WriteConn:
+        """컨텍스트 진입.
+
+        Returns:
+            자기 자신.
+        """
+        return self
+
+    def __exit__(self, *_a: Any) -> None:
+        """컨텍스트 종료."""
+        return None
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        """SQL 을 받아 SELECT 는 미발견으로, INSERT 는 카운트만 한다.
+
+        Args:
+            sql: 실행 SQL.
+            params: 바인딩 파라미터(쓰지 않는다).
+        """
+        if "INSERT" in sql.upper():
+            self.writes += 1
+        self._last = sql
+
+    def fetchone(self) -> Any:
+        """조회 결과 — INSERT 전에는 미발견, 후에는 발견.
+
+        실 경로가 ``SELECT → (없으면) INSERT ... DO NOTHING → SELECT`` 라서, 두 번째 조회에도
+        ``None`` 을 주면 "노드 해소 실패" 로 떨어진다(경합 감지용 가드).
+
+        Returns:
+            INSERT 전이면 ``None``, 후면 node_id 한 칸 행.
+        """
+        if self.writes == 0:
+            return None
+        return ("018f0000-0000-7000-8000-000000000001",)
 
 
 def _classify_skill() -> Any:
@@ -358,19 +417,28 @@ class TestFetchMetaTypeVocab(unittest.TestCase):
             defs = fetch_meta_type_vocab(_Conn([_row(status="disabled")]))
         self.assertEqual(defs, ENTITY_TYPE_DEFS)
 
-    def test_어휘_밖_이름이_있으면_거부한다(self) -> None:
-        bad = _labels()
-        bad[0] = {**bad[0], "code": "animal", "name": "동물"}
-        with self.assertRaises(MmMetaPersistError) as ctx:
-            fetch_meta_type_vocab(_Conn([_row(labels=bad)]))
-        self.assertIn("동물", str(ctx.exception))
+    def test_어휘를_늘리는_것은_정상이다(self) -> None:
+        """🔴 계약 변경(spec 087 T003) — 등록 어휘가 코드 프리셋과 달라도 통과한다.
 
-    def test_5종에_모자라면_거부한다(self) -> None:
-        # 빠진 타입은 정의문 없이 판정된다(어휘 줄에는 남는다) — 조용히 통과시키면 그 타입만
-        # 옛 흔들림 상태로 되돌아간다.
+        전에는 "정확히 5종"을 요구했고, 그래서 타입을 늘리려면 **코드를 배포**해야 했다. 지금은
+        판정·저장이 이 어휘를 주입받으므로(T001·T002) 늘리는 것이 정상 운영이다.
+        """
+        ext = [*_labels(), {"code": "food", "name": "음식", "definition": "정의", "not": "경계"}]
+        defs = fetch_meta_type_vocab(_Conn([_row(labels=ext)]))
+        self.assertEqual([d.name for d in defs][-1], "음식")
+        self.assertEqual(len(defs), 6)
+
+    def test_어휘를_줄이는_것도_통과한다(self) -> None:
+        # 줄이는 것도 사람의 결정이다 — 막으면 "타입 하나 빼기"가 배포 작업이 된다.
+        defs = fetch_meta_type_vocab(_Conn([_row(labels=_labels()[:4])]))
+        self.assertEqual(len(defs), 4)
+
+    def test_빈_어휘는_거부한다(self) -> None:
+        # 🔴 빈 어휘로 판정하면 프롬프트에 타입이 없어 **전 자산이 개체 0** 이 되는데, 결과만
+        #    보고는 원인이 드러나지 않는다. 그래서 이것만은 fail-fast 로 막는다.
         with self.assertRaises(MmMetaPersistError) as ctx:
-            fetch_meta_type_vocab(_Conn([_row(labels=_labels()[:4])]))
-        self.assertIn("사건", str(ctx.exception))
+            fetch_meta_type_vocab(_Conn([_row(labels=[])]))
+        self.assertIn("하나도 없다", str(ctx.exception))
 
     def test_같은_이름이_두_번이면_거부한다(self) -> None:
         dup = [*_labels(), {"code": "person2", "name": "인물", "definition": "정의", "not": "경계"}]
@@ -642,3 +710,76 @@ class TestVocabTableSeparation(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestVocabInjectionEndToEnd(unittest.TestCase):
+    """T004 — 확장 어휘가 **판정→저장 전 구간**을 통과하는가(spec 087 G1 측정).
+
+    이 클래스가 고정하는 것: 어휘를 늘리면 ①LLM 응답 필터가 통과시키고 ②모양 검사가 통과하고
+    ③쓰기 게이트가 통과한다. 세 곳 중 하나라도 모듈 상수를 보면 늘린 타입이 **조용히 탈락**한다 —
+    그것이 T001~T003 전의 상태였다(실측: `음식` 을 어휘에 넣어도 `김치찌개` 가 사라졌다).
+
+    ⚠️ 여기서 어휘를 5종으로 두면 **동작이 이전과 같아야** 한다(G1 회귀 0 요건).
+    """
+
+    def _ext_defs(self) -> tuple[Any, ...]:
+        """프리셋 + `음식` 한 종.
+
+        Returns:
+            확장 정의문 튜플.
+        """
+        return (
+            *ENTITY_TYPE_DEFS,
+            EntityTypeDef(
+                code="food",
+                name="음식",
+                definition="이름이 붙은 특정한 먹을거리 — 요리·식품·음료. 예: 김치·삼계탕",
+                exclusion="식재료 일반(배추·소금) · 조리 행위(김장·볶기)",
+            ),
+        )
+
+    def test_확장_어휘는_응답_필터를_통과한다(self) -> None:
+        resp = {"판정": {"김치찌개": {"entity": "김치찌개", "type": "음식"}}}
+        got = interpret_response(["김치찌개"], resp, type_defs=self._ext_defs())
+        self.assertTrue(got.ok)
+        self.assertEqual([(e.name, e.entity_type) for e in got.entities], [("김치찌개", "음식")])
+
+    def test_어휘를_안_넘기면_옛_동작이다(self) -> None:
+        # 🔴 기본값은 프리셋이다 — 어휘를 넘기지 않은 호출부의 동작이 바뀌면 회귀다.
+        resp = {"판정": {"김치찌개": {"entity": "김치찌개", "type": "음식"}}}
+        got = interpret_response(["김치찌개"], resp)
+        self.assertTrue(got.ok)          # 판정 자체는 성공(키워드가 대응됐다)
+        self.assertEqual(got.entities, ())  # 어휘 밖이라 그 키워드만 판정 없음
+
+    def test_5종_어휘에서는_동작이_같다(self) -> None:
+        # G1 회귀 요건 — 어휘를 프리셋으로 주는 것과 안 주는 것이 같아야 한다.
+        resp = {"판정": {"제주도": {"entity": "제주도", "type": "장소"}}}
+        a = interpret_response(["제주도"], resp)
+        b = interpret_response(["제주도"], resp, type_defs=ENTITY_TYPE_DEFS)
+        self.assertEqual(
+            [(e.name, e.entity_type) for e in a.entities],
+            [(e.name, e.entity_type) for e in b.entities],
+        )
+
+    def test_확장_어휘는_모양_검사를_통과한다(self) -> None:
+        got = ExtractedEntity(keyword="김치찌개", name="김치찌개", entity_type="음식")
+        self.assertEqual(got.entity_type, "음식")
+
+    def test_쓰기_게이트는_어휘를_받아야_통과시킨다(self) -> None:
+        # 🔴 실질 게이트 — 어휘를 안 넘기면 **거부해야** 한다(어휘 밖 값이 노드로 굳는 것을 막는다).
+        conn = _WriteConn()
+        with self.assertRaises(MmMetaPersistError) as ctx:
+            ensure_entity_node(conn, "음식", "김치찌개")
+        self.assertIn("허용 어휘 밖", str(ctx.exception))
+        self.assertEqual(conn.writes, 0, "거부 시 쓰기 시도조차 없어야 한다")
+
+        # 어휘를 넘기면 통과한다.
+        ensure_entity_node(
+            conn, "음식", "김치찌개", allowed_types=type_names(self._ext_defs())
+        )
+        self.assertEqual(conn.writes, 1)
+
+    def test_type_names_는_한_곳이다(self) -> None:
+        # 어휘 집합 계산이 사본으로 흩어지면 "어디는 6종을 알고 어디는 5종만 아는" 상태가 된다.
+        self.assertEqual(type_names(), ENTITY_TYPES)
+        self.assertIn("음식", type_names(self._ext_defs()))

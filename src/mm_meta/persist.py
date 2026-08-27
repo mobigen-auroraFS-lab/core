@@ -226,13 +226,13 @@ def fetch_meta_type_vocab(conn: Connection[Any]) -> tuple[EntityTypeDef, ...]:
       - **행 없음·비활성** → 코드 프리셋(``rules.ENTITY_TYPE_DEFS``)으로 **폴백**하고 경고를 남긴다.
         부트스트랩·새 배포·되돌리기에서 배치가 죽는 것보다 검증된 옛 문안으로 도는 편이 낫다. 조용히
         폴백하지 않는 이유: "등록했는데 왜 그대로인가"를 다시 조사하게 되기 때문이다.
-      - **어휘가 코드와 어긋남** → **예외**(fail-fast). 저장 유니크 키가 ``(entity_type, entity_uid)``
-        라 5종 밖 이름이 한 번 들어오면 그 오타가 노드·엣지로 굳어 되돌리려면 손으로 지워야 한다.
-        모자란 것도 막는다 — 빠진 타입만 정의문 없이 판정돼(어휘 줄에는 남는다) 그 타입이 옛 흔들림
-        상태로 되돌아가는데, 결과만 보고는 원인을 찾기 어렵다.
-        ⚠️ 이 "정확히 5종" 규칙은 **코드 상수(``ENTITY_TYPES``)가 아직 판정 어휘의 정본이기 때문**
-        이다(``judge`` 가 그 집합으로 응답을 거른다). 어휘를 늘리려면 spec §10 "이관 시 함께 할 것 ①"
-        (코드 상수 제거)을 먼저 해야 하며, 그 전에는 등록 행이 코드와 같은 5종이어야 한다.
+      - **어휘가 비었거나 이름이 겹침** → **예외**(fail-fast). 빈 어휘로 판정하면 전 자산이 개체 0
+        이 되고 원인이 안 보인다. 이름이 겹치면 어느 정의문이 프롬프트에 실릴지가 우연이 된다.
+        저장 유니크 키가 ``(entity_type, entity_uid)`` 라 그 사고가 노드·엣지로 굳는다.
+        🔴 **"코드 프리셋과 정확히 같아야 한다"는 규칙은 없앴다**(spec 087 T003 · 2026-08-27).
+        그 규칙은 코드 상수가 판정 어휘의 정본이던 시절의 것이고, 지금은 판정·저장이 이 어휘를
+        주입받으므로(T001·T002) **어휘를 늘리는 것이 정상 운영**이다. 늘리려고 코드를 배포해야
+        했던 것이 그 규칙의 부작용이었다.
 
     Args:
         conn: DB 커넥션(읽기 전용 — 이 함수는 쓰지 않는다).
@@ -242,7 +242,7 @@ def fetch_meta_type_vocab(conn: Connection[Any]) -> tuple[EntityTypeDef, ...]:
         코드 프리셋 순서(``ENTITY_TYPE_ORDER``와 같다).
 
     Raises:
-        MmMetaPersistError: 등록 행의 이름 집합이 닫힌 5종과 다르거나, 행 모양이 085 스킬 검증을
+        MmMetaPersistError: 등록 행에 타입이 없거나 이름이 겹치거나, 행 모양이 085 스킬 검증을
             통과하지 못할 때(정의문 누락·라벨명 중복 등). 폴백으로 얼버무리지 않는다 — 등록해 둔
             어휘가 조용히 무시되면 그 배치의 판정 전체가 의도와 다른 문안으로 돈다.
     """
@@ -278,16 +278,30 @@ def fetch_meta_type_vocab(conn: Connection[Any]) -> tuple[EntityTypeDef, ...]:
         )
         for label in skill.labels
     )
-    names = {d.name for d in defs}
-    if names != ENTITY_TYPES:
-        unknown = sorted(names - ENTITY_TYPES)
-        missing = sorted(ENTITY_TYPES - names)
+    # 🔴 **"정확히 5종" 규칙을 완화한다**(spec 087 T003 · 2026-08-27).
+    #   전에는 등록 어휘가 코드 프리셋과 **같아야** 했다 — 코드 상수가 판정 어휘의 정본이었기
+    #   때문이다. 이제 정본은 이 행이고 판정·저장이 이 어휘를 주입받으므로(T001·T002), 어휘를
+    #   늘리는 것이 정상 운영이다. 늘리려고 코드를 배포해야 했던 것이 그 규칙의 부작용이었다.
+    #
+    #   그래도 **완전히 열지는 않는다.** 저장 유니크 키가 ``(entity_type, entity_uid)`` 라 어휘가
+    #   비었거나 이름이 겹치면 그 사고가 노드로 굳는다:
+    #     · 빈 어휘   → 프롬프트에 타입이 없어 전 자산이 개체 0 이 되고, 원인이 안 보인다.
+    #     · 이름 중복 → 같은 이름의 정의문 둘 중 어느 것이 프롬프트에 실릴지가 우연이 된다.
+    #   이름 유일성은 085 검증기(``load_skill``)가 라벨명 중복으로 이미 막지만, 여기서 한 번 더
+    #   본다 — 이 함수가 판정 경로의 마지막 관문이라 사유를 mm_meta 언어로 말해야 한다.
+    names = [d.name for d in defs]
+    if not names:
         raise MmMetaPersistError(
-            "타입 어휘 등록 행이 코드 어휘와 다르다"
+            "타입 어휘 등록 행에 타입이 하나도 없다"
             f"(mm_meta_type_vocab · vocab_code={DEFAULT_VOCAB_CODE}) — "
-            f"어휘 밖 {unknown} · 누락 {missing}. 저장 키가 (entity_type, entity_uid) 라 "
-            "어휘 밖 이름은 데이터로 굳는다(닫힌 5종: "
-            f"{'·'.join(ENTITY_TYPE_ORDER)})."
+            "빈 어휘로 판정하면 전 자산이 개체 0 이 되고 원인이 드러나지 않는다."
+        )
+    dup = sorted({n for n in names if names.count(n) > 1})
+    if dup:
+        raise MmMetaPersistError(
+            "타입 어휘 등록 행에 같은 이름이 두 번 있다"
+            f"(mm_meta_type_vocab · vocab_code={DEFAULT_VOCAB_CODE}) — {dup}. "
+            "저장 키가 (entity_type, entity_uid) 라 어느 정의문이 실릴지가 우연이 되면 안 된다."
         )
     return defs
 
@@ -355,7 +369,13 @@ RETURNING node_id
 """
 
 
-def ensure_entity_node(conn: Connection[Any], entity_type: str, name: str) -> str:
+def ensure_entity_node(
+    conn: Connection[Any],
+    entity_type: str,
+    name: str,
+    *,
+    allowed_types: frozenset[str] | None = None,
+) -> str:
     """메타(개체) 노드가 있는지 확인하고 **없으면 만들어서** node_id 를 돌려준다.
 
     **DB 에 쓴다**(노드가 없을 때만 INSERT). 호출자의 트랜잭션 안에서 돈다.
@@ -369,7 +389,10 @@ def ensure_entity_node(conn: Connection[Any], entity_type: str, name: str) -> st
     경로(T013)가 붙인다 — 이 함수가 만든 노드에 ``source`` 가 없다는 것이 곧 "발굴(auto)"이다.
 
     Args:
-        entity_type: 개체 타입. **닫힌 5종**(``ENTITY_TYPES``) 밖이면 예외 — 어휘 밖 값이 노드가 되면
+        allowed_types: 허용 타입 이름 집합. ``None`` 이면 코드 프리셋(5종). 🔴 **여기가 실질
+            게이트다**(spec 087 T003) — 저장 유니크 키가 ``(entity_type, entity_uid)`` 라 어휘 밖
+            값이 한 번 들어오면 손으로 지워야 한다. 등록 어휘를 늘렸으면 **그 어휘를 넘겨야** 한다.
+        entity_type: 개체 타입. 허용 집합 밖이면 예외 — 어휘 밖 값이 노드가 되면
             묶음 축이 무한히 늘어난다.
         name: 개체 대표 표기(LLM 판정의 표준표기). 정규화 후 빈 값이면 예외.
 
@@ -379,9 +402,10 @@ def ensure_entity_node(conn: Connection[Any], entity_type: str, name: str) -> st
     Raises:
         MmMetaPersistError: 타입이 어휘 밖이거나 표기가 비었을 때. **쓰기 시도조차 하지 않는다.**
     """
-    if entity_type not in ENTITY_TYPES:
+    allowed = allowed_types if allowed_types is not None else ENTITY_TYPES
+    if entity_type not in allowed:
         raise MmMetaPersistError(
-            f"개체 타입이 닫힌 어휘 밖이다: {entity_type!r} (허용 {ENTITY_TYPE_ORDER})"
+            f"개체 타입이 허용 어휘 밖이다: {entity_type!r} (허용 {sorted(allowed)})"
         )
     uid = normalize_text_key(name)
     if not uid:
@@ -544,7 +568,11 @@ LIST_MM_META_DEFAULT_LIMIT = 200
 
 
 def normalize_registration(
-    entity_type: str, name: str, aliases: Sequence[str] = ()
+    entity_type: str,
+    name: str,
+    aliases: Sequence[str] = (),
+    *,
+    allowed_types: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     """등록 요청을 검사·정규화한다(순수 · DB 접속 없음).
 
@@ -557,7 +585,8 @@ def normalize_registration(
           매칭에 아무 것도 더하지 않는다.
 
     Args:
-        entity_type: 개체 타입. **닫힌 5종**(``ENTITY_TYPES``) 밖이면 예외.
+        entity_type: 개체 타입. 허용 집합 밖이면 예외.
+        allowed_types: 허용 타입 이름 집합. ``None`` 이면 코드 프리셋(5종 · spec 087 T003).
         name: 대표 표기(사용자가 정한 이름). 정규화 후 빈 값이면 예외.
         aliases: 별칭 목록. **등록 메타 한정**이며 전역 별칭 사전이 아니다(spec 비범위 유지) —
             "이 메타에 한해 이 표기도 같은 것으로 본다"는 선언이다.
@@ -570,9 +599,10 @@ def normalize_registration(
     Raises:
         MmMetaPersistError: 타입이 어휘 밖이거나 대표 표기가 비었을 때.
     """
-    if entity_type not in ENTITY_TYPES:
+    allowed = allowed_types if allowed_types is not None else ENTITY_TYPES
+    if entity_type not in allowed:
         raise MmMetaPersistError(
-            f"개체 타입이 닫힌 어휘 밖이다: {entity_type!r} (허용 {ENTITY_TYPE_ORDER})"
+            f"개체 타입이 허용 어휘 밖이다: {entity_type!r} (허용 {sorted(allowed)})"
         )
     uid = normalize_text_key(name)
     if not uid:

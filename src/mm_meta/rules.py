@@ -51,11 +51,34 @@ from src.domain.text_norm import normalize_text_key
 # 새 규칙 결과가 섞인 채 무엇이 최신인지 판별할 수 없다(헌법 3조 — 저장된 사실의 재현).
 RULE_VERSION = 1
 
-# 개체 타입 닫힌 어휘 — **프롬프트에 실릴 나열 순서**. frozenset 은 순서가 없으므로 문안 조립용
+# 개체 타입 어휘 — **프롬프트에 실릴 나열 순서**. frozenset 은 순서가 없으므로 문안 조립용
 # 순서를 따로 고정한다(같은 입력이 같은 문안을 만들어야 한다 · 결정성).
+#
+# 🔴 **이 값은 정본이 아니라 프리셋 기본값이다**(spec 087 T001 · 2026-08-27). 정본은 등록 행
+#   (``mm_meta_type_vocab``)이며, 판정·저장 경로는 **주입받은 어휘**로 검사한다. 전에는 이 상수가
+#   판정 어휘의 정본이어서 어휘를 늘려도 걸러졌다 — 실측: `음식` 을 어휘에 더해도 이 집합이 막아
+#   `김치찌개` 가 탈락했다(그 전에 프롬프트가 이미 닫혀 있었던 것도 별개 원인).
+#   기본값으로 남기는 이유: 부트스트랩·단위 테스트·어휘 행 부재 시 폴백이 이 값으로 돈다.
 ENTITY_TYPE_ORDER: tuple[str, ...] = ("인물", "장소", "조직", "작품", "사건")
 # 어휘 검사용 집합(포함 여부만 볼 때는 이쪽이 자연스럽다).
 ENTITY_TYPES: frozenset[str] = frozenset(ENTITY_TYPE_ORDER)
+
+
+def type_names(type_defs: Sequence[EntityTypeDef] | None = None) -> frozenset[str]:
+    """허용 타입 이름 집합 — 주입 어휘가 있으면 그것, 없으면 프리셋(spec 087 T001).
+
+    판정·저장의 어휘 검사가 전부 이 함수를 거친다. 한 곳으로 모으는 이유는 사본이 생기면
+    "어디는 6종을 알고 어디는 5종만 아는" 상태가 되기 때문이다(그 상태가 v303 전의 결함이었다).
+
+    Args:
+        type_defs: 등록 어휘 정의문 목록. ``None`` 이면 프리셋(``ENTITY_TYPE_DEFS``)을 쓴다.
+
+    Returns:
+        타입 이름 집합.
+    """
+    if type_defs is None:
+        return ENTITY_TYPES
+    return frozenset(d.name for d in type_defs)
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,18 +256,25 @@ class ExtractedEntity:
 
     keyword: str  # 원문 키워드(판정의 출처).
     name: str  # LLM 이 고른 개체 표준표기 = 대표 표기 후보.
-    entity_type: str  # 닫힌 5종(``ENTITY_TYPES``).
+    entity_type: str  # 타입 이름. **어휘 검사는 이 클래스가 하지 않는다**(아래 설명).
 
     def __post_init__(self) -> None:
-        """닫힌 어휘·빈 값을 검사한다(위반이면 ``ValueError``)."""
+        """**모양만** 검사한다(위반이면 ``ValueError``).
+
+        🔴 어휘 검사를 여기서 하지 않는 이유(spec 087 T001): 이 dataclass 는 **어떤 어휘가
+        허용인지 알 방법이 없다**(등록 행은 DB 에 있다). 전에는 모듈 상수 5종으로 검사해서,
+        어휘를 늘려도 이 자리에서 막혔다.
+
+        어휘는 **두 관문**이 본다 — ①``judge._entity_from_entry``(LLM 응답을 주입 어휘로 필터)
+        ②``persist.upsert_entity_node``(쓰기 직전 · **실질 게이트**). 저장 유니크 키가
+        ``(entity_type, entity_uid)`` 라 어휘 밖 값이 굳는 것을 막는 곳은 ②다.
+        """
         if not self.keyword or not self.keyword.strip():
             raise ValueError("키워드가 비어 있다 — reason 스탬프의 근거를 잃는다")
         if not normalize_text_key(self.name):
             raise ValueError(f"개체 표기가 비어 있다: {self.name!r}")
-        if self.entity_type not in ENTITY_TYPES:
-            raise ValueError(
-                f"개체 타입이 닫힌 어휘 밖이다: {self.entity_type!r} (허용 {ENTITY_TYPE_ORDER})"
-            )
+        if not self.entity_type or not self.entity_type.strip():
+            raise ValueError("개체 타입이 비어 있다 — 저장 유니크 키의 절반이다")
 
     @property
     def uid(self) -> str:
@@ -443,4 +473,5 @@ __all__ = [
     "build_official_name_index",
     "is_excluded_entity",
     "is_stopped_keyword",
+    "type_names",
 ]

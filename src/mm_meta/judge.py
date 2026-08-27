@@ -54,7 +54,12 @@ from enum import StrEnum
 from typing import Any
 
 from src.domain.text_norm import normalize_text_key
-from src.mm_meta.rules import ENTITY_TYPE_ORDER, ENTITY_TYPES, EntityTypeDef, ExtractedEntity
+from src.mm_meta.rules import (
+    ENTITY_TYPE_ORDER,
+    EntityTypeDef,
+    ExtractedEntity,
+    type_names,
+)
 
 # 프롬프트 문안의 지문. **문안을 고칠 때마다 올린다** — 이 값이 ``reason`` 스탬프의 ``pv=`` 로
 # 영속돼 "어떤 문안이 만든 판정인가"를 되짚는 단서가 된다(헌법 3조 · spec §4).
@@ -297,7 +302,9 @@ def build_entity_prompt(
     ])
 
 
-def _entity_from_entry(keyword: str, entry: Any) -> ExtractedEntity | None:
+def _entity_from_entry(
+    keyword: str, entry: Any, *, allowed: frozenset[str]
+) -> ExtractedEntity | None:
     """키워드 하나의 판정 항목을 ``ExtractedEntity`` 로 바꾼다(못 바꾸면 ``None``).
 
     "못 바꾸면 판정 없음"은 **의도된 관용**이다(spec §2) — 개체 추출은 더하기 축이라 한 키워드가
@@ -307,6 +314,8 @@ def _entity_from_entry(keyword: str, entry: Any) -> ExtractedEntity | None:
     Args:
         keyword: 원문 키워드(판정의 출처 — 그대로 보존해 ``reason`` 의 ``kw=`` 가 된다).
         entry: 응답의 키워드별 판정 값. **무엇이든 올 수 있다고 가정**한다.
+        allowed: 허용 타입 이름 집합. **모듈 상수가 아니라 인자다**(spec 087 T001) — 등록 어휘가
+            정본이므로, 어휘를 늘렸을 때 이 자리에서 걸러지면 안 된다.
 
     Returns:
         판정 한 건. 개체가 없다고 답했거나(정상) 모양·어휘가 어긋나면 ``None``.
@@ -318,12 +327,17 @@ def _entity_from_entry(keyword: str, entry: Any) -> ExtractedEntity | None:
     # 개체 없음(null)은 정상 응답이다 — 실패가 아니라 "이 키워드는 개체가 아니다".
     if not isinstance(name, str) or not name.strip():
         return None
-    if entity_type not in ENTITY_TYPES:
+    if entity_type not in allowed:
         return None
     return ExtractedEntity(keyword=keyword, name=name.strip(), entity_type=entity_type)
 
 
-def interpret_response(keywords: Sequence[Any] | None, response: Any) -> EntityJudgement:
+def interpret_response(
+    keywords: Sequence[Any] | None,
+    response: Any,
+    *,
+    type_defs: Sequence[EntityTypeDef] | None = None,
+) -> EntityJudgement:
     """LLM 응답을 판정 결과로 해석한다(순수 — LLM·DB 호출 없음).
 
     검사 순서에 뜻이 있다: **재료 → 모양 → 대응**. 재료(키워드)가 없으면 응답을 볼 이유가 없고,
@@ -335,6 +349,9 @@ def interpret_response(keywords: Sequence[Any] | None, response: Any) -> EntityJ
 
     Args:
         keywords: 판정에 넣은 키워드 목록(프롬프트에 실은 것과 **같은 값**이어야 한다).
+        type_defs: 판정에 쓴 **등록 어휘**(프롬프트에 실은 것과 같아야 한다). ``None`` 이면 코드
+            프리셋으로 검사한다 — 프롬프트에 실은 어휘와 응답 필터가 어긋나면, 늘린 타입이
+            조용히 탈락한다(spec 087 T002 의 그 결함).
         response: ``complete_json`` 이 돌려준 응답. 계약은
             ``{"판정": {키워드: {"entity":…, "type":…}}}`` 이지만 그것을 지켰는지가 이 함수의 판정
             대상이므로 **무엇이든 올 수 있다고 가정**한다.
@@ -367,6 +384,8 @@ def interpret_response(keywords: Sequence[Any] | None, response: Any) -> EntityJ
         by_key.setdefault(normalize_text_key(str(raw_key)), value)
 
     entities: list[ExtractedEntity] = []
+    # 허용 어휘를 **한 번** 계산한다(키워드마다 만들면 같은 집합을 여러 벌 만든다).
+    allowed = type_names(type_defs)
     matched = 0
     for keyword in cleaned:  # 입력 키워드 순서 = 결과 순서(결정성)
         if keyword in judged:
@@ -377,7 +396,7 @@ def interpret_response(keywords: Sequence[Any] | None, response: Any) -> EntityJ
                 continue  # 응답에서 빠진 키워드는 그 키워드만 판정 없음(spec §2)
             entry = by_key[key]
         matched += 1
-        entity = _entity_from_entry(keyword, entry)
+        entity = _entity_from_entry(keyword, entry, allowed=allowed)
         if entity is not None:
             entities.append(entity)
 
@@ -441,7 +460,11 @@ def judge_asset_entities(
     from src.llm.client import complete_json
 
     prompt = build_entity_prompt(summary, cleaned, summary_max_chars=limit, type_defs=type_defs)
-    return interpret_response(cleaned, complete_json(prompt, client=client))
+    # 🔴 프롬프트에 실은 어휘를 **그대로** 필터에도 넘긴다 — 두 곳이 갈리면 늘린 타입이 조용히
+    #    탈락한다(spec 087 T002).
+    return interpret_response(
+        cleaned, complete_json(prompt, client=client), type_defs=type_defs
+    )
 
 
 __all__ = [

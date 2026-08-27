@@ -152,9 +152,23 @@ class TestExtractedEntityShape(unittest.TestCase):
         self.assertEqual(_e("가키워드", "서울 특별시").uid, normalize_text_key("서울 특별시"))
         self.assertEqual(_e("가키워드", "서울특별시").uid, _e("나키워드", "서울 특별시").uid)
 
-    def test_타입_어휘_밖은_거부한다(self) -> None:
-        with self.assertRaises(ValueError):
-            ExtractedEntity(keyword="가키워드", name="가개체", entity_type="지명")
+    def test_어휘_검사는_이_클래스가_하지_않는다(self) -> None:
+        """🔴 계약 변경(spec 087 T001) — 어휘 검사가 **상위 두 관문**으로 옮겨 갔다.
+
+        전에는 여기서 5종을 검사했고, 그 때문에 등록 어휘를 늘려도 이 자리에서 막혔다. 이
+        dataclass 는 허용 어휘를 알 방법이 없다(등록 행은 DB 에 있다). 지금 어휘를 보는 곳은
+        ``judge._entity_from_entry``(주입 어휘로 필터)와 ``persist.ensure_entity_node``
+        (쓰기 직전 · 실질 게이트)다.
+        """
+        # 어휘 밖 이름도 **모양이 맞으면** 만들어진다 — 걸러내는 것은 상위 관문의 책임이다.
+        got = ExtractedEntity(keyword="가키워드", name="가개체", entity_type="지명")
+        self.assertEqual(got.entity_type, "지명")
+
+    def test_빈_타입은_거부한다(self) -> None:
+        # 모양 검사는 남는다 — 타입은 저장 유니크 키의 절반이라 비면 키를 만들 수 없다.
+        for bad in ("", "   "):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                ExtractedEntity(keyword="가키워드", name="가개체", entity_type=bad)
 
     def test_빈_표기는_거부한다(self) -> None:
         for name in ("", "   "):
