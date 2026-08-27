@@ -31,6 +31,8 @@
 from __future__ import annotations
 
 import json
+import re
+from dataclasses import dataclass
 from collections.abc import Sequence
 from typing import Any
 
@@ -143,6 +145,162 @@ def _content(name: str, policy: Any, labels: Any) -> tuple[str, Any, Any]:
     return (name, policy, labels)
 
 
+@dataclass(frozen=True)
+class DefinitionTable:
+    """"정의문 문서 한 행"을 담는 테이블의 모양 — 3방향 upsert 규칙을 공유하기 위한 서술.
+
+    왜 매개화하나(2026-08-27 spec 086): 개체 타입 어휘가 ``mm_skill`` 에서 ``mm_meta_type_vocab``
+    으로 갈라져 나갔는데, **등록/개정/멱등의 3방향 규칙은 같다**(없으면 INSERT · 선언이 다르면
+    version+1 · 같으면 쓰기 0). 그 규칙을 두 벌로 두면 언젠가 한쪽만 고쳐진다 —
+    ``NON_CLASSIFY_SKILL_CODES`` 주석에 적어 둔 "사본이 생기면 한쪽만 고쳐진다"와 같은 판단이다.
+
+    ⚠️ 컬럼·테이블 이름은 SQL 에 **문자열로 박히므로** 외부 입력이 절대 들어와선 안 된다. 이 클래스의
+    인스턴스는 모듈 상수로만 만들고(``_SKILL_TABLE``·mm_meta 의 어휘 서술), 생성 시 이름 문법을
+    검사한다.
+
+    Attributes:
+        table: 테이블 이름.
+        id_col: PK 컬럼(앱 발급 UUIDv7).
+        code_col: 자연키 컬럼.
+        defs_col: 정의문 배열 JSONB 컬럼(085 의 ``labels`` 에 해당).
+    """
+
+    table: str
+    id_col: str
+    code_col: str
+    defs_col: str
+
+    def __post_init__(self) -> None:
+        """식별자 문법을 검사한다 — SQL 에 박히는 값이라 여기서 한 번 막는다.
+
+        Raises:
+            SkillPersistError: 소문자 스네이크(``^[a-z_][a-z0-9_]*$``)가 아닌 이름이 섞였을 때.
+        """
+        for field in (self.table, self.id_col, self.code_col, self.defs_col):
+            if not _IDENT_RE.match(field):
+                raise SkillPersistError(
+                    f"테이블/컬럼 이름이 소문자 스네이크가 아니다: {field!r} — SQL 에 박히는 값이다"
+                )
+
+
+# 식별자 문법 — 모듈 상수 서술만 통과시키기 위한 최소 가드.
+_IDENT_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
+
+# 분류 스킬 테이블 서술(085).
+_SKILL_TABLE = DefinitionTable(
+    table="mm_skill", id_col="skill_id", code_col="skill_code", defs_col="labels"
+)
+
+
+def upsert_definition_row(
+    conn: Any,
+    skill: ClassificationSkill,
+    *,
+    spec: DefinitionTable,
+) -> dict[str, Any]:
+    """정의문 문서 한 행을 등록·개정한다(3방향 규칙 · 테이블은 ``spec`` 이 정한다).
+
+    ``upsert_skill`` 의 본체다. 개체 타입 어휘(086)가 다른 테이블로 갈라져도 이 규칙을 공유한다.
+    반환 키는 **085 계약 그대로**(``skill_id``·``skill_code``)다 — 호출부·테스트·CLI 출력이 이미
+    그 이름을 쓰고 있어, 테이블마다 키 이름을 바꾸면 소비처가 두 갈래로 갈린다.
+
+    Args:
+        conn: DB 커넥션(호출부 트랜잭션 안에서 돈다).
+        skill: 등록할 선언. ``skill_code``(=자연키 값)가 반드시 있어야 한다.
+        spec: 대상 테이블 서술. **모듈 상수만** 넘긴다(외부 입력 금지 — SQL 에 박힌다).
+
+    Returns:
+        ``{action, skill_id, skill_code, version, previous_version, declared_version}``.
+
+    Raises:
+        SkillPersistError: 자연키 값이 없을 때(어느 행인지 정할 수 없다).
+    """
+    if skill.skill_code is None:
+        raise SkillPersistError(
+            "skill_code 가 없다 — 스킬 JSON 의 필수 키다(등록 입력의 자기완결성 · spec 구현확정 G1)"
+        )
+    declaration = skill_declaration(skill)
+    code = skill.skill_code
+    policy_json = json.dumps(declaration["policy"], ensure_ascii=False)
+    labels_json = json.dumps(declaration["labels"], ensure_ascii=False)
+    t, idc, cc, dc = spec.table, spec.id_col, spec.code_col, spec.defs_col
+
+    with conn.cursor(row_factory=dict_row) as cur:
+        # 별칭을 붙이지 않는다 — 여기서는 **실제 컬럼 이름으로** 읽는다. 읽기 경로
+        # (``fetch_meta_type_vocab``)가 별칭을 쓰는 것은 085 검증기에 넘기려는 목적이고, 이 함수는
+        # 검증기를 거치지 않으므로 이름을 바꿀 이유가 없다(바꾸면 한 함수 안에 이름이 두 벌 된다).
+        cur.execute(
+            f"""
+            SELECT {idc}, {cc}, name, version, policy, {dc}, status
+            FROM {t} WHERE {cc} = %s
+            """,
+            (code,),
+        )
+        row = cur.fetchone()
+
+        if row is None:
+            skill_id = uuid7_str()
+            cur.execute(
+                f"""
+                INSERT INTO {t}
+                    ({idc}, {cc}, name, version, policy, {dc}, status)
+                VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, %s)
+                """,
+                (
+                    skill_id,
+                    code,
+                    skill.name,
+                    skill.version,
+                    policy_json,
+                    labels_json,
+                    MmSkillStatus.ACTIVE.value,
+                ),
+            )
+            return {
+                "action": "registered",
+                "skill_id": skill_id,
+                "skill_code": code,
+                "version": skill.version,
+                "previous_version": None,
+                "declared_version": skill.version,
+            }
+
+        skill_id = str(row[idc])
+        current_version = int(row["version"])
+        same = _content(str(row["name"]), row["policy"], row[dc]) == _content(
+            skill.name, declaration["policy"], declaration["labels"]
+        )
+        if same:
+            # 멱등 경로 — 쓰기 0. 버전을 올리지 않으므로 배치도 움직이지 않는다.
+            return {
+                "action": "unchanged",
+                "skill_id": skill_id,
+                "skill_code": code,
+                "version": current_version,
+                "previous_version": current_version,
+                "declared_version": skill.version,
+            }
+
+        next_version = current_version + 1
+        cur.execute(
+            f"""
+            UPDATE {t}
+               SET name = %s, version = %s, policy = %s::jsonb, {dc} = %s::jsonb,
+                   updated_at = now()
+             WHERE {cc} = %s
+            """,
+            (skill.name, next_version, policy_json, labels_json, code),
+        )
+        return {
+            "action": "revised",
+            "skill_id": skill_id,
+            "skill_code": code,
+            "version": next_version,
+            "previous_version": current_version,
+            "declared_version": skill.version,
+        }
+
+
 def upsert_skill(conn: Any, skill: ClassificationSkill) -> dict[str, Any]:
     """스킬을 등록하거나 개정한다 — **DB 에 쓴다**(커밋은 호출부 몫).
 
@@ -178,86 +336,9 @@ def upsert_skill(conn: Any, skill: ClassificationSkill) -> dict[str, Any]:
         SkillPersistError: ``skill_code`` 가 없을 때(어느 행인지 정할 수 없다). 이때 **쓰기 시도조차
             하지 않는다**.
     """
-    if skill.skill_code is None:
-        raise SkillPersistError(
-            "skill_code 가 없다 — 스킬 JSON 의 필수 키다(등록 입력의 자기완결성 · spec 구현확정 G1)"
-        )
-    declaration = skill_declaration(skill)
-    code = skill.skill_code
-    policy_json = json.dumps(declaration["policy"], ensure_ascii=False)
-    labels_json = json.dumps(declaration["labels"], ensure_ascii=False)
-
-    with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(
-            """
-            SELECT skill_id, skill_code, name, version, policy, labels, status
-            FROM mm_skill WHERE skill_code = %s
-            """,
-            (code,),
-        )
-        row = cur.fetchone()
-
-        if row is None:
-            skill_id = uuid7_str()
-            cur.execute(
-                """
-                INSERT INTO mm_skill
-                    (skill_id, skill_code, name, version, policy, labels, status)
-                VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, %s)
-                """,
-                (
-                    skill_id,
-                    code,
-                    skill.name,
-                    skill.version,
-                    policy_json,
-                    labels_json,
-                    MmSkillStatus.ACTIVE.value,
-                ),
-            )
-            return {
-                "action": "registered",
-                "skill_id": skill_id,
-                "skill_code": code,
-                "version": skill.version,
-                "previous_version": None,
-                "declared_version": skill.version,
-            }
-
-        skill_id = str(row["skill_id"])
-        current_version = int(row["version"])
-        same = _content(str(row["name"]), row["policy"], row["labels"]) == _content(
-            skill.name, declaration["policy"], declaration["labels"]
-        )
-        if same:
-            # 멱등 경로 — 쓰기 0. 버전을 올리지 않으므로 배치도 움직이지 않는다.
-            return {
-                "action": "unchanged",
-                "skill_id": skill_id,
-                "skill_code": code,
-                "version": current_version,
-                "previous_version": current_version,
-                "declared_version": skill.version,
-            }
-
-        next_version = current_version + 1
-        cur.execute(
-            """
-            UPDATE mm_skill
-               SET name = %s, version = %s, policy = %s::jsonb, labels = %s::jsonb,
-                   updated_at = now()
-             WHERE skill_code = %s
-            """,
-            (skill.name, next_version, policy_json, labels_json, code),
-        )
-        return {
-            "action": "revised",
-            "skill_id": skill_id,
-            "skill_code": code,
-            "version": next_version,
-            "previous_version": current_version,
-            "declared_version": skill.version,
-        }
+    # 본체는 ``upsert_definition_row`` 다 — 개체 타입 어휘(086)가 다른 테이블로 갈라져도
+    # 등록/개정/멱등 3방향 규칙은 하나뿐이다(사본이 생기면 언젠가 한쪽만 고쳐진다).
+    return upsert_definition_row(conn, skill, spec=_SKILL_TABLE)
 
 
 # 판정 행 교체 SQL — 자산×스킬 스코프. **전체 교체**라 라벨이 같아도 버전이 새로 적힌다(불변식 ③).
@@ -568,6 +649,7 @@ def fetch_asset_materials(
 
 __all__ = [
     "DECIDED_BY_LLM",
+    "DefinitionTable",
     "SkillPersistError",
     "fetch_active_skills",
     "fetch_asset_label_rows",
@@ -576,5 +658,6 @@ __all__ = [
     "replace_asset_labels",
     "skill_declaration",
     "skill_from_row",
+    "upsert_definition_row",
     "upsert_skill",
 ]

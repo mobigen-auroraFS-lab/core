@@ -80,8 +80,8 @@ from src.domain.text_norm import normalize_text_key
 # 타입 어휘 행(F05)은 085 저장 계층의 **검증기**를 그대로 빌려 쓴다(``skill_from_row`` → ``load_skill``).
 # 저장소(``mm_skill``)를 공유하니 검증도 공유하는 것이 맞다 — 사본을 만들면 등록이 통과시킨 행을
 # 읽기가 거부하는 어긋남이 생긴다. 🔴 빌려 쓰는 것은 **저장·검증뿐, 판정 엔진이 아니다**(spec §10 표).
-from src.mm_classify.model import MM_META_TYPE_SKILL_CODE, SkillConfigError
-from src.mm_classify.persist import skill_from_row
+from src.mm_classify.model import SkillConfigError
+from src.mm_classify.persist import DefinitionTable, skill_from_row, upsert_definition_row
 
 # 재료 상한(150자)의 **정본은 문안 쪽**이다 — 실제로 프롬프트를 자르는 층이 계약을 소유해야 한다.
 # 여기서 다시 정의하면 두 값이 갈릴 수 있고(조회는 150, 문안은 120 같은 상태) 그때 프롬프트가
@@ -161,11 +161,51 @@ class MmMetaPersistError(ValueError):
 #   ⚠️ 바인딩 순서: (skill_code, status). 자연키로 좁히므로 행은 0 또는 1개다.
 #   ⚠️ ``status`` 필터가 곧 **되돌리기 스위치**다 — 행을 지우지 않고 ``disabled`` 로 내리면 코드
 #      프리셋(검증된 옛 문안)으로 돌아간다.
+# 타입 어휘 조회 — 정본 테이블은 ``mm_meta_type_vocab``(spec 086 · v303).
+#
+# 왜 별칭(``types AS labels``·``vocab_code AS skill_code``)을 붙이나: **정의문 문서의 모양**은 085 와
+# 같으므로 검증기(``skill_from_row`` → ``load_skill``)를 계속 공유한다 — 같은 모양을 두 벌 검증하면
+# 언젠가 한쪽만 고쳐진다. 갈라진 것은 "무엇을 판정하는가"(자산 vs 개체)이고, "정의문이 올바른가"는
+# 여전히 같은 질문이다. 컬럼 이름을 도메인 언어로 바꾼 이유는 v303 SQL 헤더에 있다.
 _META_TYPE_VOCAB_SQL = """
-SELECT skill_id, skill_code, name, version, policy, labels, status
-FROM mm_skill
-WHERE skill_code = %s AND status = %s
+SELECT vocab_id AS skill_id, vocab_code AS skill_code, name, version, policy,
+       types AS labels, status
+FROM mm_meta_type_vocab
+WHERE vocab_code = %s AND status = %s
 """
+
+# 어휘 행의 자연키 — 지금은 한 벌뿐이다. 084 F04(다도메인 개체 공간 분리)에서 도메인별 어휘가
+# 필요해지면 이 값이 인자가 된다(테이블에 UNIQUE 를 미리 둔 이유).
+DEFAULT_VOCAB_CODE = "default"
+
+# 어휘 테이블 서술 — 등록/개정/멱등 3방향 규칙을 085 저장 계층과 **공유**한다.
+_VOCAB_TABLE = DefinitionTable(
+    table="mm_meta_type_vocab",
+    id_col="vocab_id",
+    code_col="vocab_code",
+    defs_col="types",
+)
+
+
+def upsert_meta_type_vocab(conn: Any, skill: Any) -> dict[str, Any]:
+    """개체 타입 어휘를 등록·개정한다(정본 테이블 ``mm_meta_type_vocab`` · spec 086).
+
+    ``mm_classify`` 의 3방향 규칙을 그대로 쓴다 — 없으면 INSERT · 선언이 다르면 ``version+1`` ·
+    같으면 쓰기 0(멱등). 버전이 오르는 순간이 개체 재판정의 방아쇠다(084 §10).
+
+    ⚠️ 넘어오는 ``skill.skill_code`` 는 **어휘 자연키**로 쓰인다. 등록 CLI 가 이 값을
+    ``DEFAULT_VOCAB_CODE`` 로 맞춰 준다 — 옛 예약 코드(``mm_meta_type``)를 그대로 쓰면 v303 이후엔
+    존재하지 않는 어휘 코드로 새 행을 만들어 버린다.
+
+    Args:
+        conn: DB 커넥션(호출부 트랜잭션 안에서 돈다).
+        skill: 검증을 통과한 어휘 선언(085 ``ClassificationSkill`` 모양 — 문서 모양이 같다).
+
+    Returns:
+        ``upsert_definition_row`` 반환 dict(``action``·``version``·``previous_version`` 등).
+        키 이름은 085 계약을 따른다(``skill_id``·``skill_code``) — CLI 출력이 이미 그 이름을 쓴다.
+    """
+    return upsert_definition_row(conn, skill, spec=_VOCAB_TABLE)
 
 
 def fetch_meta_type_vocab(conn: Connection[Any]) -> tuple[EntityTypeDef, ...]:
@@ -207,14 +247,14 @@ def fetch_meta_type_vocab(conn: Connection[Any]) -> tuple[EntityTypeDef, ...]:
             어휘가 조용히 무시되면 그 배치의 판정 전체가 의도와 다른 문안으로 돈다.
     """
     with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(_META_TYPE_VOCAB_SQL, (MM_META_TYPE_SKILL_CODE, MmSkillStatus.ACTIVE.value))
+        cur.execute(_META_TYPE_VOCAB_SQL, (DEFAULT_VOCAB_CODE, MmSkillStatus.ACTIVE.value))
         row = cur.fetchone()
 
     if row is None:
         _LOG.warning(
-            "타입 어휘 등록 행이 없다(skill_code=%s · active) — 코드 프리셋 %d종으로 판정한다. "
-            "등록: python -m scripts.register_mm_meta_types --apply",
-            MM_META_TYPE_SKILL_CODE,
+            "타입 어휘 등록 행이 없다(mm_meta_type_vocab · vocab_code=%s · active) — "
+            "코드 프리셋 %d종으로 판정한다. 등록: python -m scripts.register_mm_meta_types --apply",
+            DEFAULT_VOCAB_CODE,
             len(ENTITY_TYPE_DEFS),
         )
         return ENTITY_TYPE_DEFS
@@ -225,7 +265,8 @@ def fetch_meta_type_vocab(conn: Connection[Any]) -> tuple[EntityTypeDef, ...]:
         # 085 검증기의 사유를 그대로 안고 mm_meta 계약 예외로 바꿔 준다 — 배치는 예외 종류 하나만
         # 알면 되고(``MmMetaPersistError``), 원인 문장은 ``from e`` 로 보존된다.
         raise MmMetaPersistError(
-            f"타입 어휘 등록 행이 검증을 통과하지 못했다(skill_code={MM_META_TYPE_SKILL_CODE}): {e}"
+            "타입 어휘 등록 행이 검증을 통과하지 못했다"
+            f"(mm_meta_type_vocab · vocab_code={DEFAULT_VOCAB_CODE}): {e}"
         ) from e
 
     defs = tuple(
@@ -242,7 +283,8 @@ def fetch_meta_type_vocab(conn: Connection[Any]) -> tuple[EntityTypeDef, ...]:
         unknown = sorted(names - ENTITY_TYPES)
         missing = sorted(ENTITY_TYPES - names)
         raise MmMetaPersistError(
-            f"타입 어휘 등록 행이 코드 어휘와 다르다(skill_code={MM_META_TYPE_SKILL_CODE}) — "
+            "타입 어휘 등록 행이 코드 어휘와 다르다"
+            f"(mm_meta_type_vocab · vocab_code={DEFAULT_VOCAB_CODE}) — "
             f"어휘 밖 {unknown} · 누락 {missing}. 저장 키가 (entity_type, entity_uid) 라 "
             "어휘 밖 이름은 데이터로 굳는다(닫힌 5종: "
             f"{'·'.join(ENTITY_TYPE_ORDER)})."

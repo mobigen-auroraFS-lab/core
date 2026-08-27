@@ -1,7 +1,8 @@
 """084 F05 — 타입 어휘 **DB 이관** 단위 테스트(정의문 상수·어휘 로더·등록 CLI·엔진 격리).
 
 무엇을 검증하나: 개체 타입 5종(인물·장소·조직·작품·사건)이 이름뿐인 **코드 상수**에서 정의문을 가진
-**등록 행**(``mm_skill`` · ``skill_code='mm_meta_type'``)으로 옮겨 간다(spec §10). 그 이관이 지켜야
+**등록 행**(``mm_meta_type_vocab`` · ``vocab_code='default'`` · v303 으로 ``mm_skill`` 에서
+분리 · spec 086)으로 옮겨 간다(084 spec §10). 그 이관이 지켜야
 하는 것 네 가지를 여기서 못 박는다.
 
     ① **정의문 문안은 측정으로 확정된 값**이다(2026-08-25 파일럿 · 경계 개체 18자산 재판정에서
@@ -40,8 +41,21 @@ from unittest import mock
 import scripts.register_mm_meta_types as cli
 
 from src.mm_classify.model import MM_META_TYPE_SKILL_CODE, NON_CLASSIFY_SKILL_CODES
-from src.mm_classify.persist import fetch_active_skills, skill_declaration
-from src.mm_meta.persist import MmMetaPersistError, fetch_meta_type_vocab
+from src.mm_classify.persist import (
+    DefinitionTable,
+    SkillPersistError,
+    fetch_active_skills,
+    skill_declaration,
+    upsert_definition_row,
+    upsert_skill,
+)
+from src import mm_meta as _mm_meta_pkg  # noqa: F401  (패키지 초기화 순서 고정)
+from src.mm_meta import persist as vocab_persist
+from src.mm_meta.persist import (
+    DEFAULT_VOCAB_CODE,
+    MmMetaPersistError,
+    fetch_meta_type_vocab,
+)
 from src.mm_meta.rules import (
     ENTITY_TYPE_DEFS,
     ENTITY_TYPE_ORDER,
@@ -70,15 +84,20 @@ def _labels(defs: tuple[EntityTypeDef, ...] = ENTITY_TYPE_DEFS) -> list[dict[str
 
 def _row(
     *,
-    skill_code: str = MM_META_TYPE_SKILL_CODE,
+    skill_code: str = DEFAULT_VOCAB_CODE,
     labels: list[dict[str, str]] | None = None,
     version: int = 1,
     status: str = "active",
 ) -> dict[str, Any]:
-    """``mm_skill`` 조회 행 하나(JSONB 는 드라이버가 dict/list 로 준다).
+    """조회 행 하나(JSONB 는 드라이버가 dict/list 로 준다).
+
+    키 이름이 ``skill_*`` 인 이유: 어휘 조회 SQL 이 ``vocab_id AS skill_id``·
+    ``vocab_code AS skill_code``·``types AS labels`` 로 **별칭**을 붙여 085 검증기에 넘긴다
+    (spec 086 — 정의문 문서 모양이 같으니 검증기를 공유한다). 드라이버가 주는 키는 별칭 쪽이다.
 
     Args:
-        skill_code: 행의 자연키.
+        skill_code: 행의 자연키. 기본은 어휘 코드(``default``) — ``mm_skill`` 격리 테스트는
+            ``MM_META_TYPE_SKILL_CODE`` 를 명시로 넘긴다.
         labels: 라벨 JSONB. ``None`` 이면 코드 프리셋 5종.
         version: 행 버전.
         status: 행 상태(``active``·``disabled``).
@@ -95,6 +114,53 @@ def _row(
         "labels": _labels() if labels is None else labels,
         "status": status,
     }
+
+
+def _vocab_row(*, version: int = 1, status: str = "active") -> dict[str, Any]:
+    """``mm_meta_type_vocab`` 조회 행 하나 — **실제 컬럼 이름**을 쓴다.
+
+    ``_row`` 와 나누는 이유: 읽기 경로는 SQL 별칭(``types AS labels`` …)을 거쳐 085 검증기에
+    가므로 별칭 이름의 행을 받고, 쓰기 경로(``upsert_definition_row``)는 별칭 없이 실제 컬럼을
+    읽는다. 가짜 커넥션이 별칭까지 흉내내면 그 흉내가 곧 또 하나의 계약이 되어 버린다.
+
+    Args:
+        version: 행 버전.
+        status: 행 상태.
+
+    Returns:
+        조회 행 dict(``vocab_id``·``vocab_code``·``types`` …).
+    """
+    return {
+        "vocab_id": uuid.UUID(_SKILL_ID),
+        "vocab_code": DEFAULT_VOCAB_CODE,
+        "name": "멀티모달 메타 타입",
+        "version": version,
+        "policy": {"selection": "single", "unassigned": "해당없음", "max_labels": 30},
+        "types": _labels(),
+        "status": status,
+    }
+
+
+def _classify_skill() -> Any:
+    """분류 스킬 하나(085 경로가 그대로임을 고정하는 데 쓴다).
+
+    Returns:
+        검증을 통과한 ``ClassificationSkill``(자산 분류용 · 자연키는 어휘 코드와 다르다).
+    """
+    from src.mm_classify.model import load_skill as _load
+
+    return _load(
+        {
+            "skill": "테스트 축",
+            "skill_code": "test_axis",
+            "version": 1,
+            "policy": {"selection": "multi", "unassigned": "해당없음"},
+            "labels": [
+                {"code": "a", "name": "가", "definition": "가에 관한 자료", "not": "나에 관한 자료"},
+                {"code": "b", "name": "나", "definition": "나에 관한 자료", "not": "가에 관한 자료"},
+            ],
+        }
+    )
 
 
 class _Cur:
@@ -155,15 +221,24 @@ class _Conn:
             결과 행 목록(``skill_code`` 오름차순).
         """
         p = tuple(params or ())
-        if "FROM mm_skill" not in sql:
+        # 두 테이블을 모두 흉내낸다 — 분류 스킬은 ``mm_skill``, 개체 타입 어휘는
+        # ``mm_meta_type_vocab``(v303 분리). 자연키 컬럼 이름도 각각 다르다.
+        if "FROM mm_skill" not in sql and "FROM mm_meta_type_vocab" not in sql:
             return []
         out = list(self.rows)
-        by_code = "skill_code = %s" in sql
+        # 자연키 컬럼 이름이 테이블마다 다르다. 행이 어느 모양인지는 행이 가진 키로 안다
+        # (읽기 경로는 별칭 행, 쓰기 경로는 실제 컬럼 행 — ``_row`` / ``_vocab_row`` 참조).
+        by_code = "skill_code = %s" in sql or "vocab_code = %s" in sql
         if by_code:
-            out = [r for r in out if r["skill_code"] == p[0]]
+            out = [
+                r for r in out
+                if (r["vocab_code"] if "vocab_code" in r else r["skill_code"]) == p[0]
+            ]
         if "status = %s" in sql:
             out = [r for r in out if r["status"] == (p[1] if by_code else p[0])]
-        return sorted(out, key=lambda r: r["skill_code"])
+        return sorted(
+            out, key=lambda r: r["vocab_code"] if "vocab_code" in r else r["skill_code"]
+        )
 
     def sqls(self) -> list[str]:
         """실행된 SQL 문자열만."""
@@ -259,16 +334,18 @@ class TestFetchMetaTypeVocab(unittest.TestCase):
         fetch_meta_type_vocab(conn)
         self.assertEqual(len(conn.log), 1)
         sql, params = conn.log[0]
-        self.assertIn("FROM mm_skill", sql)
-        self.assertIn("skill_code = %s", sql)
-        self.assertEqual(params[0], MM_META_TYPE_SKILL_CODE)
+        self.assertIn("FROM mm_meta_type_vocab", sql)
+        self.assertIn("vocab_code = %s", sql)
+        # 별칭이 붙어야 085 검증기가 그대로 읽는다(spec 086).
+        self.assertIn("types AS labels", sql)
+        self.assertEqual(params[0], DEFAULT_VOCAB_CODE)
         self.assertIn("active", params)
 
     def test_행이_없으면_코드_프리셋으로_폴백한다(self) -> None:
         with self.assertLogs("src.mm_meta.persist", level="WARNING") as logged:
             defs = fetch_meta_type_vocab(_Conn([]))
         self.assertEqual(defs, ENTITY_TYPE_DEFS)
-        self.assertIn(MM_META_TYPE_SKILL_CODE, "\n".join(logged.output))
+        self.assertIn(DEFAULT_VOCAB_CODE, "\n".join(logged.output))
 
     def test_다른_스킬만_있어도_폴백한다(self) -> None:
         with self.assertLogs("src.mm_meta.persist", level="WARNING"):
@@ -330,7 +407,9 @@ class TestClassifyEngineIsolation(unittest.TestCase):
         self.assertIn(MM_META_TYPE_SKILL_CODE, NON_CLASSIFY_SKILL_CODES)
 
     def test_분류_배치_대상에서_빠진다(self) -> None:
-        conn = _Conn([_row(), _row(skill_code="food_axis")])
+        # v303 이후 이 행은 ``mm_skill`` 에 없다. 그래도 **되돌리기(downgrade)가 복원**하므로
+        # 격리 가드는 계속 필요하다 — 그 상태를 흉내내 명시로 넘긴다.
+        conn = _Conn([_row(skill_code=MM_META_TYPE_SKILL_CODE), _row(skill_code="food_axis")])
         codes = [r["skill_code"] for r in fetch_active_skills(conn)]
         self.assertEqual(codes, ["food_axis"])
 
@@ -389,7 +468,7 @@ class TestBuildTypeSkill(unittest.TestCase):
 
     def test_예약_코드와_single_정책으로_조립한다(self) -> None:
         skill = cli.build_type_skill()
-        self.assertEqual(skill.skill_code, MM_META_TYPE_SKILL_CODE)
+        self.assertEqual(skill.skill_code, DEFAULT_VOCAB_CODE)
         # 개체 하나에 타입 하나다(085 의 multi 기본과 다르다 — 대상이 자산이 아니라 개체다).
         self.assertEqual(skill.policy.selection, "single")
 
@@ -459,7 +538,7 @@ class TestRegisterTypesCli(unittest.TestCase):
         result = cli.run_apply(db, cli.build_type_skill(), upsert_fn=_upsert)
         self.assertEqual(db.opened, ["transaction"])
         self.assertEqual(result["action"], "registered")
-        self.assertEqual(seen[0].skill_code, MM_META_TYPE_SKILL_CODE)
+        self.assertEqual(seen[0].skill_code, DEFAULT_VOCAB_CODE)
 
     def test_show_는_읽기만_한다(self) -> None:
         # 지금 무엇이 쓰이는지(등록분인지 폴백인지) 확인하는 경로 — 쓰기 통로를 열면 안 된다.
@@ -494,6 +573,71 @@ class TestRegisterTypesCli(unittest.TestCase):
              "previous_version": 1, "declared_version": 1}
         ))
         self.assertIn("재판정", lines)
+
+
+class TestVocabTableSeparation(unittest.TestCase):
+    """v303 분리가 지켜야 하는 것 — **어느 테이블에 쓰는가**와 **규칙은 하나인가**(spec 086).
+
+    이 클래스는 "타입 어휘가 자산 분류표와 다른 테이블에 산다"를 코드 수준에서 고정한다. 두 저장이
+    다시 섞이면(예: 어휘 쓰기가 ``mm_skill`` 로 되돌아가면) 화면·API 가 다시 `<> 'mm_meta_type'`
+    같은 필터를 달아야 하고, 그 필터를 한 곳이라도 빠뜨리면 자산 분류 축에 개체 타입이 노출된다.
+    """
+
+    def _capture(self, spec: DefinitionTable) -> list[str]:
+        """빈 테이블에 등록했을 때 실행된 SQL 문자열 목록.
+
+        Args:
+            spec: 대상 테이블 서술.
+
+        Returns:
+            실행된 SQL 문자열 목록(조회 → INSERT 순).
+        """
+        conn = _Conn([])
+        upsert_definition_row(conn, cli.build_type_skill(), spec=spec)
+        return conn.sqls()
+
+    def test_어휘_쓰기는_어휘_테이블로_간다(self) -> None:
+        sqls = "\n".join(self._capture(vocab_persist._VOCAB_TABLE))
+        self.assertIn("mm_meta_type_vocab", sqls)
+        self.assertIn("vocab_code", sqls)
+        self.assertIn("types", sqls)
+        # 🔴 핵심 — 어휘 쓰기가 자산 분류표를 건드리지 않는다.
+        self.assertNotIn("mm_skill", sqls)
+
+    def test_분류_쓰기는_분류_테이블로_간다(self) -> None:
+        # 반대 방향도 고정한다(회귀 0 — 085 경로는 그대로다).
+        conn = _Conn([])
+        upsert_skill(conn, _classify_skill())
+        sqls = "\n".join(conn.sqls())
+        self.assertIn("mm_skill", sqls)
+        self.assertNotIn("mm_meta_type_vocab", sqls)
+
+    def test_등록_개정_멱등_규칙은_한_벌이다(self) -> None:
+        # 두 저장이 **같은 함수**를 쓴다 — 사본이 생기면 언젠가 한쪽만 고쳐진다.
+        self.assertIs(
+            vocab_persist.upsert_meta_type_vocab.__wrapped__
+            if hasattr(vocab_persist.upsert_meta_type_vocab, "__wrapped__")
+            else upsert_definition_row,
+            upsert_definition_row,
+        )
+        conn = _Conn([_vocab_row(version=3)])
+        got = vocab_persist.upsert_meta_type_vocab(conn, cli.build_type_skill())
+        # 프리셋과 같은 선언이므로 쓰기 0(멱등) — 어휘 쪽도 같은 규칙이다.
+        self.assertEqual(got["action"], "unchanged")
+        self.assertEqual(got["version"], 3)
+
+    def test_테이블_이름은_식별자_문법을_통과해야_한다(self) -> None:
+        # SQL 에 문자열로 박히는 값이라 문법 가드가 있다(외부 입력이 들어올 자리가 아니다).
+        for bad in ("mm skill", "mm_skill; DROP TABLE node", "MmSkill", ""):
+            with self.subTest(bad=bad), self.assertRaises(SkillPersistError):
+                DefinitionTable(
+                    table=bad, id_col="a", code_col="b", defs_col="c"
+                )
+
+    def test_예약_코드는_어휘_자연키가_아니다(self) -> None:
+        # v303 이후 두 값의 역할이 다르다 — 섞어 쓰면 존재하지 않는 어휘 행을 새로 만든다.
+        self.assertNotEqual(DEFAULT_VOCAB_CODE, MM_META_TYPE_SKILL_CODE)
+        self.assertEqual(cli.build_type_skill().skill_code, DEFAULT_VOCAB_CODE)
 
 
 if __name__ == "__main__":
