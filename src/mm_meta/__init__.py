@@ -28,7 +28,7 @@
 
 **타입 어휘의 정본은 DB 등록 행**이다(F05 · 2026-08-25 · spec §10). 타입 5종은 이름뿐이던 코드 상수
 에서 **정의문("이 뜻으로만 판정한다" + "아닌 것")을 가진 등록 행**(``mm_skill`` ·
-``skill_code='mm_meta_type'``)으로 옮겼다 — 이름만 주면 경계를 LLM 상식이 정해 같은 개체가 자산마다
+``mm_meta_type_vocab``·``vocab_code='default'``)으로 옮겼다 — 이름만 주면 경계를 LLM 상식이 정해 같은 개체가 자산마다
 다른 타입으로 갈렸고, 정의문을 붙이자 그 흔들림이 거의 전부 통일됐다(수치는 spec §10). 배치는
 ``fetch_meta_type_vocab(conn)`` 으로 **시작에 한 번** 읽어 ``judge_asset_entities(type_defs=)`` 로
 넘긴다. 행이 없으면 코드 프리셋(``ENTITY_TYPE_DEFS``)으로 폴백한다. 🔴 저장소는 085 것을 빌려 쓰되
