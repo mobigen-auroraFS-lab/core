@@ -262,7 +262,7 @@ def build_entity_prompt(
             그대로** — 타입 이름만 나열한다(하위호환 · 지금 이 함수를 부르는 배치가 인자를 주지
             않으므로 기본값이 문안을 바꾸면 그쪽 판정이 예고 없이 달라진다). 값을 주면 타입 어휘 줄
             뒤에 "이 뜻으로만 판정한다" 블록이 붙는다. 정본은 등록 행(``mm_skill``·
-            ``skill_code='mm_meta_type'``)이며 ``persist.fetch_meta_type_vocab`` 이 읽어 준다
+            ``mm_meta_type_vocab``)이며 ``persist.fetch_meta_type_vocab`` 이 읽어 준다
             (행이 없으면 코드 프리셋 ``rules.ENTITY_TYPE_DEFS`` 로 폴백).
 
     Returns:

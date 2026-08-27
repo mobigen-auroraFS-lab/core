@@ -1,7 +1,7 @@
 """멀티모달 메타 **타입 어휘 등록** CLI — 코드 상수 → DB 등록 행 (spec 084 §10 · F05).
 
 무엇을 하는 도구인가: 개체 타입 5종(인물·장소·조직·작품·사건)의 **정의문**을 ``mm_skill`` 테이블에
-``skill_code='mm_meta_type'`` 행 하나로 등록·개정한다. 등록 뒤에는 그 행이 정본이 되어 개체 판정
+``mm_meta_type_vocab``(``vocab_code='default'``) 행 하나로 등록·개정한다. 등록 뒤에는 그 행이 정본이 되어 개체 판정
 프롬프트에 실린다(``src.mm_meta.persist.fetch_meta_type_vocab`` → ``judge.build_entity_prompt``).
 
 🔴 **085 판정 엔진을 쓰지 않는다 — 저장소만 공유한다**(spec §10 표). 헷갈리기 쉬운 지점이라 못 박는다:
@@ -42,13 +42,15 @@ from pathlib import Path
 from typing import Any
 
 from src.mm_classify.model import (
-    MM_META_TYPE_SKILL_CODE,
     ClassificationSkill,
     SkillConfigError,
     load_skill,
 )
-from src.mm_classify.persist import upsert_skill
-from src.mm_meta.persist import fetch_meta_type_vocab
+from src.mm_meta.persist import (
+    DEFAULT_VOCAB_CODE,
+    fetch_meta_type_vocab,
+    upsert_meta_type_vocab,
+)
 from src.mm_meta.rules import ENTITY_TYPE_DEFS, EntityTypeDef
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -67,7 +69,7 @@ SELECTION_POLICY = "single"
 # 않는다**. 비워 둘 수 없어 관례 표기를 쓴다.
 UNASSIGNED_LABEL_KO = "해당없음"
 
-# 최초 등록 버전. 개정 시 **DB 카운터가 +1** 되며(``upsert_skill``) 파일 선언값은 그대로여도 된다 —
+# 최초 등록 버전. 개정 시 **DB 카운터가 +1** 되며(``upsert_meta_type_vocab``) 파일 선언값은 그대로여도 된다 —
 # 정본은 DB 값이다. 이 어휘의 버전은 "몇 번 고쳤나"의 이력이고, 재판정 방아쇠는 문안 판
 # (``judge.PROMPT_VERSION``)이다(둘의 역할이 다르다 · 아래 개정 안내 참조).
 INITIAL_VERSION = 1
@@ -88,7 +90,10 @@ def build_type_skill(
             옮겨 적지 않게** 하려는 것이 이 기본값의 목적이다. 테스트가 다른 값을 넣을 수 있다.
 
     Returns:
-        검증을 통과한 ``ClassificationSkill``(``skill_code='mm_meta_type'``).
+        검증을 통과한 ``ClassificationSkill``. ``skill_code`` 자리에는 **어휘 자연키**
+        (``DEFAULT_VOCAB_CODE='default'``)가 들어간다 — 정본 테이블이 ``mm_meta_type_vocab`` 으로
+        갈라졌고(spec 086 · v303) 그 테이블의 자연키 컬럼이 ``vocab_code`` 다. 옛 예약 코드
+        ``mm_meta_type`` 을 그대로 쓰면 존재하지 않는 어휘 코드로 새 행을 만들어 버린다.
 
     Raises:
         SkillConfigError: 프리셋이 스킬 선언 규칙을 어길 때(라벨명 중복·정의문 누락·코드 문법 등).
@@ -97,7 +102,7 @@ def build_type_skill(
     return load_skill(
         {
             "skill": SKILL_NAME_KO,
-            "skill_code": MM_META_TYPE_SKILL_CODE,
+            "skill_code": DEFAULT_VOCAB_CODE,
             "version": INITIAL_VERSION,
             "policy": {"selection": SELECTION_POLICY, "unassigned": UNASSIGNED_LABEL_KO},
             "labels": [
@@ -144,7 +149,7 @@ def format_apply_lines(result: dict[str, Any]) -> list[str]:
     """등록 결과 출력 줄을 만든다(순수).
 
     Args:
-        result: ``upsert_skill`` 반환 dict(``action``·``version``·``previous_version`` 등).
+        result: ``upsert_meta_type_vocab`` 반환 dict(``action``·``version``·``previous_version``).
 
     Returns:
         출력할 줄 목록. **개정(revised)** 이면 재판정 안내를 함께 낸다 — 정의문을 고치면 기존 판정은
@@ -194,13 +199,14 @@ def run_apply(db: Any, skill: ClassificationSkill, *, upsert_fn: Any = None) -> 
     Args:
         db: DB 핸들(``transaction()`` 제공 — 정상 종료 시 커밋).
         skill: 등록할 어휘 선언.
-        upsert_fn: 영속 주입 seam — ``upsert_fn(conn, skill)``. ``None``(기본)이면 085 저장 계층의
-            ``upsert_skill``(같은 테이블·같은 멱등 규칙을 쓴다).
+        upsert_fn: 영속 주입 seam — ``upsert_fn(conn, skill)``. ``None``(기본)이면
+            ``mm_meta.persist.upsert_meta_type_vocab``(정본 테이블 ``mm_meta_type_vocab`` ·
+            등록/개정/멱등 3방향 규칙은 085 저장 계층과 **공유**한다 · spec 086).
 
     Returns:
-        ``upsert_skill`` 반환 dict.
+        ``upsert_meta_type_vocab`` 반환 dict.
     """
-    upsert = upsert_fn if upsert_fn is not None else upsert_skill
+    upsert = upsert_fn if upsert_fn is not None else upsert_meta_type_vocab
     with db.transaction() as conn:
         return upsert(conn, skill)
 
