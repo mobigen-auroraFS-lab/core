@@ -82,13 +82,17 @@ class _LookupOnlyIndex(Mapping[tuple[str, str], str]):
 class TestClosedVocabulary(unittest.TestCase):
     """닫힌 어휘·버전 상수 — 값이 계약이다(reason 스탬프의 ``rv=`` 가 이것을 가리킨다)."""
 
-    def test_개체_타입_5종이다(self) -> None:
-        self.assertEqual(ENTITY_TYPES, frozenset({"인물", "장소", "조직", "작품", "사건"}))
+    def test_개체_타입_프리셋은_6종이다(self) -> None:
+        # 🔴 2026-08-27(spec 087 T007) `음식` 추가로 5종 → 6종. 이 값은 **프리셋 기본값**이며
+        #    정본은 등록 행(``mm_meta_type_vocab``)이다 — 판정·저장은 주입 어휘를 쓴다(T001).
+        self.assertEqual(
+            ENTITY_TYPES, frozenset({"인물", "장소", "조직", "작품", "사건", "음식"})
+        )
 
     def test_타입_제시_순서가_고정되어_있다(self) -> None:
         # frozenset 은 순서가 없다 — 프롬프트에 실릴 나열 순서는 별 상수로 고정해야 같은 입력이
-        # 같은 문안을 만든다(결정성 · 헌법 3조).
-        self.assertEqual(ENTITY_TYPE_ORDER, ("인물", "장소", "조직", "작품", "사건"))
+        # 같은 문안을 만든다(결정성 · 헌법 3조). 새 타입은 **뒤에 붙인다**(기존 순서 불변).
+        self.assertEqual(ENTITY_TYPE_ORDER, ("인물", "장소", "조직", "작품", "사건", "음식"))
         self.assertEqual(frozenset(ENTITY_TYPE_ORDER), ENTITY_TYPES)
 
     def test_규칙_버전은_비교_가능한_정수다(self) -> None:

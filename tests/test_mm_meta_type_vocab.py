@@ -307,8 +307,11 @@ class _Conn:
 class TestEntityTypeDefs(unittest.TestCase):
     """정의문 프리셋(v2) — **측정으로 확정된 문안**이라 값 자체를 봉인한다(spec §10)."""
 
-    def test_5종이_고정_순서로_있다(self) -> None:
+    def test_프리셋과_순서_상수가_같다(self) -> None:
+        # 🔴 두 값이 갈리면 프롬프트 나열 순서와 정의문 목록이 어긋난다. 2026-08-27 `음식` 을
+        #    추가할 때 정의문만 늘리고 순서 상수를 안 고쳐서 이 테스트가 잡았다(spec 087 T007).
         self.assertEqual(tuple(d.name for d in ENTITY_TYPE_DEFS), ENTITY_TYPE_ORDER)
+        self.assertIn("음식", ENTITY_TYPE_ORDER)  # 6종이 된 것을 봉인
 
     def test_이름_집합이_코드_어휘와_같다(self) -> None:
         # 어휘가 갈리면 프롬프트에 정의문이 없는 타입이 생기거나(누락) 저장 못 할 타입이 실린다.
@@ -423,10 +426,10 @@ class TestFetchMetaTypeVocab(unittest.TestCase):
         전에는 "정확히 5종"을 요구했고, 그래서 타입을 늘리려면 **코드를 배포**해야 했다. 지금은
         판정·저장이 이 어휘를 주입받으므로(T001·T002) 늘리는 것이 정상 운영이다.
         """
-        ext = [*_labels(), {"code": "food", "name": "음식", "definition": "정의", "not": "경계"}]
+        ext = [*_labels(), {"code": "animal", "name": "동물", "definition": "정의", "not": "경계"}]
         defs = fetch_meta_type_vocab(_Conn([_row(labels=ext)]))
-        self.assertEqual([d.name for d in defs][-1], "음식")
-        self.assertEqual(len(defs), 6)
+        self.assertEqual([d.name for d in defs][-1], "동물")
+        self.assertEqual(len(defs), len(_labels()) + 1)
 
     def test_어휘를_줄이는_것도_통과한다(self) -> None:
         # 줄이는 것도 사람의 결정이다 — 막으면 "타입 하나 빼기"가 배포 작업이 된다.
@@ -723,7 +726,11 @@ class TestVocabInjectionEndToEnd(unittest.TestCase):
     """
 
     def _ext_defs(self) -> tuple[Any, ...]:
-        """프리셋 + `음식` 한 종.
+        """프리셋 + `동물` 한 종.
+
+        ⚠️ 예시가 `음식` 이 아닌 이유: `음식` 은 2026-08-27(T007)에 **프리셋으로 들어왔다**.
+        이 클래스는 "프리셋 밖 타입도 주입하면 통과한다"를 보는 것이므로, 예시는 늘 프리셋
+        **밖**이어야 한다(안이 되면 테스트가 아무것도 증명하지 않는다).
 
         Returns:
             확장 정의문 튜플.
@@ -731,25 +738,25 @@ class TestVocabInjectionEndToEnd(unittest.TestCase):
         return (
             *ENTITY_TYPE_DEFS,
             EntityTypeDef(
-                code="food",
-                name="음식",
-                definition="이름이 붙은 특정한 먹을거리 — 요리·식품·음료. 예: 김치·삼계탕",
-                exclusion="식재료 일반(배추·소금) · 조리 행위(김장·볶기)",
+                code="animal",
+                name="동물",
+                definition="이름이 붙은 특정한 동물 개체·품종. 예: 푸바오·진돗개",
+                exclusion="동물 일반 범주(포유류·조류) · 동물이 사는 곳(→장소)",
             ),
         )
 
     def test_확장_어휘는_응답_필터를_통과한다(self) -> None:
-        resp = {"판정": {"김치찌개": {"entity": "김치찌개", "type": "음식"}}}
-        got = interpret_response(["김치찌개"], resp, type_defs=self._ext_defs())
+        resp = {"판정": {"푸바오": {"entity": "푸바오", "type": "동물"}}}
+        got = interpret_response(["푸바오"], resp, type_defs=self._ext_defs())
         self.assertTrue(got.ok)
-        self.assertEqual([(e.name, e.entity_type) for e in got.entities], [("김치찌개", "음식")])
+        self.assertEqual([(e.name, e.entity_type) for e in got.entities], [("푸바오", "동물")])
 
-    def test_어휘를_안_넘기면_옛_동작이다(self) -> None:
+    def test_어휘를_안_넘기면_프리셋으로_거른다(self) -> None:
         # 🔴 기본값은 프리셋이다 — 어휘를 넘기지 않은 호출부의 동작이 바뀌면 회귀다.
-        resp = {"판정": {"김치찌개": {"entity": "김치찌개", "type": "음식"}}}
-        got = interpret_response(["김치찌개"], resp)
+        resp = {"판정": {"푸바오": {"entity": "푸바오", "type": "동물"}}}
+        got = interpret_response(["푸바오"], resp)
         self.assertTrue(got.ok)          # 판정 자체는 성공(키워드가 대응됐다)
-        self.assertEqual(got.entities, ())  # 어휘 밖이라 그 키워드만 판정 없음
+        self.assertEqual(got.entities, ())  # 프리셋 밖이라 그 키워드만 판정 없음
 
     def test_5종_어휘에서는_동작이_같다(self) -> None:
         # G1 회귀 요건 — 어휘를 프리셋으로 주는 것과 안 주는 것이 같아야 한다.
@@ -762,24 +769,25 @@ class TestVocabInjectionEndToEnd(unittest.TestCase):
         )
 
     def test_확장_어휘는_모양_검사를_통과한다(self) -> None:
-        got = ExtractedEntity(keyword="김치찌개", name="김치찌개", entity_type="음식")
-        self.assertEqual(got.entity_type, "음식")
+        got = ExtractedEntity(keyword="푸바오", name="푸바오", entity_type="동물")
+        self.assertEqual(got.entity_type, "동물")
 
     def test_쓰기_게이트는_어휘를_받아야_통과시킨다(self) -> None:
         # 🔴 실질 게이트 — 어휘를 안 넘기면 **거부해야** 한다(어휘 밖 값이 노드로 굳는 것을 막는다).
         conn = _WriteConn()
         with self.assertRaises(MmMetaPersistError) as ctx:
-            ensure_entity_node(conn, "음식", "김치찌개")
+            ensure_entity_node(conn, "동물", "푸바오")
         self.assertIn("허용 어휘 밖", str(ctx.exception))
         self.assertEqual(conn.writes, 0, "거부 시 쓰기 시도조차 없어야 한다")
 
         # 어휘를 넘기면 통과한다.
         ensure_entity_node(
-            conn, "음식", "김치찌개", allowed_types=type_names(self._ext_defs())
+            conn, "동물", "푸바오", allowed_types=type_names(self._ext_defs())
         )
         self.assertEqual(conn.writes, 1)
 
     def test_type_names_는_한_곳이다(self) -> None:
         # 어휘 집합 계산이 사본으로 흩어지면 "어디는 6종을 알고 어디는 5종만 아는" 상태가 된다.
         self.assertEqual(type_names(), ENTITY_TYPES)
-        self.assertIn("음식", type_names(self._ext_defs()))
+        self.assertIn("동물", type_names(self._ext_defs()))
+        self.assertNotIn("동물", type_names())  # 프리셋에는 없다

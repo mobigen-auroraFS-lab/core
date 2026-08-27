@@ -939,6 +939,7 @@ def upsert_entity_edges(
     prompt_version: str = PROMPT_VERSION,
     rule_version: int = RULE_VERSION,
     agent: str = LINEAGE_AGENT,
+    allowed_types: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     """자산 하나의 소속 엣지를 **전체 교체**하고 판정 이력을 남긴다 — DB 에 쓴다(한 트랜잭션).
 
@@ -963,6 +964,10 @@ def upsert_entity_edges(
         rule_version: 스탬프의 ``rv``. 기본값은 현행 규칙 판.
         agent: 계보의 수행 주체. 기본 ``mm_meta_binding``(배치). 다른 실행 경로(측정 하니스 등)가
             남길 때 구분하려면 명시한다.
+        allowed_types: 허용 타입 이름 집합 — 그대로 ``ensure_entity_node`` 로 넘긴다.
+            ``None`` 이면 코드 프리셋(5종)이다. 🔴 **배치는 반드시 등록 어휘를 넘겨야 한다**
+            (spec 087 T003·T011): 넘기지 않으면 어휘를 늘려도 쓰기 게이트가 5종으로 막아
+            `음식` 개체가 저장 직전에 예외로 떨어진다(2026-08-27 실측으로 확인한 그 결함).
 
     Returns:
         ``{asset_id, edges_deleted, edges_inserted, entities, prompt_version, rule_version}``.
@@ -1001,7 +1006,9 @@ def upsert_entity_edges(
         if judged:
             src_node = ensure_asset_node(conn, asset_id)
             for entity in judged:
-                dst_node = ensure_entity_node(conn, entity.entity_type, entity.name)
+                dst_node = ensure_entity_node(
+                    conn, entity.entity_type, entity.name, allowed_types=allowed_types
+                )
                 reason = format_member_reason(
                     keyword=entity.keyword,
                     prompt_version=prompt_version,
