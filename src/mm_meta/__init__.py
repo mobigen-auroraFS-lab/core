@@ -51,6 +51,13 @@
 
 from __future__ import annotations
 
+from src.mm_meta.entity_label import (
+    DEFAULT_MEMBER_SUMMARIES,
+    EntityLabelError,
+    build_entity_material,
+    fetch_label_targets,
+    replace_entity_labels,
+)
 from src.mm_meta.describe import (
     DESC_PROMPT_VERSION,
     DESCRIPTION_KEY,
@@ -114,12 +121,14 @@ from src.mm_meta.rules import (
     EntityTypeDef,
     ExtractedEntity,
     apply_rules,
+    type_names,
     build_official_name_index,
     is_excluded_entity,
     is_stopped_keyword,
 )
 
 __all__ = [
+    "DEFAULT_MEMBER_SUMMARIES",
     "DESCRIPTION_KEY",
     "DESCRIPTION_MAX_CHARS",
     "DESCRIPTION_TARGET_CHARS",
@@ -148,6 +157,7 @@ __all__ = [
     "SUMMARY_MAX_CHARS",
     "DescribeFailure",
     "EntityJudgement",
+    "EntityLabelError",
     "EntityTypeDef",
     "ExtractedEntity",
     "JudgeFailure",
@@ -155,11 +165,13 @@ __all__ = [
     "MmMetaPersistError",
     "apply_rules",
     "build_description_prompt",
+    "build_entity_material",
     "build_entity_prompt",
     "build_official_name_index",
     "describe_meta",
     "ensure_entity_node",
     "ensure_mm_member_kind",
+    "fetch_label_targets",
     "fetch_meta_description_targets",
     "fetch_meta_members",
     "fetch_meta_type_vocab",
@@ -176,7 +188,9 @@ __all__ = [
     "parse_member_reason",
     "prompt_version_for",
     "register_mm_meta",
+    "replace_entity_labels",
     "resolve_registered_aliases",
+    "type_names",
     "upsert_entity_edges",
     "upsert_meta_description",
 ]
