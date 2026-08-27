@@ -198,12 +198,14 @@ class TestInterpretSuccess(unittest.TestCase):
         self.assertEqual(result.entities[0].keyword, "가 키워드")  # 원문 키워드를 보존한다
 
     def test_판정은_규칙을_적용하지_않는다(self) -> None:
-        # 층 분리 확인: 광역 제외는 rules 의 일이다. judge 가 미리 걸러 버리면 "LLM 이 무엇을
+        # 층 분리 확인: 규칙 제외는 rules 의 일이다. judge 가 미리 걸러 버리면 "LLM 이 무엇을
         # 말했나"와 "규칙이 무엇을 떨궜나"를 구분할 수 없다(diff 리포트가 사유를 못 센다).
+        # 🔴 예시를 `북극` 으로 바꿨다(spec 087 T005) — `대한민국` 은 규칙이 아니라 **정의문**
+        #    소관이 됐다. 층 분리 자체는 그대로이므로 규칙에 남은 항목으로 확인한다.
         result = interpret_response(
-            ["가키워드"], _response({"가키워드": {"entity": "대한민국", "type": "장소"}})
+            ["가키워드"], _response({"가키워드": {"entity": "북극", "type": "장소"}})
         )
-        self.assertEqual(result.entities[0].name, "대한민국")
+        self.assertEqual(result.entities[0].name, "북극")
         self.assertEqual(apply_rules(result.entities), ())
 
 

@@ -23,6 +23,7 @@ from src.domain.text_norm import normalize_text_key
 from src.mm_meta.rules import (
     ENTITY_TYPE_ORDER,
     ENTITY_TYPES,
+    ENTITY_TYPE_DEFS,
     EXCLUDED_ENTITIES,
     MIN_BASE_LENGTH,
     RULE_VERSION,
@@ -95,17 +96,29 @@ class TestClosedVocabulary(unittest.TestCase):
         self.assertIsInstance(RULE_VERSION, int)
         self.assertGreaterEqual(RULE_VERSION, 1)
 
-    def test_광역_제외는_V1_목록이다(self) -> None:
-        # 자국 5 + 대륙·초광역·해양 15 = 20종(spec §3 · 검증 §6-① V1 채택).
-        self.assertEqual(len(EXCLUDED_ENTITIES), 20)
-        for name in ("대한민국", "한국", "남한", "한반도", "국내"):
+    def test_광역_제외는_정의문으로_옮겨_갔다(self) -> None:
+        """🔴 계약 변경(spec 087 T005) — 목록 20종 중 19종을 `장소` 정의문으로 이관했다.
+
+        근거(전량 대조 18건 · `fixtures/entity_skill/wide_exclusion_full.json`):
+        광역 개체 생성 **0건** · 과잉 제거 **0건** · 최종 결과 18/18 동일.
+        논증 — 후보 쪽 코드 목록에는 `북극` 만 있으므로, LLM 이 여전히 `대한민국` 을 줬다면
+        규칙이 걸러낼 수 없어 결과에 나타나야 한다. 나타나지 않았으므로 정의문이 걸러낸 것이다.
+        """
+        # 코드 목록에는 `북극` 하나만 남는다.
+        self.assertEqual(EXCLUDED_ENTITIES, frozenset({normalize_text_key("북극")}))
+        # 🔴 이관된 19종은 이제 **정의문**이 막는다 — 코드 목록에는 없다.
+        for name in ("대한민국", "한국", "아시아", "태평양", "지중해"):
             with self.subTest(name=name):
-                self.assertIn(normalize_text_key(name), EXCLUDED_ENTITIES)
-        for name in ("세계", "지구", "아시아", "동아시아", "동남아시아", "유럽", "아프리카",
-                     "북아메리카", "남아메리카", "오세아니아", "북극",
-                     "태평양", "대서양", "인도양", "지중해"):
-            with self.subTest(name=name):
-                self.assertIn(normalize_text_key(name), EXCLUDED_ENTITIES)
+                self.assertNotIn(normalize_text_key(name), EXCLUDED_ENTITIES)
+        place = next(d for d in ENTITY_TYPE_DEFS if d.name == "장소")
+        self.assertIn("너무 넓은 범위", place.exclusion)
+        self.assertIn("개별 외국 국가", place.exclusion)  # 정책 예외도 정의문이 담는다
+
+    def test_북극만_코드에_남는_이유(self) -> None:
+        # 정책이 "북극은 빼고 남극은 남긴다"(측정된 응집력)라 **의미가 아니라 정책**이고,
+        # 파일럿에서 LLM 이 유일하게 못 맞춘 항목이다. 정의문에 억지로 넣지 않는다.
+        self.assertTrue(is_excluded_entity("북극"))
+        self.assertFalse(is_excluded_entity("남극"))
 
     def test_외국_국가는_제외하지_않는다_V2_기각(self) -> None:
         # 검증 §6-①: 외국 국가 묶음은 구성원 전수 열람에서 응집력 양호(이집트=피라미드·나일강,
@@ -192,14 +205,19 @@ class TestExtractedEntityShape(unittest.TestCase):
 class TestExcludeWideAreaEntities(unittest.TestCase):
     """① 광역 제외 — 잡동사니 서랍이 되는 국가·대륙·해양급 개체를 떨군다(검증 §2·§6-①)."""
 
-    def test_자국_개체는_탈락한다(self) -> None:
-        # 실측: '대한민국'(16건)에 단풍 가이드·김밥 프랜차이즈·낚시 채널·윷놀이가 한 묶음이 됐다.
-        kept = apply_rules([_e("가키워드", "대한민국"), _e("나키워드", "한국")])
-        self.assertEqual(kept, ())
+    def test_자국은_이제_규칙이_아니라_정의문이_막는다(self) -> None:
+        """🔴 계약 변경(spec 087 T005). 규칙 단계에서는 **더 이상 떨어지지 않는다.**
 
-    def test_표기가_흔들려도_같은_판정이다(self) -> None:
-        # 정규화 키 비교라 공백·전각이 섞여도 같은 개체로 본다("대한 민국"·"ＫＯＲＥＡ" 류).
-        self.assertEqual(apply_rules([_e("가키워드", "대한 민국")]), ())
+        왜 그래도 안전한가: LLM 이 애초에 개체로 주지 않는다(전량 대조 18건 · 생성 0건).
+        규칙은 판정 **뒤**에 도는 안전망이고, 이 항목의 방어선이 앞으로 옮겨 간 것이다.
+        실측 배경: '대한민국'(16건)에 단풍 가이드·김밥 프랜차이즈·낚시 채널이 한 묶음이 됐다.
+        """
+        kept = apply_rules([_e("가키워드", "대한민국"), _e("나키워드", "한국")])
+        self.assertEqual([e.name for e in kept], ["대한민국", "한국"])
+
+    def test_남은_항목은_표기가_흔들려도_같은_판정이다(self) -> None:
+        # 정규화 키 비교는 그대로다 — `북극`·`북 극`·전각이 같은 개체로 본다.
+        self.assertEqual(apply_rules([_e("가키워드", "북 극")]), ())
 
     def test_외국_국가는_살아남는다(self) -> None:
         kept = apply_rules([_e("가키워드", "일본"), _e("나키워드", "남극")])
@@ -211,8 +229,10 @@ class TestExcludeWideAreaEntities(unittest.TestCase):
 
     def test_판정_함수를_따로도_쓸_수_있다(self) -> None:
         # 배치 diff 리포트가 "왜 떨어졌나"를 사유별로 세려면 술어가 노출돼 있어야 한다.
-        self.assertTrue(is_excluded_entity("동아시아"))
+        # 대상은 코드에 남은 `북극` 뿐이다(나머지는 정의문 소관 · spec 087 T005).
+        self.assertTrue(is_excluded_entity("북극"))
         self.assertFalse(is_excluded_entity("제주도"))
+        self.assertFalse(is_excluded_entity("동아시아"))  # 이관됨 — 규칙은 모른다
 
 
 class TestStopPatterns(unittest.TestCase):
@@ -550,8 +570,10 @@ class TestPurityAndDeterminism(unittest.TestCase):
 
     def test_결과에_적용_순서가_드러난다(self) -> None:
         # 제외 → 스톱 → 병합 3단을 한 번에 통과시킨 결과(살아남는 것은 병합된 공식형과 제주도).
+        # 🔴 제외 예시를 `북극` 으로 바꿨다(spec 087 T005) — `대한민국` 은 정의문 소관이 됐고,
+        #    이 테스트가 보는 것은 **규칙 3단의 순서**이므로 규칙에 남은 항목으로 확인한다.
         judged = [
-            _e("가키워드", "대한민국"),
+            _e("가키워드", "북극"),
             _e("올림픽 정식 종목", "올림픽", "사건"),
             _e("나키워드", "서울"),
             _e("다키워드", "서울특별시"),
@@ -561,7 +583,7 @@ class TestPurityAndDeterminism(unittest.TestCase):
                          ["서울특별시", "제주도"])
 
     def test_입력_목록을_변형하지_않는다(self) -> None:
-        judged = [_e("가키워드", "서울"), _e("나키워드", "대한민국")]
+        judged = [_e("가키워드", "서울"), _e("나키워드", "북극")]
         before = list(judged)
         apply_rules(judged)
         self.assertEqual(judged, before)
