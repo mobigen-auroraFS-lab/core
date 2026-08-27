@@ -30,15 +30,23 @@
 -- 멱등: IF NOT EXISTS — 재실행 안전. 적용 순서: v303 이후.
 -- =============================================================================
 
+-- 🔴 **컬럼 타입은 참조 대상과 정확히 맞춘다**(2026-08-27 정정 · 사용자 지적으로 발견).
+--   처음 쓸 때 v302·node 를 확인하지 않아 네 컬럼이 어긋나 있었다:
+--     skill_code  VARCHAR(100) → 부모 `mm_skill.skill_code` 가 TEXT 인데 **자식이 더 좁았다**
+--     entity_type VARCHAR(50)  → `node.entity_type` 은 VARCHAR(40)
+--     entity_uid  TEXT         → `node.entity_uid` 는 VARCHAR(255)
+--     prompt_version/decided_by TEXT → v302 는 VARCHAR(40)/VARCHAR(20)
+--   FK 는 암묵 캐스팅으로 동작했으나, 같은 뜻에 다른 타입을 쓰면 나중에 "왜 여기만 제한이
+--   다른가"를 조사하게 된다. 087 이 시험 중이고 행이 적어 지금 고치는 것이 가장 싸다.
 CREATE TABLE IF NOT EXISTS entity_mm_skill_label (
-    entity_type    VARCHAR(50)  NOT NULL,   -- 개체 자연키 절반(node.entity_type)
-    entity_uid     TEXT         NOT NULL,   -- 개체 자연키 절반(표기 키 · normalize_text_key)
-    skill_code     VARCHAR(100) NOT NULL
-                   REFERENCES mm_skill(skill_code),   -- 기본 NO ACTION(v302 관례)
+    entity_type    VARCHAR(40)  NOT NULL,   -- node.entity_type 과 같은 폭
+    entity_uid     VARCHAR(255) NOT NULL,   -- node.entity_uid 와 같은 폭(표기 키)
+    skill_code     TEXT         NOT NULL
+                   REFERENCES mm_skill(skill_code),   -- 부모와 같은 TEXT · NO ACTION(v302 관례)
     label_code     TEXT         NOT NULL,   -- 스킬 라벨 코드(어휘는 mm_skill.labels 가 정본)
     skill_version  INTEGER      NOT NULL,   -- 판정 당시 스킬 버전 — version<현행 행이 백필 대상
-    prompt_version TEXT         NOT NULL,   -- 판정 당시 문안 버전(이력 완전성 · 재선별 기준 아님)
-    decided_by     TEXT         NOT NULL,   -- 판정 주체(llm/user)
+    prompt_version VARCHAR(40)  NOT NULL,   -- v302 와 같은 폭(이력 완전성 · 재선별 기준 아님)
+    decided_by     VARCHAR(20)  NOT NULL DEFAULT 'llm',   -- v302 와 같은 폭·기본값
     created_at     TIMESTAMPTZ  NOT NULL DEFAULT now(),
     PRIMARY KEY (entity_type, entity_uid, skill_code, label_code)
 );
