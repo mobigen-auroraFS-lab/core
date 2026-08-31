@@ -79,7 +79,11 @@ def build_search_material(
     desc = (description or "").strip()
     if desc:
         parts.append(desc)
-    picked = [str(k).strip() for k in keywords if str(k).strip()][:max_keywords]
+    # 🔴 **정렬한다.** 키워드는 집합이지 순서에 뜻이 없는데, 순서가 흔들리면 재료 해시가 바뀌어
+    #   재임베딩이 돈다(헌법 결정성 · 합격선 C6). 실제로 겪었다 — 같은 개체를 API 목록
+    #   (`sorted`)과 배치 SQL(`ARRAY_AGG`)로 각각 조립했더니 82건 중 3건의 해시가 갈렸다
+    #   (2026-08-31). 상한을 적용하기 **전에** 정렬해야 어느 경로에서 오든 같은 셋이 뽑힌다.
+    picked = sorted({str(k).strip() for k in keywords if str(k).strip()})[:max_keywords]
     if picked:
         parts.append("근거 키워드: " + ", ".join(picked))
     return "\n".join(parts)
@@ -282,3 +286,68 @@ def count_entity_embeddings(conn: Any, *, model_name: str | None = None) -> int:
     else:
         row = conn.execute("SELECT count(*) FROM entity_embedding").fetchone()
     return int(row[0]) if row else 0
+
+# 대상 조회 SQL — 087 ``_TARGET_SQL`` 과 같은 뼈대에 **근거 키워드**를 더한 것이다.
+# 🔴 087 함수를 확장하지 않고 따로 두는 이유: 그쪽은 **판정** 대상 조회이고 반환 계약이 판정
+#   경로에 묶여 있다. 검색은 키워드가 필요하고(G0 에서 단어 하나 질의 35→50%) 판정은 쓰지
+#   않으므로, 같은 함수에 넣으면 쓰지 않는 값을 판정 쪽이 늘 실어 나른다.
+# 키워드는 소속 엣지의 ``reason`` 에 ``kw=…`` 형태로 들어 있다(화면 목록과 같은 추출 규칙).
+_EMBED_TARGET_SQL = """
+SELECT n.entity_type, n.entity_uid,
+       COALESCE(n.canonical->>'name', n.entity_uid) AS name,
+       n.canonical->>'description'                  AS description,
+       COUNT(DISTINCT ge.src_node)                   AS members,
+       ARRAY_AGG(DISTINCT substring(ge.reason from 'kw=([^|]*)'))
+           FILTER (WHERE ge.reason IS NOT NULL)      AS keywords
+  FROM node n
+  JOIN graph_edge ge    ON ge.dst_node = n.node_id
+  JOIN relation_kind rk ON rk.relation_kind_id = ge.relation_kind_id
+ WHERE n.node_kind = 'entity'
+   AND rk.kind_code = 'mm_member'
+   AND ge.status = ANY(%(statuses)s)
+ GROUP BY n.entity_type, n.entity_uid, n.canonical
+HAVING COUNT(DISTINCT ge.src_node) >= %(minsize)s
+ ORDER BY COUNT(DISTINCT ge.src_node) DESC, n.entity_uid
+"""
+
+
+def fetch_embedding_targets(
+    conn: Any,
+    *,
+    min_members: int,
+    statuses: Sequence[str],
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    """임베딩할 개체 목록을 읽는다(조회 전용 · 결정적 정렬).
+
+    Args:
+        conn: DB 커넥션.
+        min_members: 최소 구성 자산 수(화면 노출 임계와 같은 값을 넘긴다).
+        statuses: 셈에 넣을 엣지 상태 목록(화면과 같은 기준이어야 건수가 맞는다).
+        limit: 한 번에 가져올 상한. ``None`` 이면 전량.
+
+    Returns:
+        ``[{entity_type, entity_uid, name, description, members, keywords}]``
+        — 구성 자산 수 내림차순 → 표기 키(결정적 정렬).
+
+    🔴 **노출 임계를 통과한 개체만** 대상이다. 화면에 뜨지 않는 1건짜리 개체를 임베딩해도
+    검색 결과로 나가지 않는다(087 판정 대상 선별과 같은 판단 · 개체 1,065개 중 82개).
+    """
+    sql = _EMBED_TARGET_SQL
+    params: dict[str, Any] = {"minsize": min_members, "statuses": list(statuses)}
+    if limit is not None:
+        sql = sql + "LIMIT %(limit)s\n"
+        params["limit"] = limit
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        return [
+            {
+                "entity_type": str(r[0]),
+                "entity_uid": str(r[1]),
+                "name": str(r[2]),
+                "description": (r[3] or None),
+                "members": int(r[4]),
+                "keywords": [k for k in (r[5] or []) if k],
+            }
+            for r in cur.fetchall()
+        ]
