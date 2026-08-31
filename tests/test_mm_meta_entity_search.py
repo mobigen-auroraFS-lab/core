@@ -1,0 +1,380 @@
+"""089 T004 — 멀티모달 메타 **개체 검색**(질의 토큰 분리) 단위 테스트(``src/mm_meta/entity_search.py``).
+
+무엇을 검증하나: 검색어를 **공백으로 쪼개 토큰마다 찾고, 맞은 토큰 수로 줄 세우는** 규칙이
+설계대로 도는지 본다. DB·LLM·서버가 필요 없는 순수 함수라 mock 없이 시험한다.
+
+왜 이 규칙인가(착수 전 실측 2026-08-31 · `fixtures/mm_meta_search/baseline_20260831.json`):
+현행은 검색어를 정규화한 뒤 **통짜로** 찾는다 — `"여자 솔로 가수"` 라는 글자가 이름·근거 키워드·
+설명문 어딘가에 연속으로 있어야 걸린다. 그럴 리가 없어 다어절 질의 30개 중 **29개가 0건**이었다
+(재현율 0%). 토큰으로 쪼개면 `가수` 하나로 걸린다(예측 43.3% · spec 089 §2).
+
+이 파일이 봉인하는 일곱 가지(tasks 089 T004):
+    ① **한 토큰 동치** — 공백 없는 질의는 현행과 **같은 개체**를 고른다. 이름 검색 재현율
+       100%(B2)가 구조적으로 지켜지는 근거다. 현행 로직 사본(``_legacy_narrow``)과 맞대 본다.
+    ② **다어절 OR** — 한 토큰만 맞아도 남는다(AND 면 0건이 그대로 재현된다).
+    ③ **정렬** — 맞은 토큰 수 → 묶음 크기 → 이름. 동점을 **두 단계 다** 시험한다(결정성 B4).
+    ④ **빈 질의** — ``None``·``""``·공백뿐인 질의는 **전체**(현행 계약). 기호만 든 질의는
+       정규화가 기호를 지우지 않으므로 **토큰이 되고**, 따라서 걸리는 개체가 없으면 0건이다.
+    ⑤ **이유 문자열** — 이름으로 걸렸으면 ``None``(현행 계약), 그 외는 **맞은 토큰**을 싣는다.
+    ⑥ **공백 포함 이름 회귀** — 노출 개체 82개 중 10개(12%)가 이름에 공백을 갖는다. 2토큰으로
+       쪼개져도 두 토큰을 다 맞춰 **정답이 1위**여야 한다(실측 이름 3건을 케이스로 고정).
+    ⑦ **한 글자 토큰** — 최소 길이 필터를 **두지 않는다**. 근거는 구현 모듈 주석에 실측치와 함께
+       남겼다(요지: 필터를 켜면 다어절 재현율 43.3%→36.7% 로 떨어지고, `강`·`산` 같은 한 글자
+       질의가 토큰 0개가 되어 ④의 계약에 따라 **전체**가 나온다 — 검색이 고장 난 것처럼 보인다).
+
+⚠️ 픽스처는 실 자산 데이터가 아니다 — 실측 코퍼스의 **모양**(이름·근거 키워드 1~2개·40자 안팎의
+설명문·묶음 크기)만 더미 값으로 재현한다. 개체 이름은 spec·tasks 에 적힌 공개 지명·프로그램명이다.
+"""
+
+from __future__ import annotations
+
+import unittest
+from typing import Any
+
+from src.domain.text_norm import normalize_text_key
+from src.mm_meta.entity_search import match_entity, narrow_entities, split_query
+
+
+def _item(
+    name: str,
+    keywords: list[str],
+    description: str,
+    confirmed_count: int,
+) -> dict[str, Any]:
+    """목록 행 하나(``/mm-meta`` 응답 모양)를 짧게 만드는 도우미.
+
+    Args:
+        name: 개체 표준표기(화면 카드 제목).
+        keywords: 근거 키워드 — 이 개체로 묶인 이유가 된 원문 낱말들.
+        description: 개체 설명문(084 생성 · 실측 평균 42자).
+        confirmed_count: 묶음 크기 = 확인된 자료 수. 정렬 2순위다.
+
+    Returns:
+        목록 행 dict.
+    """
+    return {
+        "entity_type": "장소",
+        "entity_uid": name,
+        "name": name,
+        "keywords": keywords,
+        "description": description,
+        "confirmed_count": confirmed_count,
+    }
+
+
+# 실측 코퍼스(노출 개체 82개)의 모양을 본뜬 픽스처. 입력 순서는 현행 SQL 순서(묶음 크기 내림차순)다 —
+# ④에서 "전체를 돌려줄 때 순서가 보존되는가"를 이 순서로 본다.
+_ITEMS: tuple[dict[str, Any], ...] = (
+    _item("아이유", ["아이유"], "가수 아이유의 앨범 정보와 무대 퍼포먼스를 담은 영상과 이미지.", 14),
+    _item("제주도", ["제주도", "제주 해녀"], "제주도의 자연경관과 전통문화, 관광 정보.", 14),
+    _item("올림픽", ["올림픽"], "올림픽과 월드컵 등 국제 대회의 역사와 종목 소개.", 10),
+    _item("경기도", ["경기도"], "수원과 인접 도시의 도심 풍경과 교통.", 8),
+    _item("강원도", ["강원도"], "동해안과 산간 지역의 사계절 풍경.", 6),
+    _item("나이아가라 폭포", ["나이아가라 폭포"], "폭포의 지형적 특징과 경관, 관광 정보.", 6),
+    _item("한강", ["한강"], "서울을 가로지르는 강의 사계절 풍경과 시민 여가.", 5),
+    _item("나일강", ["나일강"], "이집트를 흐르는 긴 강과 주변 유적.", 4),
+    _item("FIFA 월드컵", ["FIFA 월드컵", "월드컵"], "국제 축구 대회의 운영 체계와 대표팀 성과.", 4),
+    _item("장범준", ["장범준"], "가수 장범준의 공연 실황과 스케치북 무대 인터뷰.", 3),
+    _item("수원 화성", ["수원 화성", "수원화성"], "수원 화성의 역사적 가치와 건축 특징.", 3),
+    _item("유희열의 스케치북", ["유희열의 스케치북"], "음악 방송 무대의 공연 영상과 이미지.", 3),
+    _item("빅토리아 폭포", ["빅토리아 폭포"], "폭포의 지리적 특성과 생태계, 웅장한 경관.", 3),
+)
+
+
+def _names(rows: list[dict[str, Any]]) -> list[str]:
+    """결과 행에서 이름만 순서대로 뽑는다(단언을 읽기 쉽게).
+
+    Args:
+        rows: ``narrow_entities`` 결과.
+
+    Returns:
+        이름 목록(결과 순서 그대로).
+    """
+    return [r["name"] for r in rows]
+
+
+# ── 현행(교체 대상) 로직 사본 ────────────────────────────────────────────────────
+# 백엔드 데모 라우트 ``routes_mm_meta_demo.py`` 의 ``_narrow``·``_match_reason`` 을 2026-08-31
+# 시점 그대로 옮긴 것이다. **비교 기준**으로만 쓴다 — 한 토큰 질의에서 새 구현이 같은 개체를
+# 고르는지(①)를 사람 눈이 아니라 코드로 맞대기 위해서다. 라우트가 교체돼도 이 사본은 남는다.
+def _legacy_reason(item: dict[str, Any], needle: str) -> str | None:
+    """현행 ``_match_reason`` 사본 — 이름으로 걸렸으면 ``None``.
+
+    Args:
+        item: 목록 행.
+        needle: 정규화된 검색어(통짜).
+
+    Returns:
+        ``"근거 키워드 일치"``·``"설명 일치"`` 또는 ``None``.
+    """
+    if normalize_text_key(item.get("name") or "").find(needle) >= 0:
+        return None
+    for kw in item.get("keywords") or []:
+        if normalize_text_key(str(kw)).find(needle) >= 0:
+            return "근거 키워드 일치"
+    if normalize_text_key(item.get("description") or "").find(needle) >= 0:
+        return "설명 일치"
+    return None
+
+
+def _legacy_narrow(items: tuple[dict[str, Any], ...], q: str | None) -> list[dict[str, Any]]:
+    """현행 ``_narrow`` 사본 — 정규화 후 **통짜 부분 문자열** 포함.
+
+    Args:
+        items: 목록 행들.
+        q: 검색어(``None``·공백이면 좁히지 않는다).
+
+    Returns:
+        좁혀진 목록(각 행에 ``match_reason``).
+    """
+    needle = normalize_text_key(q or "")
+    if not needle:
+        return [{**it, "match_reason": None} for it in items]
+    out: list[dict[str, Any]] = []
+    for it in items:
+        hit_name = needle in normalize_text_key(it.get("name") or "")
+        hit_kw = any(needle in normalize_text_key(str(k)) for k in (it.get("keywords") or []))
+        hit_desc = needle in normalize_text_key(it.get("description") or "")
+        if hit_name or hit_kw or hit_desc:
+            out.append({**it, "match_reason": _legacy_reason(it, needle)})
+    return out
+
+
+class TestSplitQuery(unittest.TestCase):
+    """T001 — 질의를 토큰으로 쪼갠다(정규화는 코어 정본 ``normalize_text_key`` 하나만)."""
+
+    def test_공백으로_쪼개고_토큰마다_정규화한다(self) -> None:
+        self.assertEqual(split_query("여자 솔로 가수"), ("여자", "솔로", "가수"))
+
+    def test_정규화_정본을_그대로_쓴다(self) -> None:
+        """대소문자·전각·연속 공백 처리를 이 모듈이 따로 정의하지 않는다는 봉인.
+
+        규칙이 두 벌이 되면 색인 키와 필터 키가 갈라진다(083 plan §Global Constraints).
+        여기서 기대값은 ``normalize_text_key`` 의 규칙(NFKC → 공백 제거 → casefold)이다.
+        """
+        self.assertEqual(split_query("FIFA 월드컵"), ("fifa", "월드컵"))
+        self.assertEqual(split_query("  아이유   앨범  "), ("아이유", "앨범"))
+        # 전각 문자는 NFKC 로 반각이 된다(정본 규칙 1번).
+        self.assertEqual(split_query("ＮＡＳＡ"), ("nasa",))
+
+    def test_빈_질의는_토큰이_0개다(self) -> None:
+        for q in (None, "", "   ", "\t\n "):
+            with self.subTest(q=q):
+                self.assertEqual(split_query(q), ())
+
+    def test_한_글자_토큰을_버리지_않는다(self) -> None:
+        """⑦ — 최소 길이 필터 없음(결정 근거는 구현 모듈 주석)."""
+        self.assertEqual(split_query("아프리카 큰 강"), ("아프리카", "큰", "강"))
+        self.assertEqual(split_query("강"), ("강",))
+
+
+class TestMatchEntity(unittest.TestCase):
+    """T002 — 개체 하나가 토큰 몇 개를 맞췄나 + 걸린 이유(⑤)."""
+
+    def _by_name(self, name: str) -> dict[str, Any]:
+        """픽스처에서 이름으로 행 하나를 꺼낸다.
+
+        Args:
+            name: 개체 이름.
+
+        Returns:
+            목록 행.
+        """
+        return next(it for it in _ITEMS if it["name"] == name)
+
+    def test_이름_근거키워드_설명문_어디든_맞으면_센다(self) -> None:
+        item = self._by_name("제주도")
+        self.assertEqual(match_entity(item, ("제주도",))[0], 1)      # 이름
+        self.assertEqual(match_entity(item, ("해녀",))[0], 1)        # 근거 키워드
+        self.assertEqual(match_entity(item, ("자연경관",))[0], 1)     # 설명문
+        self.assertEqual(match_entity(item, ("해녀", "자연경관"))[0], 2)
+
+    def test_맞은_토큰이_없으면_0이고_이유도_없다(self) -> None:
+        self.assertEqual(match_entity(self._by_name("한강"), ("도자기",)), (0, None))
+        self.assertEqual(match_entity(self._by_name("한강"), ()), (0, None))
+
+    def test_이름으로_걸리면_이유는_None이다(self) -> None:
+        """⑤ 현행 계약 — 이름은 화면에 이미 보이므로 설명이 불필요하다."""
+        self.assertEqual(match_entity(self._by_name("아이유"), ("아이유",)), (1, None))
+        # 이름 + 다른 축이 함께 걸려도 이름이 우선이다.
+        count, reason = match_entity(self._by_name("제주도"), ("제주도", "해녀"))
+        self.assertEqual(count, 2)
+        self.assertIsNone(reason)
+
+    def test_이유에_맞은_토큰이_실린다(self) -> None:
+        """⑤ — 여러 토큰 중 무엇으로 걸렸는지 보이지 않으면 OR 결과를 믿을 수 없다."""
+        self.assertEqual(
+            match_entity(self._by_name("제주도"), ("여자", "해녀")),
+            (1, "근거 키워드 일치: 해녀"),
+        )
+        self.assertEqual(
+            match_entity(self._by_name("아이유"), ("여자", "솔로", "가수")),
+            (1, "설명 일치: 가수"),
+        )
+
+    def test_이유는_근거키워드가_설명문보다_앞선다(self) -> None:
+        """⑤ 우선순위 — 이름 > 근거 키워드 > 설명문(현행 ``_match_reason`` 과 같은 순서)."""
+        count, reason = match_entity(self._by_name("제주도"), ("자연경관", "해녀"))
+        self.assertEqual(count, 2)
+        self.assertEqual(reason, "근거 키워드 일치: 해녀")
+
+    def test_같은_축에서는_질의_순서가_앞선_토큰을_쓴다(self) -> None:
+        """결정성 — 같은 축에 여러 토큰이 걸리면 **질의에 먼저 나온** 토큰을 싣는다."""
+        count, reason = match_entity(self._by_name("제주도"), ("관광", "자연경관"))
+        self.assertEqual(count, 2)
+        self.assertEqual(reason, "설명 일치: 관광")
+
+
+class TestNarrowEntitiesEmptyQuery(unittest.TestCase):
+    """④ 빈 질의 — 전체와 0건을 가른다."""
+
+    def test_질의가_없으면_전체를_입력_순서대로_준다(self) -> None:
+        for q in (None, "", "   ", "\t\n "):
+            with self.subTest(q=q):
+                rows = narrow_entities(list(_ITEMS), q)
+                self.assertEqual(_names(rows), [it["name"] for it in _ITEMS])
+                self.assertTrue(all(r["match_reason"] is None for r in rows))
+
+    def test_기호만_든_질의는_토큰이_되어_0건이_된다(self) -> None:
+        """🔴 기호는 정규화가 지우지 않는다(규칙은 공백 제거·casefold 뿐) → 토큰 1개.
+
+        그래서 걸리는 개체가 없으면 **0건**이고 전체가 아니다. 현행과 같은 동작이며
+        spec §5 "결과 0건과 전체를 가른다"가 요구하는 바다.
+        """
+        rows = narrow_entities(list(_ITEMS), "!!!")
+        self.assertEqual(rows, [])
+        self.assertEqual(_names(rows), _names(_legacy_narrow(_ITEMS, "!!!")))
+
+    def test_입력을_건드리지_않는다(self) -> None:
+        """순수 함수 봉인 — 원본 행에 ``match_reason`` 이 새로 생기면 안 된다."""
+        source = [dict(it) for it in _ITEMS]
+        narrow_entities(source, "아이유")
+        narrow_entities(source, None)
+        self.assertTrue(all("match_reason" not in it for it in source))
+
+
+class TestNarrowEntitiesSingleToken(unittest.TestCase):
+    """① 한 토큰 동치 — 공백 없는 질의는 현행과 같은 개체를 고른다(B2 의 실질)."""
+
+    # 이름 질의·개념 낱말 질의·한 글자 질의를 섞는다. 기준선 질의셋에서 뽑은 형태다.
+    QUERIES = ("아이유", "제주도", "한강", "폭포", "가수", "월드컵", "강", "도자기")
+
+    def test_현행과_같은_개체를_고른다(self) -> None:
+        for q in self.QUERIES:
+            with self.subTest(q=q):
+                new = narrow_entities(list(_ITEMS), q)
+                legacy = _legacy_narrow(_ITEMS, q)
+                # 동치는 "어떤 개체가 걸리나" 기준이다 — 줄 세우는 순서는 새 규칙이 정한다(③).
+                self.assertEqual(set(_names(new)), set(_names(legacy)))
+
+    def test_현행과_같은_이유_계층을_준다(self) -> None:
+        """이름으로 걸린 것은 양쪽 다 ``None``, 그 밖은 현행 문구로 시작한다(토큰만 덧붙는다)."""
+        for q in self.QUERIES:
+            legacy_by_name = {r["name"]: r["match_reason"] for r in _legacy_narrow(_ITEMS, q)}
+            for row in narrow_entities(list(_ITEMS), q):
+                with self.subTest(q=q, name=row["name"]):
+                    old = legacy_by_name[row["name"]]
+                    if old is None:
+                        self.assertIsNone(row["match_reason"])
+                    else:
+                        self.assertIsNotNone(row["match_reason"])
+                        self.assertTrue(row["match_reason"].startswith(old))
+                        self.assertIn(normalize_text_key(q), row["match_reason"])
+
+
+class TestNarrowEntitiesMultiToken(unittest.TestCase):
+    """② 다어절 OR — 한 토큰만 맞아도 남는다."""
+
+    def test_다어절_질의가_한_토큰으로_걸린다(self) -> None:
+        rows = narrow_entities(list(_ITEMS), "여자 솔로 가수")
+        # `가수` 는 두 개체의 설명문에 있다. AND 였다면 0건(현행 재현율 0%)이다.
+        self.assertEqual(_names(rows), ["아이유", "장범준"])
+        self.assertEqual(rows[0]["match_reason"], "설명 일치: 가수")
+
+    def test_현행은_같은_질의에서_0건이었다(self) -> None:
+        """개선의 전제를 함께 봉인한다 — 통짜 매칭으로는 걸릴 수 없다."""
+        self.assertEqual(_legacy_narrow(_ITEMS, "여자 솔로 가수"), [])
+
+
+class TestNarrowEntitiesOrdering(unittest.TestCase):
+    """③ 정렬 — 맞은 토큰 수 → 묶음 크기 → 이름. 동점을 **두 단계 다** 시험한다(B4)."""
+
+    # 정렬만 보기 위한 전용 픽스처. 이름에는 질의 토큰이 들어 있지 않아 근거 키워드로만 갈린다.
+    SORT_ITEMS = (
+        _item("델타", ["봄"], "", 50),
+        _item("베타", ["봄"], "", 99),
+        _item("알파", ["봄", "여름"], "", 1),
+        _item("감마", ["봄"], "", 50),
+    )
+
+    def test_맞은_토큰_수가_묶음_크기보다_앞선다(self) -> None:
+        """1순위 — 2점짜리(묶음 1건)가 1점짜리(묶음 99건)보다 위다."""
+        rows = narrow_entities(list(self.SORT_ITEMS), "봄 여름")
+        self.assertEqual(_names(rows)[0], "알파")
+
+    def test_토큰_수가_같으면_묶음_크기로_가른다(self) -> None:
+        """2순위 — 베타(99) > 감마·델타(50)."""
+        rows = narrow_entities(list(self.SORT_ITEMS), "봄 여름")
+        self.assertEqual(_names(rows)[1], "베타")
+
+    def test_묶음_크기까지_같으면_이름으로_가른다(self) -> None:
+        """3순위 — 감마·델타는 1점·50건으로 완전 동점이라 이름 오름차순으로 갈린다."""
+        rows = narrow_entities(list(self.SORT_ITEMS), "봄 여름")
+        self.assertEqual(_names(rows), ["알파", "베타", "감마", "델타"])
+
+    def test_같은_질의는_언제나_같은_순서다(self) -> None:
+        """B4 결정성 — 입력 순서를 바꿔도 결과 순서는 같다."""
+        forward = _names(narrow_entities(list(self.SORT_ITEMS), "봄 여름"))
+        backward = _names(narrow_entities(list(reversed(self.SORT_ITEMS)), "봄 여름"))
+        self.assertEqual(forward, backward)
+
+
+class TestNarrowEntitiesSpacedNames(unittest.TestCase):
+    """⑥ 공백 포함 이름 회귀 — 2토큰으로 쪼개져도 정답이 1위여야 한다.
+
+    노출 개체 82개 중 10개(12%)가 이름에 공백을 갖는다(실측 2026-08-31). 정규화가 공백을 지우므로
+    이름 자체는 붙어 있고(``"수원 화성"``→``"수원화성"``), 질의 두 토큰이 **모두** 그 안에 있어
+    2점이 된다. 1점짜리 방해 개체가 묶음 크기에서 앞서더라도 토큰 수가 이긴다.
+    """
+
+    CASES = (
+        ("수원 화성", "수원 화성", "경기도"),               # 방해: 설명문에 `수원`(묶음 8건)
+        ("FIFA 월드컵", "FIFA 월드컵", "올림픽"),          # 방해: 설명문에 `월드컵`(묶음 10건)
+        ("유희열의 스케치북", "유희열의 스케치북", "장범준"),   # 방해: 설명문에 `스케치북`
+    )
+
+    def test_정답이_1위다(self) -> None:
+        for q, answer, distractor in self.CASES:
+            with self.subTest(q=q):
+                rows = narrow_entities(list(_ITEMS), q)
+                self.assertEqual(_names(rows)[0], answer)
+                # 방해 개체도 결과에는 있다(OR) — 순위로 갈릴 뿐이다.
+                self.assertIn(distractor, _names(rows))
+
+    def test_현행도_이름_질의는_찾았다(self) -> None:
+        """B2 — 이 세 이름은 현행에서도 찾혔다(정규화가 공백을 지우므로). 회귀 여부의 기준선."""
+        for q, answer, _ in self.CASES:
+            with self.subTest(q=q):
+                self.assertIn(answer, _names(_legacy_narrow(_ITEMS, q)))
+
+
+class TestNarrowEntitiesSingleCharToken(unittest.TestCase):
+    """⑦ 한 글자 토큰 — 최소 길이 필터를 두지 않는다(결정 근거는 구현 모듈 주석)."""
+
+    def test_한_글자_질의는_전체가_아니라_걸린_것만_준다(self) -> None:
+        """🔴 필터를 켰다면 토큰 0개가 되어 ④의 계약대로 **전체**가 나왔을 자리다."""
+        rows = narrow_entities(list(_ITEMS), "강")
+        self.assertLess(len(rows), len(_ITEMS))
+        self.assertEqual(_names(rows), ["강원도", "한강", "나일강"])
+
+    def test_한_글자_토큰도_점수에_들어간다(self) -> None:
+        """실측 사례 — `아프리카 큰 강` 의 정답(나일강)은 `강` 으로만 걸린다.
+
+        필터를 켜면 이 질의는 0건이 된다(측정: 다어절 재현율 43.3%→36.7%).
+        """
+        rows = narrow_entities(list(_ITEMS), "아프리카 큰 강")
+        self.assertIn("나일강", _names(rows))
+
+
+if __name__ == "__main__":
+    unittest.main()
