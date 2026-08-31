@@ -68,6 +68,8 @@ CHECK_NAMES: tuple[str, ...] = (
     "비활성_kind_엣지",
     "비-asset_노드_참조",
     *MM_MEMBER_CHECK_NAMES,
+    # 개체 임베딩(v306) 정합 — 소속 축 뒤에 덧붙인다(위 주석의 "맨 뒤" 원칙 그대로).
+    "개체임베딩_고아",
 )
 
 
@@ -229,6 +231,23 @@ WHERE kind_code = %s
   AND (is_symmetric IS DISTINCT FROM FALSE OR status <> 'active')
 -- check:소속_kind_등록_위반""",
         "params": [MM_MEMBER_KIND_CODE],
+    })
+
+    # 🔴 개체 임베딩(v306)은 **FK 가 없다** — `node(entity_type, entity_uid)` 의 유니크가 부분
+    #   인덱스라 PostgreSQL 이 FK 대상으로 받지 않는다(v304 와 같은 사유). 그래서 개체가 사라져도
+    #   임베딩이 남는다. 개체는 배치가 다시 만들 때마다 바뀌며(087 재판정에서 925→1,065) 실제로
+    #   고아 113건이 났던 전례가 있다 — 조치(purge)는 배치가 하고, **감지는 여기서** 한다.
+    # ⚠️ v306 이 적용되지 않은 DB 에서도 돌아야 하므로 테이블 존재를 먼저 본다(없으면 0).
+    checks.append({
+        "name": "개체임베딩_고아",
+        "sql": """SELECT CASE WHEN to_regclass('entity_embedding') IS NULL THEN 0 ELSE (
+    SELECT count(*) FROM entity_embedding ee
+     WHERE NOT EXISTS (SELECT 1 FROM node n
+                        WHERE n.node_kind = 'entity'
+                          AND n.entity_type = ee.entity_type
+                          AND n.entity_uid  = ee.entity_uid)) END AS n
+-- check:개체임베딩_고아""",
+        "params": [],
     })
     return checks
 
