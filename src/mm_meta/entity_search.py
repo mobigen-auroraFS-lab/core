@@ -198,8 +198,77 @@ def narrow_entities(
     scored.sort(key=lambda row: (-row[0], -row[1], row[2]))
     return [row[3] for row in scored]
 
+# 의미 검색으로 걸린 행에 붙일 이유 문구. 문자열 매칭 이유(위 두 상수)와 **구별되게** 둔다 —
+# 화면에서 "글자가 맞은 것"과 "뜻이 가까운 것"을 사용자가 갈라 볼 수 있어야 신뢰가 생긴다.
+REASON_SEMANTIC = "뜻이 가까움"
+
+
+def fuse_entity_results(
+    items: Sequence[Mapping[str, Any]],
+    string_hits: Sequence[Mapping[str, Any]],
+    semantic_hits: Sequence[Mapping[str, Any]] = (),
+    *,
+    max_semantic: int | None = None,
+) -> list[dict[str, Any]]:
+    """문자열 결과 **위에** 의미 결과를 얹는다(순수 · DB 호출 없음 · spec 090).
+
+    Args:
+        items: 목록 행 전체(``/mm-meta`` 응답 모양). 의미 검색은 키만 돌려주므로 화면에 보여줄
+            행을 여기서 되살린다.
+        string_hits: ``narrow_entities`` 결과. **순서를 그대로 유지**한다.
+        semantic_hits: ``find_similar_entities`` 결과(``{entity_type, entity_uid, similarity}``).
+            유사도 내림차순으로 이미 정렬돼 있다고 본다. 비우면 문자열 결과가 그대로 나간다.
+        max_semantic: 의미 결과를 몇 개까지 더할지. ``None`` 이면 받은 것 전부(상한은 조회
+            시점에 두는 것이 기본이다 — 측정과 일치시키려면 조회에서 잘라야 한다).
+
+    Returns:
+        ``string_hits`` + (문자열이 못 잡은 의미 결과). 의미로 걸린 행은 ``match_reason`` 이
+        ``"뜻이 가까움 (0.53)"`` 형태다.
+
+    🔴 **왜 점수 융합이 아니라 계층인가.** 이름 질의가 089 에서 **100%** 인데(B2·C3) 점수로
+    섞으면 그것을 깨뜨릴 위험이 있다. 문자열로 걸린 것은 **확실한 것**이라 위에 두고, 의미
+    검색은 **0건이던 자리를 채우는 용도**로 쓴다. 자산 검색(BM25+kNN 융합)과 다른 선택인 이유:
+    자산은 결과가 수백 건이라 순위 품질이 관건이고, 개체는 1~10건이라 **놓치지 않는 것**이
+    관건이다.
+
+    🔴 **유사도 컷오프가 없다.** G0·G2 측정에서 컷오프 0.45 는 정답 17/67건을 버렸다 —
+    재료가 짧아(중위 68자) 절대값이 전반적으로 낮고 1위로 맞춘 것도 0.33~0.44 다.
+    **순위는 믿을 수 있고 절대값은 못 믿는다.**
+
+    ⚠️ **끄는 길**: ``semantic_hits`` 를 비워 부르면 089 동작이 그대로 나온다(되돌림의 실질).
+    """
+    out: list[dict[str, Any]] = [dict(row) for row in string_hits]
+    if not semantic_hits:
+        return out
+
+    # 문자열이 이미 잡은 것은 다시 넣지 않는다 — 같은 개체가 두 줄로 보이면 건수가 어긋난다.
+    seen = {(str(r.get("entity_type")), str(r.get("entity_uid"))) for r in string_hits}
+    by_key = {(str(it.get("entity_type")), str(it.get("entity_uid"))): it for it in items}
+
+    added = 0
+    for hit in semantic_hits:
+        if max_semantic is not None and added >= max_semantic:
+            break
+        key = (str(hit.get("entity_type")), str(hit.get("entity_uid")))
+        if key in seen:
+            continue
+        row = by_key.get(key)
+        if row is None:
+            # 목록에 없는 개체(노출 임계 아래로 내려갔거나 목록이 잘린 경우) — 화면에 보여줄
+            # 행이 없으므로 건너뛴다. 벡터는 남아 있어도 목록이 정본이다.
+            continue
+        similarity = hit.get("similarity")
+        reason = (f"{REASON_SEMANTIC} ({float(similarity):.2f})"
+                  if isinstance(similarity, (int, float)) else REASON_SEMANTIC)
+        out.append({**dict(row), "match_reason": reason})
+        seen.add(key)
+        added += 1
+    return out
+
 
 __all__ = [
+    "REASON_SEMANTIC",
+    "fuse_entity_results",
     "REASON_DESCRIPTION",
     "REASON_KEYWORD",
     "match_entity",

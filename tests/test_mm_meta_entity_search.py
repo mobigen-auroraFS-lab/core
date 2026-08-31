@@ -32,7 +32,13 @@ import unittest
 from typing import Any
 
 from src.domain.text_norm import normalize_text_key
-from src.mm_meta.entity_search import match_entity, narrow_entities, split_query
+from src.mm_meta.entity_search import (
+    REASON_SEMANTIC,
+    fuse_entity_results,
+    match_entity,
+    narrow_entities,
+    split_query,
+)
 
 
 def _item(
@@ -378,3 +384,113 @@ class TestNarrowEntitiesSingleCharToken(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFuseEntityResults(unittest.TestCase):
+    """090 G3 — 융합. 문자열 결과 **위에** 의미 결과를 얹는다.
+
+    무엇을 봉인하나: 틀리면 **이름 검색 100%가 깨지거나 건수가 어긋나는** 다섯 가지를 본다.
+
+        ① 문자열 결과가 항상 위 — C3(이름 회귀 0)의 구조적 보장이다.
+        ② 문자열 0건이면 의미 결과만 — 089 가 0건이던 자리를 채우는 것이 이 기능의 목적.
+        ③ 상한을 넘게 더하지 않는다 — 노이즈가 늘면 순위가 무의미해진다.
+        ④ 같은 입력 → 같은 순서(헌법 결정성 · 재측정이 성립해야 한다).
+        ⑤ 임베딩이 없는 개체가 섞여도 깨지지 않는다(배치가 아직 안 돈 상태).
+    """
+
+    _ITEMS = [
+        {"entity_type": "인물", "entity_uid": "아이유", "name": "아이유", "confirmed_count": 14},
+        {"entity_type": "음식", "entity_uid": "김치", "name": "김치", "confirmed_count": 13},
+        {"entity_type": "장소", "entity_uid": "제주도", "name": "제주도", "confirmed_count": 14},
+        {"entity_type": "장소", "entity_uid": "수원화성", "name": "수원 화성", "confirmed_count": 5},
+    ]
+
+    @staticmethod
+    def _sem(*pairs: tuple[str, str, float]) -> list[dict[str, Any]]:
+        return [{"entity_type": t, "entity_uid": u, "similarity": s} for t, u, s in pairs]
+
+    def test_문자열_결과가_항상_위(self) -> None:
+        # 🔴 C3 의 구조적 보장 — 이름으로 걸린 것은 확실한 것이라 위에 둔다.
+        string_hits = [{**self._ITEMS[1], "match_reason": None}]          # 김치
+        got = fuse_entity_results(self._ITEMS, string_hits,
+                                  self._sem(("인물", "아이유", 0.61)))
+        self.assertEqual([r["entity_uid"] for r in got], ["김치", "아이유"])
+        self.assertIsNone(got[0]["match_reason"])
+
+    def test_유사도가_더_높아도_문자열이_위(self) -> None:
+        string_hits = [{**self._ITEMS[1], "match_reason": None}]
+        got = fuse_entity_results(self._ITEMS, string_hits,
+                                  self._sem(("장소", "제주도", 0.99)))
+        self.assertEqual(got[0]["entity_uid"], "김치")
+
+    def test_문자열_0건이면_의미_결과만(self) -> None:
+        got = fuse_entity_results(self._ITEMS, [],
+                                  self._sem(("음식", "김치", 0.37), ("인물", "아이유", 0.31)))
+        self.assertEqual([r["entity_uid"] for r in got], ["김치", "아이유"])
+
+    def test_의미_결과가_없으면_089_동작_그대로(self) -> None:
+        # ⚠️ 되돌림의 실질 — semantic_hits 를 비우면 융합이 없던 것과 같다.
+        string_hits = [{**self._ITEMS[0], "match_reason": None}]
+        self.assertEqual(fuse_entity_results(self._ITEMS, string_hits), string_hits)
+        self.assertEqual(fuse_entity_results(self._ITEMS, string_hits, []), string_hits)
+
+    def test_문자열이_이미_잡은_것은_두_번_넣지_않는다(self) -> None:
+        # 같은 개체가 두 줄로 보이면 건수가 어긋난다.
+        string_hits = [{**self._ITEMS[1], "match_reason": None}]
+        got = fuse_entity_results(self._ITEMS, string_hits,
+                                  self._sem(("음식", "김치", 0.9), ("인물", "아이유", 0.5)))
+        self.assertEqual([r["entity_uid"] for r in got], ["김치", "아이유"])
+
+    def test_상한을_넘게_더하지_않는다(self) -> None:
+        got = fuse_entity_results(
+            self._ITEMS, [],
+            self._sem(("음식", "김치", 0.5), ("인물", "아이유", 0.4), ("장소", "제주도", 0.3)),
+            max_semantic=2)
+        self.assertEqual(len(got), 2)
+
+    def test_상한이_없으면_받은_전부(self) -> None:
+        got = fuse_entity_results(
+            self._ITEMS, [],
+            self._sem(("음식", "김치", 0.5), ("인물", "아이유", 0.4), ("장소", "제주도", 0.3)))
+        self.assertEqual(len(got), 3)
+
+    def test_목록에_없는_개체는_건너뛴다(self) -> None:
+        # 🔴 벡터는 남아 있어도 목록이 정본이다(노출 임계 아래로 내려간 개체 등).
+        got = fuse_entity_results(self._ITEMS, [],
+                                  self._sem(("인물", "없는사람", 0.9), ("음식", "김치", 0.4)))
+        self.assertEqual([r["entity_uid"] for r in got], ["김치"])
+
+    def test_임베딩이_없는_개체가_섞여도_깨지지_않는다(self) -> None:
+        # 배치가 아직 안 돈 상태 — 의미 결과가 일부 개체만 담고 있다.
+        string_hits = [{**self._ITEMS[3], "match_reason": None}]          # 수원화성
+        got = fuse_entity_results(self._ITEMS, string_hits, self._sem(("음식", "김치", 0.4)))
+        self.assertEqual([r["entity_uid"] for r in got], ["수원화성", "김치"])
+
+    def test_이유에_유사도가_실린다(self) -> None:
+        got = fuse_entity_results(self._ITEMS, [], self._sem(("음식", "김치", 0.5321)))
+        self.assertEqual(got[0]["match_reason"], f"{REASON_SEMANTIC} (0.53)")
+
+    def test_유사도가_없어도_이유는_붙는다(self) -> None:
+        got = fuse_entity_results(self._ITEMS, [],
+                                  [{"entity_type": "음식", "entity_uid": "김치"}])
+        self.assertEqual(got[0]["match_reason"], REASON_SEMANTIC)
+
+    def test_같은_입력이면_같은_순서(self) -> None:
+        # 헌법 결정성 — 재측정이 성립해야 한다.
+        sem = self._sem(("음식", "김치", 0.5), ("인물", "아이유", 0.5))
+        a = fuse_entity_results(self._ITEMS, [], sem)
+        b = fuse_entity_results(self._ITEMS, [], sem)
+        self.assertEqual([r["entity_uid"] for r in a], [r["entity_uid"] for r in b])
+
+    def test_입력_행을_고치지_않는다(self) -> None:
+        # 순수 함수 — 호출한 쪽의 목록이 오염되면 다음 질의가 이상해진다.
+        items = [dict(it) for it in self._ITEMS]
+        before = [dict(it) for it in items]
+        fuse_entity_results(items, [], self._sem(("음식", "김치", 0.5)))
+        self.assertEqual(items, before)
+
+    def test_문자열_행도_사본이다(self) -> None:
+        string_hits = [{**self._ITEMS[0], "match_reason": None}]
+        got = fuse_entity_results(self._ITEMS, string_hits, [])
+        got[0]["match_reason"] = "바뀜"
+        self.assertIsNone(string_hits[0]["match_reason"])
