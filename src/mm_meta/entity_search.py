@@ -1,0 +1,208 @@
+"""089 — 멀티모달 메타 **개체 검색**(질의 토큰 분리) 순수 함수. DB·서버·색인 불필요.
+
+무엇을 하나: 개체(묶음) 목록을 검색어로 좁히고 줄을 세운다. 재료는 이미 저장된 세 가지뿐이다 —
+**이름 · 근거 키워드 · 설명문**. 새 색인도 임베딩도 만들지 않는다.
+
+**왜 토큰으로 쪼개나**(착수 전 실측 2026-08-31 · 노출 개체 82개 · `fixtures/mm_meta_search/`):
+현행은 검색어를 정규화한 뒤 **통짜 부분 문자열**로 찾았다. 우편물에 적힌 주소 전체가 글자 그대로
+들어 있어야만 배달하는 셈이라, `"여자 솔로 가수"` 같은 여러 낱말 질의는 그 글자가 **연속으로**
+있을 리 없어 구조적으로 전멸했다(다어절 질의 30개 중 29개가 0건 · 재현율 0%). 반면 낱말 하나로
+내리면 35%가 걸렸다(`펭귄`→남극 · `해녀`→제주도). 그래서 **질의를 낱말로 쪼개** 낱말 하나만
+맞아도 남기고(OR), **몇 개나 맞았는지로 줄을 세운다**(예측 재현율 43.3% · spec 089 §2).
+
+**왜 AND 가 아닌가**: 개체 설명문이 평균 42자로 짧아 세 낱말을 다 가진 개체가 없다 — AND 로 하면
+현행의 0%가 그대로 재현된다. 넓게 걸고 순위로 가르는 쪽을 택했다. 넓힌 대가는 작았다(평균 결과
+2.9건 · 정답 중위 1위).
+
+**왜 형태소 분석(nori)을 안 쓰나**: 072 의 형태소 정규화는 OpenSearch analyzer 를 호출한다. 개체
+검색은 지금 DB·파이썬만으로 도는데 검색 엔진 의존을 들이면 "싸게 고친다"는 1단계의 전제가 무너진다.
+공백 분리로 얼마나 오르는지 먼저 재고, 부족하면 그때 검토한다(plan 089 §설계 결정).
+
+🔴 **이 접근의 천장은 매칭이 아니라 텍스트 빈약이다.** 검색 대상이 개체당 50~60자뿐이라
+「김치」에 `발효` 가, 「고려청자」에 `도자기` 가 아예 없다 — 토큰을 아무리 잘 쪼개도 걸릴 글자가
+없는 실패가 절반을 넘는다(17/30). 그쪽은 2단계(개체 의미 검색) 또는 설명문 품질 개선(084) 소관이다.
+
+**왜 코어에 있나**: 지금 이 로직을 부르는 곳은 백엔드 데모 라우트인데 그 화면은 폐기 예정이다.
+라우트에 두면 로직이 화면과 함께 사라진다. 표기 정규화 정본(``src.domain.text_norm``)도 코어에
+있어, 규칙이 두 벌이 되지 않으려면 이 자리가 맞다(라우트 자신의 docstring 이 적어 둔 그대로다).
+
+설계 배경: `specs/089-mm-meta-search-hybrid`(spec §2 매칭 · plan §설계 결정 · tasks T001~T004)
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from typing import Any
+
+from src.domain.text_norm import normalize_text_key
+
+# 걸린 이유 문구. 화면이 그대로 찍으므로 문자열이 계약이다(현행 라우트 문구를 그대로 옮겼고,
+# 뒤에 ``: 맞은토큰`` 만 덧붙는다 — 필드명·의미는 그대로 두고 내용만 풍부해진다).
+REASON_KEYWORD = "근거 키워드 일치"
+REASON_DESCRIPTION = "설명 일치"
+
+
+def split_query(q: str | None) -> tuple[str, ...]:
+    """검색어를 공백으로 쪼개 **정규화된 토큰**으로 만든다(빈 토큰은 버린다).
+
+    🔴 정규화는 코어 정본 ``normalize_text_key`` **하나만** 쓴다(083 태그 패싯·084 멀티모달 메타
+    공용). 여기서 규칙을 새로 정의하면 표기 해석이 두 벌이 되어, 같은 글자가 색인에서는 걸리고
+    필터에서는 안 걸리는 일이 생긴다. 그 규칙은 NFKC → 공백 제거 → casefold 이므로
+    ``"FIFA 월드컵"`` 은 ``("fifa", "월드컵")`` 이 된다.
+
+    🔴 **최소 길이 필터를 두지 않는다**(tasks 089 T004 ⑦ · 2026-08-31 실측으로 결정). 한 글자
+    토큰(`강`·`큰`)은 여러 개체에 걸려 정답을 밀어낼 수 있어 버리는 안을 검토했고, 같은 질의셋
+    80개로 **켠 값·끈 값을 둘 다 쟀다**:
+
+        ┌──────────────────────┬──────────────┬──────────────────┐
+        │                      │ 필터 끔(채택) │ 필터 켬(2글자~)  │
+        ├──────────────────────┼──────────────┼──────────────────┤
+        │ 다어절 재현율        │ 43.3%(13/30) │ 36.7%(11/30)     │
+        │ 이름 재현율          │ 100%         │ 100%             │
+        │ 평균 결과 건수       │ 2.9건        │ 2.5건            │
+        │ 정답 상위 5 안       │ 92.3%        │ 100%             │
+        └──────────────────────┴──────────────┴──────────────────┘
+
+    필터를 켜면 **찾던 것을 두 개 잃는다** — 「한강」(`수도를 가로지르는 강`)과 「나일강」
+    (`아프리카 큰 강`)은 한 글자 토큰 `강` 으로만 걸리던 것이라 통째로 0건이 된다. 대신 오른 것처럼
+    보이는 "상위 5 안 92.3%→100%"는 **못 찾은 질의가 분모에서 빠져서**지 순위가 나아진 것이 아니다.
+    한 글자 토큰 자체가 드물기도 하다(기준선 80질의의 토큰 133개 중 6개 · 4.5%).
+
+    🔴 결정타는 따로 있다 — 필터를 켜면 `강`·`산` 같은 **한 글자 단독 질의가 토큰 0개**가 되고,
+    아래 ``narrow_entities`` 의 계약("토큰 0개 = 전체")에 따라 **개체 전량**이 쏟아진다. 지금은
+    `강` 이 6건(한강 포함)을 준다. 한 글자를 버리는 이득보다 이 사고가 크고, "한 토큰 질의는 현행과
+    같아야 한다"는 회귀 기준(B2)도 깨진다. 그래서 **필터 없음**으로 확정한다.
+
+    Args:
+        q: 검색어 원문. ``None``·빈 문자열·공백뿐이면 토큰이 없다(호출부가 "전체"로 해석한다).
+
+    Returns:
+        정규화된 토큰들(질의에 나온 순서 유지 · 중복도 그대로). 토큰이 없으면 빈 튜플.
+    """
+    if not q:
+        return ()
+    # split() 은 연속 공백·탭·개행을 한꺼번에 처리한다. 각 토큰을 정규화한 뒤, 정규화 결과가
+    # 빈 문자열이 된 것(전각 공백만 든 조각 등)은 버린다 — 빈 토큰은 어디에나 "포함"되므로
+    # 남겨 두면 모든 개체가 걸린다.
+    tokens = (normalize_text_key(part) for part in q.split())
+    return tuple(t for t in tokens if t)
+
+
+def match_entity(item: Mapping[str, Any], tokens: Sequence[str]) -> tuple[int, str | None]:
+    """개체 하나가 토큰을 **몇 개 맞췄는지**와 **걸린 이유**를 돌려준다.
+
+    찾는 곳은 셋이다 — 이름 · 근거 키워드(묶인 이유가 된 원문 낱말들) · 설명문. 토큰 하나가
+    셋 중 **어디든** 있으면 그 토큰은 맞은 것으로 1점이며, 같은 토큰이 두 곳에 있어도 1점이다
+    (점수는 "질의의 몇 낱말을 아는 개체인가"를 뜻해야 한다 — 같은 낱말을 여러 칸에 적어 둔 개체가
+    이길 이유가 없다).
+
+    이유의 우선순위는 **이름 > 근거 키워드 > 설명문**으로 현행 라우트와 같다. 이름으로 걸렸으면
+    ``None`` 인데, 이름은 화면 카드에 이미 크게 보이므로 "왜 나왔는지"를 따로 적을 필요가 없기
+    때문이다(현행 계약 유지). 같은 축에 여러 토큰이 걸리면 **질의에 먼저 나온** 토큰을 싣는다
+    (같은 입력에 같은 문구가 나와야 한다 · 헌법 3조 결정성).
+
+    Args:
+        item: 목록 행. ``name``·``keywords``(리스트)·``description`` 을 읽으며, 없거나 ``None``
+            이면 빈 값으로 본다(집계 결과라 설명문이 아직 없는 개체가 있다).
+        tokens: ``split_query`` 가 만든 정규화 토큰들. 빈 시퀀스면 0점이다.
+
+    Returns:
+        ``(맞은 토큰 수, 걸린 이유)``. 이유는 ``"근거 키워드 일치: 가수"`` 꼴이며, 이름으로
+        걸렸거나 아무것도 못 맞췄으면 ``None``.
+    """
+    name = normalize_text_key(str(item.get("name") or ""))
+    keywords = [normalize_text_key(str(k)) for k in (item.get("keywords") or [])]
+    description = normalize_text_key(str(item.get("description") or ""))
+
+    hit = 0
+    name_hit = False
+    keyword_token: str | None = None
+    description_token: str | None = None
+    for token in tokens:
+        if not token:
+            # 방어: 호출부가 정규화를 건너뛰고 빈 토큰을 넘기면 모든 개체가 걸린다.
+            continue
+        in_name = token in name
+        in_keyword = any(token in kw for kw in keywords)
+        in_description = token in description
+        if not (in_name or in_keyword or in_description):
+            continue
+        hit += 1
+        # 이유는 가장 높은 축 하나만 남긴다. 각 축의 **첫 번째** 토큰을 기억한다.
+        if in_name:
+            name_hit = True
+        elif in_keyword:
+            if keyword_token is None:
+                keyword_token = token
+        elif description_token is None:
+            description_token = token
+
+    if name_hit:
+        return hit, None
+    if keyword_token is not None:
+        return hit, f"{REASON_KEYWORD}: {keyword_token}"
+    if description_token is not None:
+        return hit, f"{REASON_DESCRIPTION}: {description_token}"
+    return 0, None  # 여기 오는 경우는 맞은 토큰이 하나도 없을 때뿐이다.
+
+
+def narrow_entities(
+    items: Sequence[Mapping[str, Any]],
+    q: str | None,
+) -> list[dict[str, Any]]:
+    """개체 목록을 검색어로 좁히고 **맞은 토큰 수 → 묶음 크기 → 이름** 순으로 줄 세운다.
+
+    남기는 조건은 **맞은 토큰 ≥ 1**(OR)이다. 넓게 걸어 놓고 순위로 가르는 설계이며, 그 대가
+    (결과가 늘어나는 것)는 정렬 1순위가 방어한다 — 세 낱말 중 셋을 아는 개체가 하나만 아는 개체보다
+    반드시 위에 온다.
+
+    **정렬 tiebreak 이 두 단계인 이유**: 맞은 토큰 수만으로는 동점이 흔하다(대부분 1점). 그다음은
+    묶음 크기(``confirmed_count``)로 — 자료가 많은 묶음이 사용자가 찾던 것일 확률이 높다. 그것도
+    같으면 이름 오름차순으로 **완전히 고정**한다. 여기를 비워 두면 같은 질의가 실행할 때마다 다른
+    순서를 낼 수 있어 재측정 자체가 성립하지 않는다(헌법 3조 결정성 · spec 089 B4).
+
+    **검색어가 없을 때는 전체**를 준다(현행 계약). 이때도 각 행에 ``match_reason: None`` 을 붙여
+    응답 모양을 한 가지로 유지한다 — 화면이 이 필드의 유무로 갈라지지 않게 하기 위해서다.
+    ⚠️ "전체"가 되는 것은 **토큰이 0개일 때뿐**이다. 기호만 든 질의(``"!!!"``)는 정규화가 기호를
+    지우지 않으므로 어엿한 토큰이 되고, 걸리는 개체가 없으면 **0건**이다(전체가 아니다 · spec §5
+    "결과 0건과 전체를 가른다"). 공백만 든 질의는 토큰이 0개라 전체이며 이는 현행과 같다.
+
+    순수 함수다 — 입력 행을 고치지 않고 얕은 사본에 ``match_reason`` 을 얹어 돌려준다.
+
+    Args:
+        items: 목록 행들(``/mm-meta`` 응답 모양). 검색어가 없으면 **이 순서 그대로** 나간다
+            (호출부가 이미 정한 순서 — 지금은 묶음 크기 내림차순 — 를 뒤집지 않는다).
+        q: 검색어. ``None``·빈 문자열·공백뿐이면 좁히지 않는다.
+
+    Returns:
+        좁혀진 목록(위 순서). 각 행은 입력 행의 사본 + ``match_reason``.
+    """
+    tokens = split_query(q)
+    if not tokens:
+        return [{**item, "match_reason": None} for item in items]
+
+    # (정렬 키 3종, 행) 으로 모아 한 번에 정렬한다. key= 를 쓰므로 dict 끼리 비교될 일은 없다.
+    scored: list[tuple[int, int, str, dict[str, Any]]] = []
+    for item in items:
+        hit, reason = match_entity(item, tokens)
+        if hit < 1:
+            continue
+        scored.append(
+            (
+                hit,
+                int(item.get("confirmed_count") or 0),
+                str(item.get("name") or ""),
+                {**item, "match_reason": reason},
+            )
+        )
+    scored.sort(key=lambda row: (-row[0], -row[1], row[2]))
+    return [row[3] for row in scored]
+
+
+__all__ = [
+    "REASON_DESCRIPTION",
+    "REASON_KEYWORD",
+    "match_entity",
+    "narrow_entities",
+    "split_query",
+]
