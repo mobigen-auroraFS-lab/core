@@ -109,10 +109,28 @@ class TestMmMemberAxis(unittest.TestCase):
         names = [c["name"] for c in build_checks(**self._KW)]
         self.assertEqual(names[: len(_LEGACY_CHECK_NAMES)], list(_LEGACY_CHECK_NAMES))
 
-    def test_소속_검사축이_목록_끝에_추가된다(self):
+    def test_소속_검사축이_레거시_바로_뒤에_온다(self):
+        # 🔴 이 테스트가 봉인하는 것은 **기존 이름·순서가 흔들리지 않는다**는 것이다(운영 보고
+        #    줄과 과거 실행 결과를 그대로 비교하기 위해). 새 축이 뒤에 더 붙는 것은 정상적인
+        #    확장이므로, "레거시 다음이 정확히 소속뿐"이 아니라 **레거시 다음이 소속으로 시작**
+        #    한다고 본다(2026-08-31 · 090 이 개체임베딩 축을 뒤에 더했다).
         names = [c["name"] for c in build_checks(**self._KW)]
-        self.assertEqual(names[len(_LEGACY_CHECK_NAMES):], list(MM_MEMBER_CHECK_NAMES))
+        head = len(_LEGACY_CHECK_NAMES)
+        self.assertEqual(names[head:head + len(MM_MEMBER_CHECK_NAMES)],
+                         list(MM_MEMBER_CHECK_NAMES))
         self.assertEqual(list(CHECK_NAMES), names)
+
+    def test_개체임베딩_고아_검사가_맨_뒤에_있다(self):
+        # FK 를 걸 수 없어(부분 유니크) 감지가 유일한 방어선이다 — v306.
+        names = [c["name"] for c in build_checks(**self._KW)]
+        self.assertEqual(names[-1], "개체임베딩_고아")
+
+    def test_개체임베딩_고아_검사는_테이블_부재를_견딘다(self):
+        # 🔴 v306 이 적용되지 않은 DB 에서도 게이트가 돌아야 한다 — 없으면 0 을 낸다.
+        check = {c["name"]: c for c in build_checks(**self._KW)}["개체임베딩_고아"]
+        self.assertIn("to_regclass('entity_embedding')", check["sql"])
+        self.assertIn("NOT EXISTS", check["sql"])
+        self.assertEqual(check["params"], [])
 
     def test_비asset_노드_참조는_소속_엣지를_제외한다(self):
         # 소속 엣지는 정의상 dst 가 entity 다 — 이 검사에 걸리면 게이트가 영구히 빨간불이 된다.
