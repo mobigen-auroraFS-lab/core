@@ -98,7 +98,7 @@ class TestBuildMaterial(unittest.TestCase):
     def test_근거_키워드가_실린다(self) -> None:
         # 🔴 087 판정 재료에는 없는 축 — G0 에서 단어 하나 질의를 35% → 50% 로 올렸다.
         got = build_search_material(name="김치", entity_type="음식", keywords=["한식", "발효"])
-        self.assertIn("근거 키워드: 한식, 발효", got)
+        self.assertIn("근거 키워드: 발효, 한식", got)   # 정렬됨
 
     def test_순서는_이름_설명_키워드(self) -> None:
         got = build_search_material(name="김치", entity_type="음식",
@@ -110,6 +110,27 @@ class TestBuildMaterial(unittest.TestCase):
         got = build_search_material(name="아이유", entity_type="인물",
                                     description="  ", keywords=["", "  "])
         self.assertEqual(got, "아이유 / 인물")
+
+    def test_키워드_순서가_달라도_같은_재료(self) -> None:
+        # 🔴 실제로 겪은 결함(2026-08-31) — API 목록(sorted)과 배치 SQL(ARRAY_AGG)로 각각
+        #    조립했더니 82건 중 3건의 해시가 갈려 재임베딩이 돌았다. 순서는 뜻이 없다.
+        a = build_search_material(name="김치", entity_type="음식", keywords=["발효", "한식"])
+        b = build_search_material(name="김치", entity_type="음식", keywords=["한식", "발효"])
+        self.assertEqual(a, b)
+
+    def test_키워드_중복은_한_번만(self) -> None:
+        got = build_search_material(name="김치", entity_type="음식",
+                                    keywords=["한식", "한식", "발효"])
+        self.assertEqual(got.count("한식"), 1)
+
+    def test_상한은_정렬_뒤에_적용된다(self) -> None:
+        # 순서에 따라 살아남는 키워드가 달라지면 경로별로 재료가 갈린다.
+        a = build_search_material(name="가", entity_type="장소",
+                                  keywords=["c", "a", "b"], max_keywords=2)
+        b = build_search_material(name="가", entity_type="장소",
+                                  keywords=["b", "c", "a"], max_keywords=2)
+        self.assertEqual(a, b)
+        self.assertIn("a, b", a)
 
     def test_키워드_상한을_넘지_않는다(self) -> None:
         got = build_search_material(name="가", entity_type="장소",
