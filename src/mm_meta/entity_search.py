@@ -34,7 +34,9 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from src.config.search_constants import ENTITY_SEMANTIC_GATE_EPS_DEFAULT
 from src.domain.text_norm import normalize_text_key
+from src.search.fusion import gate_signal, passes_cutoff
 
 # 걸린 이유 문구. 화면이 그대로 찍으므로 문자열이 계약이다(현행 라우트 문구를 그대로 옮겼고,
 # 뒤에 ``: 맞은토큰`` 만 덧붙는다 — 필드명·의미는 그대로 두고 내용만 풍부해진다).
@@ -266,8 +268,64 @@ def fuse_entity_results(
     return out
 
 
+# 게이트가 절대 하한을 쓰지 않는다는 사실을 호출부가 넘기지 않아도 되게 못 박아 둔다.
+# 근거는 ``search_constants.ENTITY_SEMANTIC_GATE_EPS_DEFAULT`` 주석(분포가 겹쳐 절대값으로는
+# 가를 수 없다). ``passes_cutoff`` 는 floor 를 요구하므로 무효값 0.0 을 준다.
+_GATE_NO_FLOOR = 0.0
+
+
+def gate_semantic_hits(
+    hits: Sequence[Mapping[str, Any]],
+    *,
+    eps: float = ENTITY_SEMANTIC_GATE_EPS_DEFAULT,
+    top_n: int,
+    enabled: bool = True,
+) -> list[dict[str, Any]]:
+    """의미 결과가 **믿을 만한지** 보고, 아니면 통째로 버린다(순수 · DB 호출 없음 · 090 후속).
+
+    무엇을 푸나: 090 은 유사도 컷오프를 폐기했다. 짧은 재료(중위 68자) 탓에 절대값이 전반적으로
+    낮아 컷오프 0.45 가 정답 16건을 버렸기 때문이고, 그 판단은 지금도 맞다. 하지만 그 대가로
+    **정답이 아예 없는 질의에도 상위 3이 그대로 나갔다** — `전자제품` 을 물으면 NASA·전주한옥
+    마을·식혜가 나온다(사용자 지적 2026-08-31). 기준선 질의 80개가 전부 "정답이 있는" 질의라
+    이 실패 모드는 측정된 적이 없었다.
+
+    어떻게 푸나: **자산 검색이 쓰는 그 게이트**(``src/search/fusion.py``)를 그대로 쓴다 —
+    ``유지 = (top − baseline) ≥ eps``. ``baseline`` 은 받은 유사도의 **하위 절반 평균**이라,
+    "1등이 나머지 무리보다 튀어나왔는가"를 묻는 셈이다. 반 전체가 60점인데 1등이 62점이면 그
+    1등은 뜻이 없다. 공식을 이 모듈에 베껴 쓰지 않고 import 하는 이유는 한쪽만 고쳐지는 사고를
+    막기 위해서다(자산 쪽 재보정이 여기에도 자동으로 반영되지는 않지만, 정의가 갈리지는 않는다).
+
+    🔴 **받은 것 전부를 넘겨야 한다** — 상위 3만 넘기면 ``baseline`` 이 상위권 평균이 되어
+    신호가 죽는다. 호출부는 ``find_similar_entities`` 를 노출 개체 전량으로 부른 뒤 그 결과를
+    그대로 넘긴다(개체 82개라 전량 조회가 싸다 · 개체가 크게 늘면 표본 크기를 정하고 **재측정**한다).
+
+    Args:
+        hits: ``find_similar_entities`` 결과 전량(유사도 내림차순). ``similarity`` 만 읽는다.
+        eps: 상대 신호 하한. 기본값은 실측 확정치 0.15(위 상수 주석에 스윕 표 근거).
+        top_n: 통과했을 때 몇 개를 돌려줄지(융합이 얹을 개수 · 090 은 3).
+        enabled: 끄면 판정 없이 상위 ``top_n`` 을 그대로 돌려준다 — **되돌림의 실질**이다
+            (설정 하나로 090 동작이 복원된다).
+
+    Returns:
+        통과하면 상위 ``top_n``(입력 순서 유지), 막히면 **빈 목록**. 입력 행은 고치지 않는다.
+
+    ⚠️ 대가를 숨기지 않는다: 임계 0.15 는 `장군`→이순신처럼 **정답 1위인 것도 4건 버린다**
+    (실측). 무관 질의 24개 중 22개를 막는 값이고, 대안(1위−3위 격차)은 같은 것을 잃으면서
+    67% 밖에 못 막았다. 목록은 ``tests/test_mm_meta_entity_search.TestGateSemanticHits``.
+    """
+    if not hits:
+        return []
+    if not enabled:
+        return [dict(h) for h in hits[:top_n]]
+    top, baseline = gate_signal([h.get("similarity") for h in hits])
+    if not passes_cutoff(top, baseline, eps=eps, floor=_GATE_NO_FLOOR):
+        return []
+    return [dict(h) for h in hits[:top_n]]
+
+
 __all__ = [
     "REASON_SEMANTIC",
+    "gate_semantic_hits",
     "fuse_entity_results",
     "REASON_DESCRIPTION",
     "REASON_KEYWORD",
