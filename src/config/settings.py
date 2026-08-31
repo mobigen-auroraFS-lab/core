@@ -178,6 +178,14 @@ class MmMetaConfig:
     # 필요할 수 있다. 껐을 때는 **새 설명만 멈추고** 이미 저장된 설명은 카드에 그대로 남는다
     # (끄기 ≠ 삭제 · 롤백은 env 하나).
     describe_enabled: bool
+    # 090 후속(2026-09-01): 개체 의미 검색 **게이트** 사용 여부. 기본 True — 끄면 정답이 없는
+    # 질의에도 의미 상위 3이 그대로 나가던 090 동작으로 **되돌아간다**(되돌림의 실질 · 배포 없이
+    # env 하나). 문자열 매칭(089) 결과는 게이트와 무관하게 언제나 나간다.
+    semantic_gate_enabled: bool
+    # 게이트의 상대 신호 임계. 기본 0.15 = 실측 확정치이며 🔴 상수
+    # ``search_constants.ENTITY_SEMANTIC_GATE_EPS_DEFAULT`` 와 같은 값을 유지한다(근거·스윕 표는
+    # 그 상수 주석 · 테스트가 두 값을 묶어 둔다). 올리면 무관 질의를 더 막고 재현율이 떨어진다.
+    semantic_gate_eps: float
 
 
 @dataclass(frozen=True)
@@ -808,6 +816,13 @@ _FIELD_SPECS: tuple[_Spec, ...] = (
     _Spec("mm_meta", "judge_summary_chars", "MM_META_JUDGE_SUMMARY_CHARS", _opt_int(250)),
     # 기본 True = 묶음이 생기면 설명도 만든다(카드 한 문장). 끄면 새 설명만 멈춘다(저장분 보존).
     _Spec("mm_meta", "describe_enabled", "MM_META_DESCRIBE_ENABLED", _opt_bool(True)),
+    # 090 후속: 의미 검색 게이트. 기본 on — 정답 없는 질의에 무관 개체가 나가지 않게 한다.
+    # 끄면 090 동작(상위 3 무조건)으로 되돌아간다.
+    _Spec("mm_meta", "semantic_gate_enabled", "MM_META_SEMANTIC_GATE_ENABLED",
+          _opt_bool(search_constants.ENTITY_SEMANTIC_GATE_ENABLED_DEFAULT)),
+    # 기본 0.15 = 실측 확정치(무관 22/24 차단 · C1 70%·C2 73.3%). 상수와 같은 값을 유지한다.
+    _Spec("mm_meta", "semantic_gate_eps", "MM_META_SEMANTIC_GATE_EPS",
+          _opt_float(search_constants.ENTITY_SEMANTIC_GATE_EPS_DEFAULT)),
 )
 
 

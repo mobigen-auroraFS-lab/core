@@ -950,6 +950,38 @@ class TestMmMetaSettings(unittest.TestCase):
             with self.assertRaises(ValueError):
                 _build_settings("dev")
 
+    def test_semantic_gate_defaults_match_constants(self) -> None:
+        """090 후속 — 게이트 기본값이 실측 확정 상수와 같아야 한다.
+
+        두 곳(설정 기본값·상수)이 갈리면 "0.15 로 쟀는데 0.18 로 돈다"가 조용히 성립한다.
+        임계는 측정으로 정한 값이라 재현 조건 자체다(judge_summary_chars 를 묶어 둔 것과 같은 규율).
+        """
+        with _env():
+            s = _build_settings("dev")
+        self.assertIs(s.mm_meta.semantic_gate_enabled,
+                      search_constants.ENTITY_SEMANTIC_GATE_ENABLED_DEFAULT)
+        self.assertEqual(s.mm_meta.semantic_gate_eps,
+                         search_constants.ENTITY_SEMANTIC_GATE_EPS_DEFAULT)
+        self.assertEqual(s.mm_meta.semantic_gate_eps, 0.15)   # 실측 확정치(2026-09-01)
+
+    def test_semantic_gate_can_be_turned_off(self) -> None:
+        # 되돌림의 실질 — 배포 없이 env 하나로 090 동작(상위 3 무조건)으로 돌아간다.
+        with _env(MM_META_SEMANTIC_GATE_ENABLED="false"):
+            s = _build_settings("dev")
+        self.assertIs(s.mm_meta.semantic_gate_enabled, False)
+
+    def test_semantic_gate_eps_env_override(self) -> None:
+        with _env(MM_META_SEMANTIC_GATE_EPS="0.12"):
+            s = _build_settings("dev")
+        self.assertEqual(s.mm_meta.semantic_gate_eps, 0.12)
+
+    def test_semantic_gate_invalid_value_fail_fast(self) -> None:
+        # 임계를 숫자가 아닌 값으로 주면 즉시 죽는다 — 조용히 기본값으로 돌면 무엇으로 돌고
+        # 있는지 모른 채 재현율이 달라진다.
+        with _env(MM_META_SEMANTIC_GATE_EPS="영점일오"):
+            with self.assertRaises(ValueError):
+                _build_settings("dev")
+
     def test_describe_toggle_is_independent_of_binding(self) -> None:
         # 두 배치는 따로 끈다 — 소속은 돌리면서 설명(LLM 호출)만 멈추는 운영이 실제로 필요하다
         # (설명은 묶음당 1회 호출이라 비용·지연이 소속 판정과 다르다).

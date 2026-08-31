@@ -33,6 +33,7 @@ from typing import Any
 
 from src.domain.text_norm import normalize_text_key
 from src.mm_meta.entity_search import (
+    gate_semantic_hits,
     REASON_SEMANTIC,
     fuse_entity_results,
     match_entity,
@@ -494,3 +495,126 @@ class TestFuseEntityResults(unittest.TestCase):
         got = fuse_entity_results(self._ITEMS, string_hits, [])
         got[0]["match_reason"] = "바뀜"
         self.assertIsNone(string_hits[0]["match_reason"])
+
+
+class TestGateSemanticHits(unittest.TestCase):
+    """090 후속 — 정답이 **없는** 질의에서 의미 결과를 통째로 접는 게이트(2026-09-01).
+
+    왜 필요했나(사용자 지적 2026-08-31): 090 은 유사도 컷오프를 폐기했다(그 판단은 옳았다 —
+    0.45 는 정답 16건을 버렸다). 대가로 **정답이 아예 없는 질의에도 상위 3이 무조건 나갔다**
+    (`전자제품`→NASA·전주한옥마을·식혜). 기준선 80개 질의가 전부 "정답이 있는" 질의여서
+    이 실패 모드는 측정된 적이 없었다.
+
+    무엇을 쓰나: **자산 검색이 쓰는 그 공식**(``src/search/fusion.py`` 의 ``gate_signal`` +
+    ``passes_cutoff``)을 그대로 가져왔다 — ``유지 = (top − baseline) ≥ eps``. baseline 은
+    개체 전량 코사인의 **하위 절반 평균**이라 "1등이 무리보다 튀어나왔는가"를 본다.
+    공식을 베껴 쓰지 않고 import 하는 이유는 한쪽만 고쳐지는 사고를 막기 위해서다.
+
+    ⚠️ **절대 유사도로는 못 가른다**(측정 2026-08-31·09-01 재확인): 정답 없는 질의의 1위가
+    최대 0.495(`날씨`)인데 정답 있는 질의의 1위가 최소 0.343 이라 분포가 겹친다. 그래서
+    절대 하한(floor)은 쓰지 않는다 — 스윕에서도 0.35 부터는 재현율만 깎았다.
+
+    실측 임계 0.15 의 대가(fixtures/mm_meta_search/gate_sweep_20260901.json):
+      무관 질의 24개 중 22개 차단(결과 3.0→0.2건) · C1 80→70% · C2 80→73.3% · C3 100% 유지.
+    """
+
+    @staticmethod
+    def _hits(*sims: float) -> list[dict[str, Any]]:
+        """유사도만 다른 의미 결과를 만든다(내림차순 가정은 호출부가 지킨다)."""
+        return [{"entity_type": "음식", "entity_uid": f"e{i}", "similarity": s}
+                for i, s in enumerate(sims)]
+
+    def test_일등이_튀면_통과한다(self) -> None:
+        # 0.60 − (하위 절반 0.20·0.21 평균 0.205) = 0.395 ≥ 0.15
+        got = gate_semantic_hits(self._hits(0.60, 0.30, 0.21, 0.20), eps=0.15, top_n=3)
+        self.assertEqual([h["entity_uid"] for h in got], ["e0", "e1", "e2"])
+
+    def test_뭉쳐_있으면_전부_버린다(self) -> None:
+        # 1등이 무리에서 튀지 않는다 = 아무거나 걸린 것이다.
+        self.assertEqual(gate_semantic_hits(self._hits(0.40, 0.39, 0.38, 0.37),
+                                            eps=0.15, top_n=3), [])
+
+    def test_끄면_판정_없이_그대로_나간다(self) -> None:
+        """되돌림의 실질 — 설정 하나로 090 동작이 그대로 돌아온다."""
+        hits = self._hits(0.40, 0.39, 0.38, 0.37)
+        got = gate_semantic_hits(hits, eps=0.15, top_n=3, enabled=False)
+        self.assertEqual([h["entity_uid"] for h in got], ["e0", "e1", "e2"])
+
+    def test_상위_N_만_돌려준다(self) -> None:
+        got = gate_semantic_hits(self._hits(0.60, 0.30, 0.25, 0.20, 0.19), eps=0.15, top_n=2)
+        self.assertEqual(len(got), 2)
+
+    def test_빈_입력은_빈_결과다(self) -> None:
+        self.assertEqual(gate_semantic_hits([], eps=0.15, top_n=3), [])
+
+    def test_한_건뿐이면_통과시킨다(self) -> None:
+        """표본이 1개면 baseline 이 0.0 이라(gate_signal 계약) 사실상 통과다 — 그 계약을 못 박는다."""
+        got = gate_semantic_hits(self._hits(0.30), eps=0.15, top_n=3)
+        self.assertEqual(len(got), 1)
+
+    def test_같은_입력이면_같은_결과(self) -> None:
+        hits = self._hits(0.50, 0.30, 0.22, 0.20)
+        first = gate_semantic_hits(hits, eps=0.15, top_n=3)
+        for _ in range(4):
+            self.assertEqual(gate_semantic_hits(hits, eps=0.15, top_n=3), first)
+
+    def test_입력을_고치지_않는다(self) -> None:
+        hits = self._hits(0.60, 0.30, 0.20)
+        before = [dict(h) for h in hits]
+        gate_semantic_hits(hits, eps=0.15, top_n=3)
+        self.assertEqual(hits, before)
+
+    # ── 실 DB 실측 재현(2026-09-01 · 개체 82개 · fixtures gate_sweep_20260901) ──
+    @staticmethod
+    def _with_signal(top: float, baseline: float) -> list[dict[str, Any]]:
+        """실측 ``(top, baseline)`` 을 그대로 재현하는 최소 유사도 목록을 만든다.
+
+        게이트는 (최고값, 하위 절반 평균) 두 값만 쓴다. 하위 두 칸을 ``baseline`` 으로 채우면
+        그 평균이 곧 ``baseline`` 이 되어, 실 DB 82개 코사인을 들고 다니지 않고도 같은 판정을
+        재현할 수 있다(테스트 전용 우회로를 구현에 뚫지 않으려는 것이다).
+
+        Args:
+            top: 1위 유사도(실측값).
+            baseline: 하위 절반 평균(실측값).
+
+        Returns:
+            ``similarity`` 만 든 4행 — 유사도 내림차순.
+        """
+        return [{"similarity": s} for s in (top, (top + baseline) / 2, baseline, baseline)]
+
+    def test_실측_차단_사례(self) -> None:
+        """무관 질의 — 이것이 이 게이트를 만든 이유다."""
+        for q, top, base in (("전자제품", 0.3893, 0.2753), ("발효", 0.3777, 0.2706)):
+            with self.subTest(q=q):
+                self.assertEqual(
+                    gate_semantic_hits(self._with_signal(top, base), eps=0.15, top_n=3), [])
+
+    def test_실측_통과_사례(self) -> None:
+        for q, top, base in (("여자 솔로 가수", 0.4567, 0.2304), ("아이유", 0.5695, 0.1944)):
+            with self.subTest(q=q):
+                got = gate_semantic_hits(self._with_signal(top, base), eps=0.15, top_n=3)
+                self.assertEqual(len(got), 3)
+
+    def test_실측_잃는_사례를_숨기지_않는다(self) -> None:
+        """🔴 `장군`→이순신은 **정답 1위인데** 차단된다(임계 0.15 의 대가 4건 중 하나).
+
+        어제 대안(격차 0.03)도 같은 것을 잃으면서 차단은 67% 에 그쳤다. 잃는 것을 테스트로
+        적어 두는 이유는, 나중에 이 4건이 문제가 되면 임계를 내리는 판단을 하라는 뜻이다
+        (`보양식`·`얼음 대륙`·`푸른빛 도자기` 가 나머지 셋이다).
+        """
+        self.assertEqual(
+            gate_semantic_hits(self._with_signal(0.3719, 0.2465), eps=0.15, top_n=3), [])
+
+    def test_날씨는_임계_0_15_를_통과한다(self) -> None:
+        """무관한데 유일하게 살아남는 질의 — 개체 설명문 전반이 지역·기후를 언급해 판 전체가 들렸다.
+
+        임계를 0.16 으로 올리면 이것도 막히지만 C1 이 65% 로 떨어진다(스윕 표). 하나를 잡으려고
+        재현율을 깎지 않는다.
+        """
+        got = gate_semantic_hits(self._with_signal(0.4954, 0.3257), eps=0.15, top_n=3)
+        self.assertEqual(len(got), 3)
+
+    def test_임계를_낮추면_실측_차단_사례가_살아난다(self) -> None:
+        """임계가 실제로 판정을 가르는지 — 상수가 장식이 아님을 못 박는다."""
+        got = gate_semantic_hits(self._with_signal(0.3893, 0.2753), eps=0.10, top_n=3)
+        self.assertEqual(len(got), 3)
