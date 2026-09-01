@@ -204,6 +204,13 @@ def narrow_entities(
 # 화면에서 "글자가 맞은 것"과 "뜻이 가까운 것"을 사용자가 갈라 볼 수 있어야 신뢰가 생긴다.
 REASON_SEMANTIC = "뜻이 가까움"
 
+# 092 OpenSearch 경로 전용. 🔴 089 의 ``REASON_KEYWORD``("근거 키워드 일치")를 쓰면 **거짓말이
+# 된다** — BM25 는 이름·근거 키워드·설명문·구성 자료 중 **어디서든** 걸릴 수 있는데 문구는 근거
+# 키워드라고 단정하기 때문이다. 어느 필드에서 걸렸는지는 OS 응답이 알려 주지 않으므로(하이라이트를
+# 켜지 않는 한) 중립적으로 적는다. 사용자가 "왜 나왔지" 를 물을 때 틀린 답을 주는 것보다
+# 덜 구체적인 참말이 낫다.
+REASON_TEXT_MATCH = "글자 일치"
+
 
 def fuse_entity_results(
     items: Sequence[Mapping[str, Any]],
@@ -357,6 +364,7 @@ def entity_refine_fields(item: Mapping[str, Any]) -> list[str]:
 
 __all__ = [
     "REASON_SEMANTIC",
+    "REASON_TEXT_MATCH",
     "entity_refine_fields",
     "gate_semantic_hits",
     "fuse_entity_results",

@@ -37,6 +37,7 @@ import uuid
 from typing import Any
 
 from src.domain.text_norm import normalize_text_key
+from src.mm_meta import persist
 from src.mm_meta.describe import DESC_PROMPT_VERSION, build_description_prompt
 from src.mm_meta.judge import PROMPT_VERSION
 from src.mm_meta.persist import (
@@ -1558,3 +1559,64 @@ class TestVisibleStatusesDrift(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFetchMetaMembersLimit(unittest.TestCase):
+    """092 T003 — 구성 자산 조회 **상한**. 1만 건짜리 개체에서 전량을 읽지 않게 한다.
+
+    왜 필요한가: 색인 문서에 실을 것은 앞 몇 건인데 조회는 전량을 읽고 있었다. ``ORDER BY
+    asset_id`` 가 먼저 적용되므로 상한을 걸어도 **매번 같은 자산**이 나온다(결정성 유지).
+    """
+
+    class _FakeCur:
+        """execute 로 받은 SQL·파라미터를 그대로 기억하는 커서(실 DB 없이 계약만 본다)."""
+
+        def __init__(self) -> None:
+            self.sql: str | None = None
+            self.params: tuple = ()
+
+        def execute(self, sql, params):  # noqa: ANN001, ANN201
+            self.sql, self.params = sql, params
+
+        def fetchall(self):  # noqa: ANN201
+            return []
+
+        def __enter__(self):  # noqa: ANN204
+            return self
+
+        def __exit__(self, *exc):  # noqa: ANN002, ANN204
+            return False
+
+    class _FakeConn:
+        def __init__(self, cur) -> None:  # noqa: ANN001
+            self._cur = cur
+
+        def cursor(self, *a, **k):  # noqa: ANN002, ANN003, ANN201
+            return self._cur
+
+    def _call(self, **kw):  # noqa: ANN003, ANN201
+        cur = self._FakeCur()
+        persist.fetch_meta_members(self._FakeConn(cur), "작품", "훈민정음", **kw)  # type: ignore[arg-type]
+        return cur
+
+    def test_기본은_상한이_없다(self) -> None:
+        # 설명 생성(describe)은 묶음 전체를 봐야 하므로 기존 동작을 유지한다.
+        cur = self._call()
+        self.assertNotIn("LIMIT", (cur.sql or "").upper())
+
+    def test_상한을_주면_LIMIT_이_붙는다(self) -> None:
+        cur = self._call(limit=3)
+        self.assertIn("LIMIT", (cur.sql or "").upper())
+        self.assertEqual(cur.params[-1], 3)
+
+    def test_LIMIT_은_정렬_뒤에_붙는다(self) -> None:
+        """정렬보다 앞서면 임의의 3건이 되어 같은 개체가 매번 다른 문서로 색인된다."""
+        sql = (self._call(limit=3).sql or "").upper()
+        self.assertLess(sql.index("ORDER BY"), sql.index("LIMIT"))
+
+    def test_0_이하는_예외다(self) -> None:
+        # 조용히 전량을 읽으면 1만 건 개체에서 왜 느린지 추적하게 된다(fail-fast).
+        for bad in (0, -1):
+            with self.subTest(bad=bad):
+                with self.assertRaises(persist.MmMetaPersistError):
+                    self._call(limit=bad)

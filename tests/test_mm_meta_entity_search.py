@@ -33,10 +33,10 @@ from typing import Any
 
 from src.domain.text_norm import normalize_text_key
 from src.mm_meta.entity_search import (
-    entity_refine_fields,
-    gate_semantic_hits,
     REASON_SEMANTIC,
+    entity_refine_fields,
     fuse_entity_results,
+    gate_semantic_hits,
     match_entity,
     narrow_entities,
     split_query,

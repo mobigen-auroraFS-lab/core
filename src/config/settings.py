@@ -186,6 +186,10 @@ class MmMetaConfig:
     # ``search_constants.ENTITY_SEMANTIC_GATE_EPS_DEFAULT`` 와 같은 값을 유지한다(근거·스윕 표는
     # 그 상수 주석 · 테스트가 두 값을 묶어 둔다). 올리면 무관 질의를 더 막고 재현율이 떨어진다.
     semantic_gate_eps: float
+    # 092: 개체 검색 백엔드. ``opensearch``(기본) = BM25(형태소)+kNN 융합 ·
+    # ``pg`` = 090 경로(PG pgvector 유사도). 🔴 **되돌림이 배포가 아니라 env 하나**여야 한다 —
+    # PG 벡터를 지우지 않으므로(원본 유지) 되돌려도 재임베딩이 필요 없다.
+    search_backend: str
 
 
 @dataclass(frozen=True)
@@ -466,6 +470,27 @@ def _resolve_opensearch_fusion_weights() -> tuple[float, float]:
 # 동형으로 환경 파싱·범위 검증·fail-fast 를 _build_settings 시점에 끌어와, 잘못된 임계로 검색하지 않도록
 # 프로세스 시작 시 즉시 실패시킨다. 기본값은 모두 search_constants 단일 출처(F1 — 하드코딩 제거).
 # 게이트는 OS 검색 경로(037 단일 백엔드)에 적용된다.
+def _entity_search_backend(name: str) -> str:
+    """개체 검색 백엔드(092) — ``opensearch``(기본) 또는 ``pg``.
+
+    닫힌 두 값만 받는다. 오타를 조용히 기본값으로 흘리면 "OpenSearch 로 바꿨는데 왜 결과가
+    그대로지" 를 조사하게 된다(``_resolve_search_backend`` 와 같은 fail-fast 규율).
+
+    Args:
+        name: 환경변수 이름.
+
+    Returns:
+        정규화된 백엔드 이름.
+
+    Raises:
+        ValueError: 두 값 밖일 때.
+    """
+    value = _env_str_default(name, "opensearch").strip().lower()
+    if value not in ("opensearch", "pg"):
+        raise ValueError(f"개체 검색 백엔드는 opensearch|pg 여야 한다: {name}={value!r}")
+    return value
+
+
 def _resolve_os_cutoff_enabled() -> bool:
     """OS 검색 게이트 활성 여부(023·027, FR-001). 미설정 시 기본 ``OS_CUTOFF_ENABLED_DEFAULT``(True).
 
@@ -823,6 +848,9 @@ _FIELD_SPECS: tuple[_Spec, ...] = (
     # 기본 0.15 = 실측 확정치(무관 22/24 차단 · C1 70%·C2 73.3%). 상수와 같은 값을 유지한다.
     _Spec("mm_meta", "semantic_gate_eps", "MM_META_SEMANTIC_GATE_EPS",
           _opt_float(search_constants.ENTITY_SEMANTIC_GATE_EPS_DEFAULT)),
+    # 092: 기본 opensearch — 037 "단일 백엔드" 원칙 복귀. pg 로 두면 090 동작이 그대로 돌아온다.
+    _Spec("mm_meta", "search_backend", "MM_META_SEARCH_BACKEND",
+          _entity_search_backend),
 )
 
 
