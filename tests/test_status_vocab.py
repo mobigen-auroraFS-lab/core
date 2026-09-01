@@ -5,8 +5,11 @@
 났다 — `approval_policy` 의 종결 상태 집합이 DB 가 모르는 값을 담고 있었다.
 
 ⚠️ **이 가드는 한동안 없었다.** 코어 전용화 때 파이프로 옮겨간 모듈(`AssetStatus`)을 import 하고
-있어 파일이 통째로 삭제됐고, 그 뒤로 어휘가 어긋나도 아무도 잡지 못했다. **코어에 남은 어휘만으로**
-되살렸다 — `AssetStatus` 는 파이프 소관이라 여기서 검사하지 않는다.
+있어 파일이 통째로 삭제됐고, 그 뒤로 어휘가 어긋나도 아무도 잡지 못했다.
+
+2026-09-02 에 `AssetStatus` **값 목록을 코어로 되돌리고** 여기서도 다시 검사한다 — 값은 파이프·
+백엔드 둘 다 쓰는데 파이프에만 있어 백엔드가 문자열을 17곳에 타이핑하고 있었다. 전이 규칙(FSM)은
+여전히 파이프 소관이다.
 
 여기 적힌 문자열 집합이 **DDL 의 사본**이라는 점이 요점이다. 어휘를 늘릴 때 이 테스트가 같이
 빨개져야 "DB CHECK 도 고쳤나"를 되묻게 된다.
@@ -19,6 +22,7 @@ from pathlib import Path
 
 from src.domain.status_vocab import (
     AccessTier,
+    AssetStatus,
     GraphEdgeStatus,
     MmSkillStatus,
     RegistryFieldStatus,
@@ -55,6 +59,13 @@ class StatusVocabSyncTest(unittest.TestCase):
             frozenset(("active", "inactive")),
         )
 
+    def test_asset_status_matches_check(self):
+        self.assertEqual(
+            frozenset(AssetStatus),
+            frozenset(("received", "routing", "classifying", "extracting",
+                       "registered", "failed", "deferred")),
+        )
+
     def test_mm_skill_status_matches_check(self):
         self.assertEqual(
             frozenset(MmSkillStatus),
@@ -83,6 +94,18 @@ class GraphEdgeStatusDdlTest(unittest.TestCase):
         self.assertIsNotNone(m, "302 DDL 에서 status CHECK 목록을 찾지 못했다")
         ddl_values = frozenset(v.strip().strip("'") for v in m.group(1).split(","))
         self.assertEqual(ddl_values, frozenset(MmSkillStatus))
+
+    def test_asset_status_ddl_check_list_matches_enum(self):
+        """🔴 **DDL 파일과 대조한다** — 위 테스트는 사람이 적은 사본끼리 비교할 뿐이다.
+
+        상태를 하나 늘리고 Enum 을 잊으면(또는 그 반대) 여기서 빨개진다. 이 어휘는 세 레포가
+        쓰므로 어긋나면 파급이 크다.
+        """
+        sql = (_SQL_DIR / "160_asset_status_deferred.sql").read_text(encoding="utf-8")
+        m = re.search(r"CHECK \(status IN \(([^)]*)\)\)", sql)
+        self.assertIsNotNone(m, "160 DDL 에서 status CHECK 목록을 찾지 못했다")
+        ddl_values = frozenset(v.strip().strip("'") for v in m.group(1).split(","))
+        self.assertEqual(ddl_values, frozenset(AssetStatus))
 
     def test_terminal_statuses_are_all_known_vocabulary(self):
         """종결 상태 집합이 어휘 밖을 가리키면 그 값으로 UPDATE 할 때 CHECK 위반이 난다.
