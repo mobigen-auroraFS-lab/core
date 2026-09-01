@@ -9,7 +9,10 @@ OM 039~042 에서 쓰이는 어휘
     ``GraphEdgeStatus``         — cross-asset (v230, 042에서 타입 정본화만)
     ``RelationResolutionStatus``— 관계 큐 (v250/v260, 042에서 타입 정본화만)
 
-``AssetStatus`` 정본은 파이프라인 레포 ``processing.ingest.status``(FSM 전이) — 여기서는 CHECK 집합 교차 검증만.
+``AssetStatus`` 는 **값 목록만 여기 있고 전이 규칙은 파이프라인**(``processing.ingest.status``)에 있다.
+왜 나눴나(2026-09-02): 값은 파이프·백엔드 **둘 다** 쓰는데 전이(FSM)는 파이프만 쓴다. 값까지 파이프에
+두면 백엔드가 가져다 쓸 길이 없어(3레포 구조상 service 는 pipeline 을 의존하지 않는다) 문자열을
+직접 타이핑하게 된다 — 실제로 백엔드 17곳·코어 23곳·파이프 21곳에 흩어져 있었다.
 
 주의(US-F 스코프): ``GraphEdgeStatus``/``RelationResolutionStatus`` 는 prod 코드가 값을 직접
 참조하지 않고 ``tests/test_status_vocab.py`` 의 DDL 교차검증만 소비한다. 그럼에도 삭제하지 않는다
@@ -20,6 +23,29 @@ OM 039~042 에서 쓰이는 어휘
 from __future__ import annotations
 
 from enum import StrEnum
+
+
+class AssetStatus(StrEnum):
+    """``asset.status`` CHECK 7값 (v160 · `migrations/sql/160_asset_status_deferred.sql`).
+
+    정상 경로: received → routing → classifying → extracting → registered.
+    종착은 셋 — ``registered``(정상)·``failed``(오류)·``deferred``(의료 표준 포맷 추출 보류).
+
+    🔴 **값 목록만 여기 있다.** 전이 규칙(``ALLOWED_TRANSITIONS``·``TERMINAL``)은 파이프라인
+    ``processing.ingest.status`` 소관이다 — 상태를 **바꾸는** 것은 처리 파이프라인의 일이고,
+    상태를 **읽는** 것은 백엔드·코어도 한다. 읽는 쪽이 값을 알려면 값이 공유 코어에 있어야 한다.
+
+    ⚠️ 값을 늘리면 **셋을 함께** 고친다: DDL CHECK · 이 Enum · 파이프의 ``ALLOWED_TRANSITIONS``.
+    앞의 둘은 ``tests/test_status_vocab.py`` 가 DDL 파일과 대조해 잡는다.
+    """
+
+    RECEIVED = "received"        # 파일 픽업·asset 행 생성 직후
+    ROUTING = "routing"          # 모달리티·경로 판정 중
+    CLASSIFYING = "classifying"  # 도메인·modality 분류 중
+    EXTRACTING = "extracting"    # 추출·임베딩·적재 중
+    REGISTERED = "registered"    # 적재 완료·종착 — 검색·관계 배치 노출 대상
+    FAILED = "failed"            # 오류 종착(status_reason 에 사유)
+    DEFERRED = "deferred"        # 의료 표준 포맷 추출 보류·종착(실패가 아니다 · 단계 D 대기)
 
 
 class AccessTier(StrEnum):
