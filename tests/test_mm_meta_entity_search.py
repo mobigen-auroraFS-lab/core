@@ -33,6 +33,7 @@ from typing import Any
 
 from src.domain.text_norm import normalize_text_key
 from src.mm_meta.entity_search import (
+    entity_refine_fields,
     gate_semantic_hits,
     REASON_SEMANTIC,
     fuse_entity_results,
@@ -618,3 +619,42 @@ class TestGateSemanticHits(unittest.TestCase):
         """임계가 실제로 판정을 가르는지 — 상수가 장식이 아님을 못 박는다."""
         got = gate_semantic_hits(self._with_signal(0.3893, 0.2753), eps=0.10, top_n=3)
         self.assertEqual(len(got), 3)
+
+
+class TestEntityRefineFields(unittest.TestCase):
+    """091 T004 — 개체 행에서 **결과 내 재검색** 대상 필드를 뽑는다.
+
+    089 ``match_entity`` 와 보는 곳은 같다(이름 · 근거 키워드 · 설명문). 다른 것은 **용도**다 —
+    ``match_entity`` 는 찾아오기(OR · 하나만 맞아도 남김)이고, 재검색은 골라내기(AND · 전부
+    맞아야 남김)다. 그래서 ``match_entity`` 를 고치지 않고 **필드만 뽑아** 코어 좁히기 함수
+    (``src/search/refine.refine_rows``)에 넘긴다.
+    """
+
+    def test_세_축을_모두_싣는다(self) -> None:
+        got = entity_refine_fields(
+            {"name": "김치", "keywords": ["발효", "전통음식"], "description": "한국의 발효 채소 요리"})
+        self.assertEqual(got, ["김치", "발효", "전통음식", "한국의 발효 채소 요리"])
+
+    def test_설명문이_없어도_죽지_않는다(self) -> None:
+        # 집계 결과라 설명이 아직 없는 개체가 실제로 있다(089 match_entity 와 같은 상황).
+        got = entity_refine_fields({"name": "김치", "keywords": ["발효"], "description": None})
+        self.assertEqual(got, ["김치", "발효"])
+
+    def test_필드_결측_타입이상에도_문자열_목록을_준다(self) -> None:
+        for item in ({}, {"name": None, "keywords": None, "description": None},
+                     {"name": "김치", "keywords": "문자열이_왔다"}, {"keywords": [None, "", "정상"]}):
+            with self.subTest(item=item):
+                got = entity_refine_fields(item)  # type: ignore[arg-type]
+                self.assertIsInstance(got, list)
+                self.assertTrue(all(isinstance(x, str) and x for x in got))
+
+    def test_좁히기와_이어_붙여_동작한다(self) -> None:
+        """실제 사용 경로 — 코어 좁히기 함수에 이 추출기를 넘긴다(AND · 원 순서)."""
+        from src.search.refine import refine_rows
+        items = [
+            {"name": "김치", "keywords": ["발효", "전통음식"], "description": "한국의 발효 채소 요리"},
+            {"name": "된장", "keywords": ["발효"], "description": "콩을 발효한 장"},
+            {"name": "아이유", "keywords": ["가수"], "description": "대한민국의 가수"},
+        ]
+        got = refine_rows(items, "발효 채소", fields_of=entity_refine_fields)
+        self.assertEqual([r["name"] for r in got], ["김치"])

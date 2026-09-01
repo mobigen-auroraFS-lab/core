@@ -323,8 +323,41 @@ def gate_semantic_hits(
     return [dict(h) for h in hits[:top_n]]
 
 
+def entity_refine_fields(item: Mapping[str, Any]) -> list[str]:
+    """개체 행에서 **결과 내 재검색** 대상 필드를 뽑는다(이름 · 근거 키워드 · 설명문 · 091).
+
+    보는 곳은 위 ``match_entity`` 와 같다. 다른 것은 **용도**다 — ``match_entity`` 는 찾아오기라
+    한 토큰만 맞아도 남기지만(OR), 결과 내 재검색은 골라내기라 모든 토큰이 맞아야 남긴다(AND).
+    그래서 **``match_entity`` 를 고치지 않고** 필드만 뽑아 코어 좁히기 함수
+    (``src.search.refine.refine_rows``)에 넘긴다 — 090 이 087 판정 재료를 건드리지 않고 검색용
+    재료 함수를 새로 둔 것과 같은 판단이다.
+
+    Args:
+        item: 개체 목록 행. ``name``(str)·``keywords``(str 배열)·``description``(str)을 읽으며,
+            없거나 타입이 다르면 그 축은 없는 것으로 본다(집계 결과라 설명문이 아직 없는 개체가 있다).
+
+    Returns:
+        빈 값을 제외한 필드 문자열 목록(이름 → 근거 키워드 → 설명문 순).
+    """
+    out: list[str] = []
+    name = item.get("name")
+    if isinstance(name, str) and name:
+        out.append(name)
+
+    keywords = item.get("keywords")
+    # 문자열 하나가 오면 글자 단위로 순회돼 쓰레기 값이 생긴다 — 배열만 받는다.
+    if isinstance(keywords, (list, tuple)):
+        out.extend(k for k in keywords if isinstance(k, str) and k)
+
+    description = item.get("description")
+    if isinstance(description, str) and description:
+        out.append(description)
+    return out
+
+
 __all__ = [
     "REASON_SEMANTIC",
+    "entity_refine_fields",
     "gate_semantic_hits",
     "fuse_entity_results",
     "REASON_DESCRIPTION",
