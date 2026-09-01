@@ -329,3 +329,36 @@ class TestPurgeAndCount(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSearchMaterialMemberKeywords(unittest.TestCase):
+    """092 — 검색 재료에 **구성 자산 키워드**를 싣는다(개체 생성물은 무변경).
+
+    왜: 개체 설명문 한 문장(중위 68자)에 없는 낱말이 구성 자산에는 있다. 실측에서 이 축을 더하니
+    다어절 재현율이 73.3% → 86.7% 로 올랐다.
+    """
+
+    def test_구성_키워드가_재료에_실린다(self) -> None:
+        got = build_search_material(name="훈민정음", entity_type="작품",
+                                    description="창제 원리.", keywords=["훈민정음"],
+                                    member_keywords=["한글", "창제"])
+        self.assertIn("구성 키워드: 창제, 한글", got)      # 정렬됨
+
+    def test_안_주면_현행_재료_그대로다(self) -> None:
+        """되돌림의 실질 — 인자를 안 넘기면 090 재료가 그대로 나온다."""
+        base = build_search_material(name="훈민정음", entity_type="작품",
+                                     description="창제 원리.", keywords=["훈민정음"])
+        self.assertNotIn("구성 키워드", base)
+
+    def test_순서가_달라도_같은_재료다(self) -> None:
+        """🔴 해시가 흔들리면 재임베딩이 매번 돈다(090 G2 에서 실제로 겪었다)."""
+        a = build_search_material(name="김치", entity_type="음식",
+                                  member_keywords=["발효", "배추", "김장"])
+        b = build_search_material(name="김치", entity_type="음식",
+                                  member_keywords=["김장", "발효", "배추"])
+        self.assertEqual(a, b)
+
+    def test_빈_값은_버린다(self) -> None:
+        got = build_search_material(name="김치", entity_type="음식",
+                                    member_keywords=["", "  ", "발효"])
+        self.assertIn("구성 키워드: 발효", got)

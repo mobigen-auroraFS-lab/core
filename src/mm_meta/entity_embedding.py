@@ -50,6 +50,7 @@ def build_search_material(
     description: str | None = None,
     keywords: Sequence[str] = (),
     max_keywords: int = MAX_MATERIAL_KEYWORDS,
+    member_keywords: Sequence[str] = (),
 ) -> str:
     """개체 하나의 **검색 재료**를 조립한다(순수 · DB·임베딩 호출 없음).
 
@@ -60,7 +61,16 @@ def build_search_material(
         description: 생성된 개체 설명문. 구성 자산 전체를 종합한 문장이라 **가장 좋은 재료**다.
         keywords: 근거 키워드. 🔴 **087 판정 재료에는 없는 축**이며, G0 측정에서 이것을 넣자
             단어 하나 질의가 35% → 50% · 이름 질의가 96.7% → 100% 로 올랐다.
-        max_keywords: 실을 키워드 개수 상한.
+        max_keywords: 실을 근거 키워드 개수 상한.
+        member_keywords: **구성 자산의 키워드**(빈도순 상위 N · 092). 개체 설명문 한 문장(중위
+            68자)에 없는 낱말이 구성 자산에는 있다 — `한글` 이 훈민정음 설명문에는 없지만 구성
+            자산 요약에는 "한글 창제" 로 있다. 실측에서 이 축을 더하니 다어절 재현율이
+            **73.3% → 86.7%** 로 올랐다.
+            🔴 **요약 본문이 아니라 키워드 집계를 싣는다** — 요약을 샘플로 뽑으면 자산이 1만 건인
+            개체에서 '앞 3건' 이 대표성을 잃지만(실측: 어떤 3건이냐에 따라 재현율 70~85% 로 흔들림),
+            빈도 집계는 자산 수와 무관하게 길이가 일정하다. **호출부가 이미 상한을 걸어 넘긴다.**
+            ⚠️ 개체 생성물을 늘리는 것이 아니다 — 적재 때 저장한 값을 읽어 싣는 것뿐이라
+            개체 재판정이 필요 없다.
 
     Returns:
         검색 재료 문자열. 순서에 뜻이 있다 — **이름·타입 → 설명문 → 근거 키워드**.
@@ -86,6 +96,11 @@ def build_search_material(
     picked = sorted({str(k).strip() for k in keywords if str(k).strip()})[:max_keywords]
     if picked:
         parts.append("근거 키워드: " + ", ".join(picked))
+    # 구성 자산 키워드도 같은 이유로 정렬한다(순서가 흔들리면 해시가 바뀌어 재임베딩이 돈다).
+    # 상한은 호출부(배치)가 빈도순으로 이미 걸어 넘기므로 여기서는 정렬만 한다.
+    members = sorted({str(k).strip() for k in member_keywords if str(k).strip()})
+    if members:
+        parts.append("구성 키워드: " + ", ".join(members))
     return "\n".join(parts)
 
 
@@ -241,6 +256,41 @@ def find_similar_entities(
     rows = conn.execute(sql, params).fetchall()
     return [{"entity_type": r[0], "entity_uid": str(r[1]), "similarity": float(r[2])}
             for r in rows]
+
+
+def fetch_entity_vectors(
+    conn: Any, *, model_name: str | None = None
+) -> dict[tuple[str, str], list[float]]:
+    """저장된 개체 벡터를 전부 읽는다(색인용 · 092).
+
+    왜 필요한가: 검색 엔진에 색인할 때 벡터가 함께 실려야 한다. 임베딩 배치가 방금 만든 값을
+    다시 계산하지 않고 **저장된 것을 읽어** 색인한다 — 같은 재료로 두 번 임베딩하면 비용도 두 배고
+    두 값이 미세하게 달라질 여지도 생긴다.
+
+    Args:
+        conn: DB 연결.
+        model_name: 이 모델로 만든 벡터만 읽는다(선택). 모델이 섞이면 검색 유사도가 뜻을 잃는다.
+
+    Returns:
+        ``{(entity_type, entity_uid): 벡터}``. 노름 0(빈 벡터)인 행은 제외한다 — 색인해도
+        코사인이 정의되지 않아 검색에 쓸 수 없다.
+    """
+    where = "WHERE vector_norm(embedding) > 0"
+    params: tuple = ()
+    if model_name:
+        where += " AND model_name = %s"
+        params = (model_name,)
+    rows = conn.execute(
+        f"SELECT entity_type, entity_uid, embedding FROM entity_embedding {where}", params
+    ).fetchall()
+    out: dict[tuple[str, str], list[float]] = {}
+    for r in rows:
+        raw = r[2]
+        # pgvector 는 드라이버에 따라 문자열('[0.1,0.2]')로 오기도 한다 — 양쪽을 다 받는다.
+        vec = ([float(x) for x in str(raw).strip("[]").split(",")]
+               if isinstance(raw, str) else [float(x) for x in raw])
+        out[(str(r[0]), str(r[1]))] = vec
+    return out
 
 
 def purge_orphan_embeddings(conn: Any) -> int:

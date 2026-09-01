@@ -1095,3 +1095,29 @@ class TestEmbedActiveChannelWhitelist(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMmMetaSearchBackend(unittest.TestCase):
+    """092 — 개체 검색 백엔드 토글. **되돌림이 배포가 아니라 env 하나**여야 한다."""
+
+    def test_기본은_opensearch_다(self) -> None:
+        # 037 "OpenSearch 단일 백엔드" 원칙 복귀 — 개체만 PG 였던 예외를 없앤다.
+        with _env():
+            s = _build_settings("dev")
+        self.assertEqual(s.mm_meta.search_backend, "opensearch")
+
+    def test_pg_로_되돌릴_수_있다(self) -> None:
+        with _env(MM_META_SEARCH_BACKEND="pg"):
+            s = _build_settings("dev")
+        self.assertEqual(s.mm_meta.search_backend, "pg")
+
+    def test_대소문자와_공백을_흡수한다(self) -> None:
+        with _env(MM_META_SEARCH_BACKEND=" PG "):
+            s = _build_settings("dev")
+        self.assertEqual(s.mm_meta.search_backend, "pg")
+
+    def test_오타는_즉시_죽는다(self) -> None:
+        """조용히 기본값으로 흘리면 "바꿨는데 왜 그대로지" 를 조사하게 된다(fail-fast)."""
+        with _env(MM_META_SEARCH_BACKEND="opensarch"):
+            with self.assertRaises(ValueError):
+                _build_settings("dev")

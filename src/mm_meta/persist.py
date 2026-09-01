@@ -1105,6 +1105,58 @@ ORDER BY count(*) DESC, en.entity_type, en.entity_uid
 #   요약 상한도 파이썬이 자른다 — 묶음 규모(수~수십 건)에서 전송량 차이가 없고, 모의 커넥션
 #   테스트가 상한을 그대로 검증할 수 있다.
 #   ⚠️ 바인딩 순서: (statuses, kind_code, entity_type, entity_uid).
+_MEMBER_KEYWORDS_SQL = """
+SELECT en.entity_type, en.entity_uid, kw.keyword, COUNT(*) AS n
+FROM node en
+JOIN graph_edge ge ON ge.dst_node = en.node_id AND ge.status = ANY(%s)
+JOIN relation_kind rk ON rk.relation_kind_id = ge.relation_kind_id AND rk.kind_code = %s
+JOIN node an ON an.node_id = ge.src_node AND an.node_kind = 'asset'
+JOIN asset_metadata m ON m.asset_id = an.asset_id
+CROSS JOIN LATERAL jsonb_array_elements_text(
+    COALESCE(m.ext_meta->'keywords', '[]'::jsonb)) AS kw(keyword)
+WHERE en.node_kind = 'entity'
+GROUP BY en.entity_type, en.entity_uid, kw.keyword
+ORDER BY en.entity_type, en.entity_uid, n DESC, kw.keyword
+"""
+
+
+def fetch_member_keywords_all(
+    conn: Connection[Any], *, top_n: int = 10
+) -> dict[tuple[str, str], list[str]]:
+    """모든 개체의 **구성 자산 키워드**를 빈도순으로 모은다(읽기 전용·결정적 · 092).
+
+    왜 개체별이 아니라 한 번에 읽나: 개체가 늘면 개체당 한 번씩 묻는 방식은 쿼리 수가 그만큼
+    는다. 집계는 DB 가 한 번에 하는 편이 싸다.
+
+    왜 요약이 아니라 **키워드 집계**인가(spec 092 §2-3): 구성 자산 요약을 샘플로 뽑으면 자산이
+    1만 건인 개체에서 '앞 3건' 이 0.03% 라 대표성이 무너진다(실측: 어떤 3건을 고르냐에 따라
+    단어 하나 재현율이 70~85% 로 흔들린다). 빈도 집계는 **자산 수와 무관하게 길이가 일정**하고
+    자산이 많을수록 통계가 안정된다.
+
+    Args:
+        conn: DB 커넥션.
+        top_n: 개체당 실을 키워드 수(빈도 내림차순 → 표기 오름차순). 1 미만이면 예외.
+
+    Returns:
+        ``{(entity_type, entity_uid): [키워드, ...]}``. 구성 자산이 없거나 키워드가 없는 개체는
+        키 자체가 없다(호출부가 ``.get(key, [])`` 로 읽는다).
+
+    Raises:
+        MmMetaPersistError: ``top_n`` 이 1 미만일 때.
+    """
+    if int(top_n) < 1:
+        raise MmMetaPersistError(f"키워드 상한은 1 이상이어야 한다: {top_n!r}")
+    out: dict[tuple[str, str], list[str]] = {}
+    with conn.cursor() as cur:
+        cur.execute(_MEMBER_KEYWORDS_SQL, (list(MM_META_VISIBLE_STATUSES), MM_MEMBER_KIND_CODE))
+        for row in cur.fetchall():
+            key = (str(row[0]), str(row[1]))
+            bucket = out.setdefault(key, [])
+            if len(bucket) < int(top_n):
+                bucket.append(str(row[2]))
+    return out
+
+
 _DESC_MEMBERS_SQL = """
 SELECT a.modality, m.ext_meta->>'summary' AS summary
 FROM node en
@@ -1123,6 +1175,7 @@ def fetch_meta_members(
     entity_uid: str,
     *,
     summary_max_chars: int = MEMBER_SUMMARY_MAX_CHARS,
+    limit: int | None = None,
 ) -> list[tuple[str, str]]:
     """메타 하나의 **설명 재료**(모달리티, 요약)를 읽는다(읽기 전용·결정적).
 
@@ -1136,6 +1189,13 @@ def fetch_meta_members(
         entity_uid: 표기 키. 컬럼에는 정규화 키만 있으므로 입력도 같은 규칙으로 눌러 대조한다
             (``normalize_text_key`` 는 멱등이라 이미 키인 값은 그대로다 — 리포트·URL 로 오는 원표기
             차이를 흡수한다).
+        limit: 읽을 구성 자산 수 상한. ``None`` 이면 전량(기본 · 설명 생성은 묶음 전체를 봐야 한다).
+            🔴 **검색 색인은 반드시 상한을 건다**(092): 개체 하나에 자산이 1만 건이면 전량을 읽어
+            메모리·시간을 쓰는데, 색인 문서에 실을 것은 앞 몇 건뿐이다. ``ORDER BY asset_id`` 가
+            먼저 적용되므로 상한을 걸어도 **매번 같은 자산**이 나온다(결정성 유지).
+            ⚠️ 상한을 걸면 그 개체의 일부만 보는 것이라, 자산이 많을수록 대표성이 떨어진다 —
+            그래서 092 는 요약(샘플)과 **키워드 집계**(자산 수와 무관하게 길이 일정)를 함께 싣는다.
+            0 이하면 예외.
         summary_max_chars: 요약 하나를 담을 길이 상한(글자). 기본 150 = 파일럿 기준선.
             **1 미만이면 예외** — 0 을 허용하면 재료가 빈 프롬프트가 나가고, 그러면 LLM 이 이름만
             보고 문장을 지어낸다(외부 지식 금지 규칙이 무력해진다).
@@ -1146,21 +1206,28 @@ def fetch_meta_members(
         메타가 없거나 노출 대상 상태의 소속이 없으면 빈 목록.
 
     Raises:
-        MmMetaPersistError: ``summary_max_chars`` 가 1 미만일 때.
+        MmMetaPersistError: ``summary_max_chars`` 또는 ``limit`` 이 1 미만일 때.
     """
-    limit = int(summary_max_chars)
-    if limit < 1:
+    if limit is not None and int(limit) < 1:
+        raise MmMetaPersistError(f"구성 자산 상한은 1 이상이어야 한다: {limit!r}")
+    char_limit = int(summary_max_chars)
+    if char_limit < 1:
         raise MmMetaPersistError(
             f"요약 상한은 1 이상이어야 한다: {summary_max_chars!r} "
             "(0 이면 재료 없는 프롬프트가 나가고 설명이 통째로 환각이 된다)"
         )
     uid = normalize_text_key(entity_uid)
     with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(_DESC_MEMBERS_SQL,
-                    (list(MM_META_VISIBLE_STATUSES), MM_MEMBER_KIND_CODE, entity_type, uid))
+        sql = _DESC_MEMBERS_SQL
+        params: list[Any] = [list(MM_META_VISIBLE_STATUSES), MM_MEMBER_KIND_CODE, entity_type, uid]
+        if limit is not None:
+            # ORDER BY asset_id 뒤에 붙으므로 같은 개체는 매번 같은 앞 N 건이 나온다(결정성).
+            sql = sql + "LIMIT %s\n"
+            params.append(int(limit))
+        cur.execute(sql, tuple(params))
         rows = cur.fetchall()
     return [
-        (str(r["modality"] or ""), str(r["summary"] or "").strip()[:limit]) for r in rows
+        (str(r["modality"] or ""), str(r["summary"] or "").strip()[:char_limit]) for r in rows
     ]
 
 
