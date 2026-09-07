@@ -236,6 +236,11 @@ SEARCH_EVIDENCE_RESCUE_ENABLED_DEFAULT: bool = True
 # ``q=테스트`` 스모크로 검증한 뒤 045 stabilization 에서 default=True(live)로 채택했다(044 spec D8 갱신).
 # ``.env`` 로 0 강제 가능. flip 전후 025 골든(recall@20·p@3): gate-on 시 weak-only precision ↑·recall 소폭 ↓.
 
+# ── 083 결과-스코프 태그 패싯 표시 기본값(랭킹 무영향 · 설정 SEARCH_TAG_FACET_* 의 기본) ──
+# 설정 spec(settings.py)과 백엔드의 "설정 미초기화" 폴백이 **같은 값**을 보게 한 곳에 둔다.
+TAG_FACET_TOP_N_DEFAULT: int = 12      # 목록 상위 노출 개수. 잘린 나머지는 has_more 로 알린다
+TAG_FACET_MIN_COUNT_DEFAULT: int = 2   # 노출 하한 건수(2 = 1건짜리 감춤 — 083 실측 83.8% 가 1건짜리)
+
 __all__ = [
     "ABOUT_FILTER_NOUN_MAX_MATCH_RATIO",
     "SEARCH_ABOUT_FILTER_ENABLED_DEFAULT",
@@ -276,4 +281,6 @@ __all__ = [
     "OS_RERANK_TAU_DEFAULT",
     "SEARCH_EVIDENCE_DEBUG_DEFAULT",
     "SEARCH_EVIDENCE_RESCUE_ENABLED_DEFAULT",
+    "TAG_FACET_TOP_N_DEFAULT",
+    "TAG_FACET_MIN_COUNT_DEFAULT",
 ]

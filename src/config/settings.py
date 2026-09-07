@@ -774,8 +774,8 @@ _FIELD_SPECS: tuple[_Spec, ...] = (
     _Spec("search", "os_bm25_operator", "SEARCH_OS_BM25_OPERATOR", lambda _k: _resolve_os_bm25_operator()),
     _Spec("search", "evidence_rescue_enabled", "SEARCH_EVIDENCE_RESCUE_ENABLED", _opt_bool(search_constants.SEARCH_EVIDENCE_RESCUE_ENABLED_DEFAULT)),
     _Spec("search", "evidence_debug", "SEARCH_EVIDENCE_DEBUG", _opt_bool(search_constants.SEARCH_EVIDENCE_DEBUG_DEFAULT)),
-    _Spec("search", "tag_facet_top_n", "SEARCH_TAG_FACET_TOP_N", _opt_int(12)),
-    _Spec("search", "tag_facet_min_count", "SEARCH_TAG_FACET_MIN_COUNT", _opt_int(2)),
+    _Spec("search", "tag_facet_top_n", "SEARCH_TAG_FACET_TOP_N", _opt_int(search_constants.TAG_FACET_TOP_N_DEFAULT)),
+    _Spec("search", "tag_facet_min_count", "SEARCH_TAG_FACET_MIN_COUNT", _opt_int(search_constants.TAG_FACET_MIN_COUNT_DEFAULT)),
     # ── opensearch(인프라·색인 빌더 교정) ──
     _Spec("opensearch", "url", "OPENSEARCH_URL", _opt_str("http://localhost:9200")),
     _Spec("opensearch", "index", "OPENSEARCH_INDEX", _opt_str("assets")),

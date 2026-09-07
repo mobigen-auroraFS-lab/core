@@ -142,6 +142,7 @@ tests/          단위 테스트
 |---|---|---|
 | 설정 | `src.config.settings` | `init_settings` · `get_current_settings` · `PipelineSettings` |
 | 상수 | `src.config.embedding_constants` | `FIX_EMBEDDING_DIMENSION` · `EMBEDDING_KIND_ST` · `EMBEDDING_KIND_CLIP` · `DEFAULT_CLIP_MODEL_NAME` |
+| 상수 | `src.config.search_constants` | `TAG_FACET_TOP_N_DEFAULT` · `TAG_FACET_MIN_COUNT_DEFAULT` |
 | 파일명 | `src.config.filename_util` | `basename_of` · `strip_asset_id_prefix` · `display_file_name` |
 | 검색 모달리티 | `src.config.search_modalities` | `VALID_SEARCH_MODALITIES` · `parse_modalities_csv` · `MODALITY_TO_BUCKET` · `BUCKET_TO_MODALITY` |
 | DB | `src.database.postgres_util` | `PostgresUtil` |
@@ -160,6 +161,7 @@ tests/          단위 테스트
 | 검색 | `src.search.search_filters` | `SearchFilters` · `parse_search_filters` |
 | 검색 | `src.search.search_tuning` | `SearchTuning` |
 | 검색 | `src.search.refine` | `refine_rows` · `refine_tokens` |
+| 검색 | `src.search.facets` | `aggregate_facets` |
 | 검색 | `src.search.tag_facets` | `aggregate_tag_facets` · `normalize_tag_key` |
 | 주제 | `src.topic.asset_topic_query` | `fetch_asset_topic` · `find_same_topic_groups` · `list_topics` · `assets_in_topic` · `assets_unclassified` |
 | 멀티모달 메타 | `src.mm_meta.rules` | `MIN_BUNDLE_SIZE` |

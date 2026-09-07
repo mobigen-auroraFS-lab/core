@@ -11,6 +11,16 @@
 | **MINOR** | 공개 API **추가** — 기존 호출은 그대로 동작 |
 | **PATCH** | 공개 API 무변경 — 내부 수정·버그 수정 |
 
+## [v0.3.0] — 2026-09-07 (093 2단계 · 검색 손잡이 · 패싯 집계 정본)
+
+### 추가 (MINOR — 기존 호출 무변경)
+- `search_service.search_hybrid(…, tuning: SearchTuning | None = None)` — 검색 튜닝 묶음을 호출자가 넘기는 손잡이. `None`(생략)이면 종전과 같이 설정에서 해소한다. 백엔드가 닫힌 프리셋을 값으로 바꿔 넘기는 자리(ADR 2026-09-02 §6).
+- `src.search.facets.aggregate_facets(rows, *, keys_of, top_n=None, min_count=1, unit_of=None, label_of=…)` — 축과 무관한 결과-스코프 패싯 집계 정본(단위당 1회 계수·하한·상위 N·결정적 정렬·최빈 표기). 호출자가 "무엇으로 묶는가"(`keys_of`)만 준다.
+- `src.config.search_constants.TAG_FACET_TOP_N_DEFAULT` · `TAG_FACET_MIN_COUNT_DEFAULT` — 태그 패싯 표시 기본값(12·2). 설정 `SEARCH_TAG_FACET_*` 의 기본과 소비 레포의 "설정 미초기화" 폴백이 같은 값을 보게.
+
+### 내부(공개 API 무변경)
+- `tag_facets.aggregate_tag_facets` 는 위 정본의 태그 축 래퍼가 됐다 — 입·출력 동일(무작위 300조합 대조 테스트).
+
 ## [v0.2.0] — 2026-09-07 (093 1단계 · 어휘·상수 정본)
 
 ### 추가 (MINOR — 기존 호출 무변경)
