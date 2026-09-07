@@ -25,20 +25,25 @@ PUBLIC_API: dict[str, tuple[str, ...]] = {
         "FIX_EMBEDDING_DIMENSION", "EMBEDDING_KIND_ST", "EMBEDDING_KIND_CLIP", "DEFAULT_CLIP_MODEL_NAME",
     ),
     "src.config.filename_util": ("basename_of", "strip_asset_id_prefix", "display_file_name"),
-    "src.config.search_modalities": ("VALID_SEARCH_MODALITIES", "parse_modalities_csv"),
+    "src.config.search_modalities": (
+        "VALID_SEARCH_MODALITIES", "parse_modalities_csv", "MODALITY_TO_BUCKET", "BUCKET_TO_MODALITY",
+    ),
     "src.database.postgres_util": ("PostgresUtil",),
     "src.database.ids": ("uuid7",),
     "src.database.lineage_persist": ("record_lineage",),
+    "src.database.lineage_activity": ("LineageActivity",),
     "src.domain.status_vocab": (
         "AssetStatus", "AccessTier", "GraphEdgeStatus", "RelationResolutionStatus",
-        "RegistryFieldStatus", "MmSkillStatus",
+        "RegistryFieldStatus", "MmSkillStatus", "RelationKindStatus",
     ),
     "src.domain.text_norm": ("normalize_text_key",),
+    "src.domain.numeric": ("safe_float",),
     "src.registry.access_tier": ("project_ext_meta", "principal_clearance"),
     "src.registry.ext_meta_field_registry": ("fetch_access_tiers", "validate_ext_meta"),
     "src.relations.graph_query": (
         "fetch_relations_for_asset", "fetch_active_relations_for_asset", "mm_meta_of_asset", "mm_meta_bundle",
     ),
+    "src.relations.approval_policy": ("TIER_ORDER", "tier_rank"),
     "src.relations.review": (
         "list_edges_for_review", "list_relation_kinds", "bulk_review", "revise_edge", "promote_relation_kind",
     ),

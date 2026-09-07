@@ -23,6 +23,7 @@ from psycopg import Connection
 from psycopg.rows import dict_row
 
 from src.config.settings import get_current_settings
+from src.database.lineage_activity import LineageActivity
 from src.database.lineage_persist import record_lineage
 from src.database.postgres_util import PostgresUtil
 from src.relations.approval_policy import parse_kind_set
@@ -235,7 +236,7 @@ def propose_relations_for_asset(
         record_lineage(
             conn,
             uuid.UUID(source_asset_id),
-            activity="relations.proposed.v1",
+            activity=LineageActivity.RELATIONS_PROPOSED,  # 백엔드 5버킷 판별이 같은 정본을 본다
             agent="llm_propose",
             generated={"edges_upserted": edges_upserted, "edges_skipped": edges_skipped,
                        "edges_gated_low_conf": gate_stats.get("gated_low_conf", 0),

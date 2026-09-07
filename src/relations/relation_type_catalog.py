@@ -11,6 +11,7 @@ from typing import Any
 from psycopg import Connection
 from psycopg.rows import dict_row
 
+from src.domain.status_vocab import RelationKindStatus
 from src.relations.schema import PROMPT_EXCLUDED_KIND_CODES
 
 
@@ -80,7 +81,7 @@ def ensure_relation_kind_for_llm_proposal(
     kind_name_ko: str,
     description: str,
     is_symmetric: bool = True,
-    status: str = "inactive",
+    status: str = RelationKindStatus.INACTIVE,
 ) -> str:
     """LLM이 제안한 새 관계 종류를 ``relation_kind`` 에 등록한다(기본 inactive = 검토 전).
 

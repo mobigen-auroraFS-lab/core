@@ -13,6 +13,7 @@ from typing import Any
 
 from psycopg import Connection
 
+from src.domain.status_vocab import RelationKindStatus
 from src.relations.relation_type_catalog import ensure_relation_kind_for_llm_proposal
 from src.relations.schema import (
     description_ko_from_type_name_ko,
@@ -71,7 +72,8 @@ def register_new_relation_kinds(
         if reason_txt:
             desc = f"{desc}\n\n[LLM 근거]\n{reason_txt[:4000]}"
         ensure_relation_kind_for_llm_proposal(
-            conn, kind_code=safe, kind_name_ko=label, description=desc, status="inactive")
+            conn, kind_code=safe, kind_name_ko=label, description=desc,
+            status=RelationKindStatus.INACTIVE)
         seen.add(safe)
         registered += 1
     return registered, skipped

@@ -29,7 +29,7 @@ from psycopg.rows import dict_row
 
 from src.config.filename_util import display_file_name
 from src.domain.text_norm import normalize_text_key
-from src.relations.approval_policy import choose_folded_edge, exposure_tier
+from src.relations.approval_policy import choose_folded_edge, exposure_tier, tier_rank
 from src.relations.schema import MM_MEMBER_KIND_CODE
 
 # 엣지 양 끝을 node → asset 으로 두 번 조인한다. 앞의 조인은 asset_id 를 얻기 위한 것이고,
@@ -55,9 +55,9 @@ ORDER BY ge.confidence DESC NULLS LAST, ge.edge_id
 """
 # 도메인별 제외 조건은 없다 — 모든 도메인을 균일하게 노출한다.
 
-# 노출 등급의 정렬 우선순위 — 강칸이 먼저다. 신뢰도만으로 정렬하면 **고신뢰 약칸이 저신뢰
-# 강칸을 밀어내** 사용자가 "확실한 관계"라 믿은 것이 아래로 내려간다.
-_TIER_RANK = {"strong": 0, "weak": 1}
+# 노출 등급의 정렬 우선순위(강칸 먼저)는 ``approval_policy.tier_rank``(``TIER_ORDER``) 하나만 쓴다 —
+# 종전 사본 ``_TIER_RANK`` 는 093 1단계에서 제거(백엔드 상세도 같은 함수를 쓴다). 신뢰도만으로 정렬하면
+# **고신뢰 약칸이 저신뢰 강칸을 밀어내** 사용자가 "확실한 관계"라 믿은 것이 아래로 내려간다.
 
 
 def fetch_relations_for_asset(
@@ -143,7 +143,7 @@ def fetch_relations_for_asset(
     # 최댓값이 아닐 수 있어(약한 주장이 낮은 점수로 남는 경우), SQL 이 정한 순서에 기대면
     # 같은 등급 안에서 신뢰도 역순이 생긴다 — 반환 계약(Returns)이 약속한 순서를 여기서 보장한다.
     out.sort(key=lambda e: (
-        _TIER_RANK.get(str(e["tier"]), len(_TIER_RANK)),
+        tier_rank(str(e["tier"])),
         -float(e["confidence"]) if e["confidence"] is not None else float("inf"),
         str(e["edge_id"]),
     ))

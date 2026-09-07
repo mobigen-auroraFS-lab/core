@@ -26,6 +26,7 @@ from src.domain.status_vocab import (
     GraphEdgeStatus,
     MmSkillStatus,
     RegistryFieldStatus,
+    RelationKindStatus,
     RelationResolutionStatus,
 )
 
@@ -86,6 +87,17 @@ class GraphEdgeStatusDdlTest(unittest.TestCase):
         self.assertIsNotNone(m, "230 DDL 에서 status CHECK 목록을 찾지 못했다")
         ddl_values = frozenset(v.strip().strip("'") for v in m.group(1).split(","))
         self.assertEqual(ddl_values, frozenset(GraphEdgeStatus))
+
+    def test_relation_kind_ddl_check_list_matches_enum(self):
+        # 093 1단계 정본화 — 140 DDL 에는 status CHECK 가 두 표(relation_kind·relation_type)에 있으므로
+        # ``CREATE TABLE relation_kind`` 블록만 잘라 그 안의 CHECK 를 본다(다른 표의 값이 섞이지 않게).
+        sql = (_SQL_DIR / "140_asset_relation.sql").read_text(encoding="utf-8")
+        block = re.search(r"CREATE TABLE(?: IF NOT EXISTS)? relation_kind\b.*?\);", sql, flags=re.S)
+        self.assertIsNotNone(block, "140 DDL 에서 relation_kind CREATE TABLE 블록을 찾지 못했다")
+        m = re.search(r"CHECK \(status IN \(([^)]*)\)\)", block.group(0))
+        self.assertIsNotNone(m, "relation_kind 블록에서 status CHECK 목록을 찾지 못했다")
+        ddl_values = frozenset(v.strip().strip("'") for v in m.group(1).split(","))
+        self.assertEqual(ddl_values, frozenset(RelationKindStatus))
 
     def test_mm_skill_ddl_check_list_matches_enum(self):
         # v302 신설 어휘 — DDL CHECK 와 MmSkillStatus 를 파일 파싱으로 교차검증(규약: 동시 갱신).

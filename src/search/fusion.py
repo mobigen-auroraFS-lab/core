@@ -14,28 +14,14 @@
 
 from __future__ import annotations
 
-import math
 from collections.abc import Callable, Iterable
 from typing import Any
 
+from src.domain.numeric import safe_float
 
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    """어떤 값이든 **유한한 실수**로 바꾼다(결정적·순수).
-
-    NaN·무한대는 비교가 비결정적이라(정렬 순서가 흔들린다) 여기서 전부 걸러낸다.
-
-    Args:
-        value: 숫자·문자열·``None`` 무엇이든.
-        default: 변환 실패나 비유한 값일 때 쓸 대체값.
-
-    Returns:
-        유한 실수.
-    """
-    try:
-        x = float(value)
-    except (TypeError, ValueError):
-        return default
-    return x if math.isfinite(x) else default
+# 유한 실수 정화 규칙의 정본은 ``src.domain.numeric.safe_float`` 다(093 1단계 · 백엔드도 같은 함수를 쓴다).
+# 이 모듈 안의 이름 ``_safe_float`` 는 기존 호출 12곳과 테스트를 위해 그대로 둔다.
+_safe_float = safe_float
 
 
 def knn_score_to_cosine(score: Any) -> float:

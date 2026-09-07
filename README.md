@@ -143,15 +143,18 @@ tests/          단위 테스트
 | 설정 | `src.config.settings` | `init_settings` · `get_current_settings` · `PipelineSettings` |
 | 상수 | `src.config.embedding_constants` | `FIX_EMBEDDING_DIMENSION` · `EMBEDDING_KIND_ST` · `EMBEDDING_KIND_CLIP` · `DEFAULT_CLIP_MODEL_NAME` |
 | 파일명 | `src.config.filename_util` | `basename_of` · `strip_asset_id_prefix` · `display_file_name` |
-| 검색 모달리티 | `src.config.search_modalities` | `VALID_SEARCH_MODALITIES` · `parse_modalities_csv` |
+| 검색 모달리티 | `src.config.search_modalities` | `VALID_SEARCH_MODALITIES` · `parse_modalities_csv` · `MODALITY_TO_BUCKET` · `BUCKET_TO_MODALITY` |
 | DB | `src.database.postgres_util` | `PostgresUtil` |
 | DB | `src.database.ids` | `uuid7` |
 | DB | `src.database.lineage_persist` | `record_lineage` |
-| 어휘 | `src.domain.status_vocab` | `AssetStatus` · `AccessTier` · `GraphEdgeStatus` · `RelationResolutionStatus` · `RegistryFieldStatus` · `MmSkillStatus` |
+| DB | `src.database.lineage_activity` | `LineageActivity` |
+| 어휘 | `src.domain.status_vocab` | `AssetStatus` · `AccessTier` · `GraphEdgeStatus` · `RelationResolutionStatus` · `RegistryFieldStatus` · `MmSkillStatus` · `RelationKindStatus` |
 | 정규화 | `src.domain.text_norm` | `normalize_text_key` |
+| 수치 | `src.domain.numeric` | `safe_float` |
 | 권한 | `src.registry.access_tier` | `project_ext_meta` · `principal_clearance` |
 | 권한 | `src.registry.ext_meta_field_registry` | `fetch_access_tiers` · `validate_ext_meta` |
 | 그래프 읽기 | `src.relations.graph_query` | `fetch_relations_for_asset` · `fetch_active_relations_for_asset` · `mm_meta_of_asset` · `mm_meta_bundle` |
+| 관계 정책 | `src.relations.approval_policy` | `TIER_ORDER` · `tier_rank` |
 | 관계 검토 | `src.relations.review` | `list_edges_for_review` · `list_relation_kinds` · `bulk_review` · `revise_edge` · `promote_relation_kind` |
 | 검색 | `src.search.search_service` | `search_hybrid` |
 | 검색 | `src.search.search_filters` | `SearchFilters` · `parse_search_filters` |

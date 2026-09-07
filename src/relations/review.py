@@ -21,6 +21,7 @@ from psycopg import Connection
 from psycopg.rows import dict_row
 
 from src.config.filename_util import display_file_name
+from src.domain.status_vocab import RelationKindStatus
 from src.relations.path_signal import like_escape  # LIKE 메타문자 이스케이프 공용(B9·SSOT)
 
 # 노출·전이가 허용되는 상태 셋. 검토 대기(proposed) · 승인(active) · 반려(rejected).
@@ -451,7 +452,8 @@ def promote_relation_kind(conn: Connection[Any], *, kind_code: str, reviewer: st
     _ = reviewer  # 향후 relation_kind.reviewed_by 컬럼 추가 시 여기에 저장
     with conn.cursor() as cur:
         cur.execute(
-            "UPDATE relation_kind SET status='active' WHERE kind_code=%s AND status='inactive'",
+            f"UPDATE relation_kind SET status='{RelationKindStatus.ACTIVE}'"
+            f" WHERE kind_code=%s AND status='{RelationKindStatus.INACTIVE}'",
             (kind_code,),
         )
         return cur.rowcount == 1
