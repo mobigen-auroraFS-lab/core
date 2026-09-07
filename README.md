@@ -131,6 +131,42 @@ scripts/        시드·게이트·측정 도구
 tests/          단위 테스트
 ```
 
+## 공개 API — 파이프라인·백엔드가 쓰는 계약면
+
+이 레포는 라이브러리라 **다른 레포가 import 하는 이름이 곧 계약**입니다. 아래 표에 있는 이름만 밖에서
+쓰십시오. 표에 없는 것, 특히 **밑줄(`_`)로 시작하는 이름은 내부 구현**이라 예고 없이 바뀝니다.
+표와 실제 코드가 어긋나면 `tests/test_public_api.py` 가 실패합니다(이름이 import 되는지 · 밑줄이 없는지 ·
+이 표에 적혀 있는지). 계약을 깨는 변경은 `CHANGELOG.md` 에 적고 태그의 MAJOR 를 올립니다.
+
+| 영역 | 모듈 | 이름 |
+|---|---|---|
+| 설정 | `src.config.settings` | `init_settings` · `get_current_settings` · `PipelineSettings` |
+| 상수 | `src.config.embedding_constants` | `FIX_EMBEDDING_DIMENSION` · `EMBEDDING_KIND_ST` · `EMBEDDING_KIND_CLIP` · `DEFAULT_CLIP_MODEL_NAME` |
+| 파일명 | `src.config.filename_util` | `basename_of` · `strip_asset_id_prefix` · `display_file_name` |
+| 검색 모달리티 | `src.config.search_modalities` | `VALID_SEARCH_MODALITIES` · `parse_modalities_csv` |
+| DB | `src.database.postgres_util` | `PostgresUtil` |
+| DB | `src.database.ids` | `uuid7` |
+| DB | `src.database.lineage_persist` | `record_lineage` |
+| 어휘 | `src.domain.status_vocab` | `AssetStatus` · `AccessTier` · `GraphEdgeStatus` · `RelationResolutionStatus` · `RegistryFieldStatus` · `MmSkillStatus` |
+| 정규화 | `src.domain.text_norm` | `normalize_text_key` |
+| 권한 | `src.registry.access_tier` | `project_ext_meta` · `principal_clearance` |
+| 권한 | `src.registry.ext_meta_field_registry` | `fetch_access_tiers` · `validate_ext_meta` |
+| 그래프 읽기 | `src.relations.graph_query` | `fetch_relations_for_asset` · `fetch_active_relations_for_asset` · `mm_meta_of_asset` · `mm_meta_bundle` |
+| 관계 검토 | `src.relations.review` | `list_edges_for_review` · `list_relation_kinds` · `bulk_review` · `revise_edge` · `promote_relation_kind` |
+| 검색 | `src.search.search_service` | `search_hybrid` |
+| 검색 | `src.search.search_filters` | `SearchFilters` · `parse_search_filters` |
+| 검색 | `src.search.search_tuning` | `SearchTuning` |
+| 검색 | `src.search.refine` | `refine_rows` · `refine_tokens` |
+| 검색 | `src.search.tag_facets` | `aggregate_tag_facets` · `normalize_tag_key` |
+| 주제 | `src.topic.asset_topic_query` | `fetch_asset_topic` · `find_same_topic_groups` · `list_topics` · `assets_in_topic` · `assets_unclassified` |
+| 멀티모달 메타 | `src.mm_meta.rules` | `MIN_BUNDLE_SIZE` |
+| 멀티모달 메타 | `src.mm_meta.persist` | `fetch_meta_type_vocab` |
+| 분류 스킬 | `src.mm_classify.persist` | `fetch_active_skills` |
+| LLM | `src.llm.client` | `get_llm_client` · `complete_text` · `complete_json` · `complete_vision_json` |
+
+> 표에 없는 이름이 필요하면 코어에 **함수 이름 · 도메인 용어 인자 · 반환 레코드** 로 요청하십시오.
+> 응답 페이징 모양·화면 문구·페이지 번호는 코어가 받지 않습니다(그 부분은 호출하는 레포의 몫입니다).
+
 ## 설계 제약
 
 - **학습 기반 방식을 쓰지 않습니다** — 학습·파인튜닝·지도학습·능동학습 없음. 사전학습 모델은 **추론 전용**으로만 사용합니다.
