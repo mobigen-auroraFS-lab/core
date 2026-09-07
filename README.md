@@ -145,10 +145,10 @@ tests/          단위 테스트
 
 | 영역 | 모듈 | 이름 |
 |---|---|---|
-| 설정 | `src.config.settings` | `init_settings` · `get_current_settings` · `PipelineSettings` |
+| 설정 | `src.config.settings` | `init_settings` · `get_current_settings` · `PipelineSettings` · `active_embed_channel` |
 | 설정 | `src.config.bootstrap` | `bootstrap_env` |
 | 상수 | `src.config.embedding_constants` | `FIX_EMBEDDING_DIMENSION` · `EMBEDDING_KIND_ST` · `EMBEDDING_KIND_CLIP` · `DEFAULT_CLIP_MODEL_NAME` |
-| 상수 | `src.config.search_constants` | `TAG_FACET_TOP_N_DEFAULT` · `TAG_FACET_MIN_COUNT_DEFAULT` |
+| 상수 | `src.config.search_constants` | `TAG_FACET_TOP_N_DEFAULT` · `TAG_FACET_MIN_COUNT_DEFAULT` · `ENTITY_INDEX_DEFAULT` |
 | 파일명 | `src.config.filename_util` | `basename_of` · `strip_asset_id_prefix` · `display_file_name` |
 | 검색 모달리티 | `src.config.search_modalities` | `VALID_SEARCH_MODALITIES` · `parse_modalities_csv` · `MODALITY_TO_BUCKET` · `BUCKET_TO_MODALITY` |
 | DB | `src.database.postgres_util` | `PostgresUtil` |
@@ -160,7 +160,7 @@ tests/          단위 테스트
 | 수치 | `src.domain.numeric` | `safe_float` |
 | 권한 | `src.registry.access_tier` | `project_ext_meta` · `principal_clearance` |
 | 권한 | `src.registry.ext_meta_field_registry` | `fetch_access_tiers` · `validate_ext_meta` |
-| 그래프 읽기 | `src.relations.graph_query` | `fetch_relations_for_asset` · `fetch_active_relations_for_asset` · `mm_meta_of_asset` · `mm_meta_bundle` |
+| 그래프 읽기 | `src.relations.graph_query` | `fetch_relations_for_asset` · `fetch_active_relations_for_asset` · `mm_meta_of_asset` · `mm_meta_bundle` · `list_entities` · `count_entities_by_type` · `count_entities_by_area` · `assets_of_entities` |
 | 관계 정책 | `src.relations.approval_policy` | `TIER_ORDER` · `tier_rank` |
 | 관계 검토 | `src.relations.review` | `list_edges_for_review` · `list_relation_kinds` · `bulk_review` · `revise_edge` · `promote_relation_kind` |
 | 검색 | `src.search.search_service` | `search_hybrid` |
@@ -169,10 +169,16 @@ tests/          단위 테스트
 | 검색 | `src.search.refine` | `refine_rows` · `refine_tokens` |
 | 검색 | `src.search.facets` | `aggregate_facets` |
 | 검색 | `src.search.tag_facets` | `aggregate_tag_facets` · `normalize_tag_key` |
+| 검색 | `src.search.query_embed` | `embed_query_for_media_search` |
+| 검색 | `src.search.opensearch_sync` | `get_client` |
+| 개체 검색 | `src.search.entity_search_os` | `search_entities_hybrid` |
+| 개체 검색 | `src.mm_meta.entity_search` | `split_query` · `match_entity_reason` · `narrow_entities` · `fuse_entity_results` · `gate_semantic_hits` · `entity_refine_fields` · `REASON_CODE_NAME` · `REASON_CODE_KEYWORD` · `REASON_CODE_DESCRIPTION` · `REASON_KEYWORD` · `REASON_DESCRIPTION` · `REASON_SEMANTIC` · `REASON_TEXT_MATCH` |
+| 개체 검색 | `src.mm_meta.entity_embedding` | `find_similar_entities` |
 | 주제 | `src.topic.asset_topic_query` | `fetch_asset_topic` · `find_same_topic_groups` · `list_topics` · `assets_in_topic` · `assets_unclassified` |
 | 멀티모달 메타 | `src.mm_meta.rules` | `MIN_BUNDLE_SIZE` |
 | 멀티모달 메타 | `src.mm_meta.persist` | `fetch_meta_type_vocab` |
 | 분류 스킬 | `src.mm_classify.persist` | `fetch_active_skills` |
+| 분류 스킬 | `src.mm_classify.read` | `label_names_of_assets` · `fetch_active_skills` |
 | LLM | `src.llm.client` | `get_llm_client` · `complete_text` · `complete_json` · `complete_vision_json` |
 
 > 표에 없는 이름이 필요하면 코어에 **함수 이름 · 도메인 용어 인자 · 반환 레코드** 로 요청하십시오.
