@@ -25,6 +25,7 @@ PUBLIC_API: dict[str, tuple[str, ...]] = {
         "FIX_EMBEDDING_DIMENSION", "EMBEDDING_KIND_ST", "EMBEDDING_KIND_CLIP", "DEFAULT_CLIP_MODEL_NAME",
     ),
     "src.config.filename_util": ("basename_of", "strip_asset_id_prefix", "display_file_name"),
+    "src.config.bootstrap": ("bootstrap_env",),
     "src.config.search_constants": ("TAG_FACET_TOP_N_DEFAULT", "TAG_FACET_MIN_COUNT_DEFAULT"),
     "src.config.search_modalities": (
         "VALID_SEARCH_MODALITIES", "parse_modalities_csv", "MODALITY_TO_BUCKET", "BUCKET_TO_MODALITY",

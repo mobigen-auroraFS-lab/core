@@ -84,6 +84,11 @@ OPENAI_API_KEY=          # 위 엔드포인트용 키(온프레미스면 임의�
 > `OPENAI_*` 라는 이름은 **OpenAI 호환 프로토콜**을 뜻합니다 — 외부 OpenAI 서비스가 아니라
 > 온프레미스 LLM 서버를 가리킵니다(설계 제약: 의료 데이터는 외부 LLM 호출 금지).
 
+> **백엔드(HTTP API)는 이 중 5개를 요구하지 않습니다.** `ENCODING`·`CHUNK_SIZE`·`OVERLAP_SIZE`·
+> `SUMMARY_MAX_CHARS`·`TOP_K_KEYWORDS` 는 적재(요약·청킹)만 읽는 값이라, 백엔드는 설정을 **서빙 역할**로
+> 초기화합니다 — `init_settings(env, role="serving")` 또는 `bootstrap_env(env, repo_root=<자기 루트>, role="serving")`.
+> 없으면 자리값이 들어가고 기동합니다. 파이프라인(적재)은 종전과 같이 11개 전부 필수입니다.
+
 ### 그 외
 
 | 변수 | 용도 |
@@ -141,6 +146,7 @@ tests/          단위 테스트
 | 영역 | 모듈 | 이름 |
 |---|---|---|
 | 설정 | `src.config.settings` | `init_settings` · `get_current_settings` · `PipelineSettings` |
+| 설정 | `src.config.bootstrap` | `bootstrap_env` |
 | 상수 | `src.config.embedding_constants` | `FIX_EMBEDDING_DIMENSION` · `EMBEDDING_KIND_ST` · `EMBEDDING_KIND_CLIP` · `DEFAULT_CLIP_MODEL_NAME` |
 | 상수 | `src.config.search_constants` | `TAG_FACET_TOP_N_DEFAULT` · `TAG_FACET_MIN_COUNT_DEFAULT` |
 | 파일명 | `src.config.filename_util` | `basename_of` · `strip_asset_id_prefix` · `display_file_name` |
@@ -211,9 +217,9 @@ python -m scripts.seed_topic_registry --env dev --apply
 
 ## 이 레포에 대해
 
-이 레포는 **내부 개발 레포에서 생성된 공개용 사본**입니다. 소스 코드·DB 스키마·테스트만 담고 있고,
-기획·설계 문서는 포함하지 않습니다.
+이 레포는 이 프로젝트의 **공개 개발 레포**입니다 — 소스는 여기서 직접 개발합니다(2026-08-06 이후). 코드·DB 스키마·
+테스트와 "어떻게 돌리나"(이 README)만 담고, **왜 이렇게 설계했나**(기획·설계 문서·설계 변경 이력·결정 기록)는
+별도 비공개 문서 레포에 있습니다. 그래서 커밋 메시지는 짧고, 근거는 `근거: 설계이력 YYYY-MM-DD` 한 줄로 그 문서를 가리킵니다.
 
-- **직접 커밋·PR 은 반영되지 않습니다** — 내용은 릴리스마다 내부 레포에서 다시 생성되어 덮어써집니다.
-  Issues 는 비활성화돼 있습니다.
+- 파이프라인·백엔드 레포는 이 레포의 git 태그(`vMAJOR.MINOR.PATCH`)를 기준으로 맞춥니다. 공개 API 변경은 `CHANGELOG.md` 에만 적습니다.
 - 문의는 과제 담당자에게 해주십시오.
