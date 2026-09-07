@@ -40,6 +40,7 @@ from unittest import mock
 
 import scripts.register_mm_meta_types as cli
 
+from src import mm_meta as _mm_meta_pkg  # noqa: F401  (패키지 초기화 순서 고정)
 from src.mm_classify.model import MM_META_TYPE_SKILL_CODE, NON_CLASSIFY_SKILL_CODES
 from src.mm_classify.persist import (
     DefinitionTable,
@@ -49,7 +50,6 @@ from src.mm_classify.persist import (
     upsert_definition_row,
     upsert_skill,
 )
-from src import mm_meta as _mm_meta_pkg  # noqa: F401  (패키지 초기화 순서 고정)
 from src.mm_meta import persist as vocab_persist
 from src.mm_meta.judge import interpret_response
 from src.mm_meta.persist import (

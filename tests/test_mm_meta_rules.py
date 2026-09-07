@@ -21,9 +21,9 @@ from collections.abc import Iterator, Mapping
 
 from src.domain.text_norm import normalize_text_key
 from src.mm_meta.rules import (
+    ENTITY_TYPE_DEFS,
     ENTITY_TYPE_ORDER,
     ENTITY_TYPES,
-    ENTITY_TYPE_DEFS,
     EXCLUDED_ENTITIES,
     MIN_BASE_LENGTH,
     RULE_VERSION,

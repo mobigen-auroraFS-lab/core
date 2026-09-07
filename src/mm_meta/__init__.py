@@ -51,13 +51,6 @@
 
 from __future__ import annotations
 
-from src.mm_meta.entity_label import (
-    DEFAULT_MEMBER_SUMMARIES,
-    EntityLabelError,
-    build_entity_material,
-    fetch_label_targets,
-    replace_entity_labels,
-)
 from src.mm_meta.describe import (
     DESC_PROMPT_VERSION,
     DESCRIPTION_KEY,
@@ -69,6 +62,13 @@ from src.mm_meta.describe import (
     build_description_prompt,
     describe_meta,
     interpret_description,
+)
+from src.mm_meta.entity_label import (
+    DEFAULT_MEMBER_SUMMARIES,
+    EntityLabelError,
+    build_entity_material,
+    fetch_label_targets,
+    replace_entity_labels,
 )
 from src.mm_meta.judge import (
     JUDGEMENT_KEY,
@@ -121,10 +121,10 @@ from src.mm_meta.rules import (
     EntityTypeDef,
     ExtractedEntity,
     apply_rules,
-    type_names,
     build_official_name_index,
     is_excluded_entity,
     is_stopped_keyword,
+    type_names,
 )
 
 __all__ = [

@@ -1,0 +1,88 @@
+# 코어 CI — 게이트 4종 + 소비자 스모크.
+#
+# 왜 소비자 스모크가 여기 있나: 코어는 라이브러리라 코어를 바꿔도 소비 레포(백엔드) CI 는 돌지 않는다.
+# 2026-08-05 에 실제로 겪었다 — 코어 계약을 바꿨는데 파이프 CI 는 다음 파이프 PR 이 열릴 때까지 조용했다.
+# 그래서 코어 PR 마다 백엔드 `main` 의 **DB 없는 단위 테스트**를 이 코어 체크아웃에 대해 돌린다.
+# 실패하면 "이 코어 변경이 백엔드를 깬다"는 뜻이고, 소비 레포 PR 을 같은 날 함께 열어야 한다.
+#
+# 파이프라인 소비자 스모크는 아직 없다 — 파이프 의존(airflow·opencv·whisper)이 무거워 별도 검토.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    name: 코어 게이트(ruff · 단위 테스트 · policy_gate · test_integrity · args_gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            constraints.txt
+      - name: 설치(CPU torch · constraints 고정)
+        run: |
+          python -m pip install --upgrade pip
+          pip install --extra-index-url https://download.pytorch.org/whl/cpu -e ".[migrate]" -c constraints.txt
+          pip install ruff
+      - name: ruff
+        run: ruff check src tests
+      - name: 단위 테스트(실 DB·OS 테스트는 자동 skip)
+        run: python -m unittest discover -s tests
+      - name: 게이트 — 헌법 불변식
+        run: python scripts/policy_gate.py
+      - name: 게이트 — 테스트 위조 방지
+        run: python scripts/test_integrity.py
+      - name: 게이트 — 파라미터 설명 누락
+        run: python scripts/args_gate.py
+
+  consumer-service:
+    name: 소비자 스모크 — 백엔드(main) 단위 테스트를 이 코어로
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: core
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            core/pyproject.toml
+            core/constraints.txt
+      - name: 백엔드 main 체크아웃(공개 레포)
+        run: git clone --depth 1 https://github.com/mobigen-auroraFS-lab/service.git service
+      - name: 설치(코어 → 백엔드)
+        run: |
+          python -m pip install --upgrade pip
+          pip install --extra-index-url https://download.pytorch.org/whl/cpu -e "./core[migrate]" -c core/constraints.txt
+          pip install -e ./service
+      - name: 백엔드 단위 테스트(DB·OS 없음 · 해당 테스트는 자동 skip)
+        working-directory: service
+        env:
+          PORTAL_AUTH_DISABLED: "1"
+          # 코어 설정 로더의 필수 11개 — 형식만 맞으면 된다(접속하지 않는다).
+          META_MODEL: dummy
+          ENCODING: utf-8
+          CHUNK_SIZE: "1000"
+          OVERLAP_SIZE: "100"
+          SUMMARY_MAX_CHARS: "500"
+          TOP_K_KEYWORDS: "10"
+          TEXT_EMBED_MODEL: dummy
+          TEXT_EMBED_CHUNK_SIZE: "512"
+          TEXT_EMBED_NORMALIZE: "true"
+          OPENAI_BASE_URL: http://localhost:1
+          OPENAI_API_KEY: dummy
+        run: python -m unittest discover -s tests

@@ -90,7 +90,6 @@ from src.mm_meta.describe import MEMBER_SUMMARY_MAX_CHARS
 from src.mm_meta.judge import PROMPT_VERSION
 from src.mm_meta.rules import (
     ENTITY_TYPE_DEFS,
-    ENTITY_TYPE_ORDER,
     ENTITY_TYPES,
     RULE_VERSION,
     EntityTypeDef,
