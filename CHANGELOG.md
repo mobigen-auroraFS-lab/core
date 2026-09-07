@@ -11,6 +11,15 @@
 | **MINOR** | 공개 API **추가** — 기존 호출은 그대로 동작 |
 | **PATCH** | 공개 API 무변경 — 내부 수정·버그 수정 |
 
+## [v0.4.0] — 2026-09-07 (093 5단계 · 설정 역할 · 소비 레포 부트스트랩)
+
+### 추가 (MINOR — 기존 호출 무변경)
+- `settings.init_settings(profile, *, role="processing")` — 설정 초기화 **역할**. `serving`(HTTP API)은 적재 전용 필수 env 5개(`ENCODING`·`CHUNK_SIZE`·`OVERLAP_SIZE`·`SUMMARY_MAX_CHARS`·`TOP_K_KEYWORDS`)가 없어도 자리값으로 기동. 기본 `processing` 은 종전과 같다.
+- `bootstrap.bootstrap_env(env, *, repo_root=None, role="processing")` — 공개 API 표에 등재. 소비 레포가 `repo_root=` 로 자기 `.env` 를 읽고 `role=` 로 역할을 고른다. 인자 없는 호출은 종전과 같다.
+
+### 문서
+- README 「이 레포에 대해」를 공개 우선 개발(2026-08-06) 이후 사실에 맞게 고침. `.env.example` 에서 백엔드 전용 절을 빼고 보관 경로 설명을 정정(백엔드는 DB `fs_path` 를 읽음).
+
 ## [v0.3.0] — 2026-09-07 (093 2단계 · 검색 손잡이 · 패싯 집계 정본)
 
 ### 추가 (MINOR — 기존 호출 무변경)

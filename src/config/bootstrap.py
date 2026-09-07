@@ -19,6 +19,11 @@
 (`docs/과제_책무_KPI.md`). 이 주석은 그 어긋남을 숨기지 않기 위해 남긴다 — 문서가 금지한 것을 코드가 하고
 있으면 다음 사람이 어느 쪽이 맞는지 알 수 없다.
 
+**093 5단계(2026-09-07)**: 소비 레포가 이 함수를 **자기 루트로** 쓸 수 있게 ``repo_root=`` 를 받고, 설정을
+어느 역할로 초기화할지 ``role=`` 을 받는다(``serving`` 은 적재 전용 필수값 면제). 백엔드는
+``bootstrap_env(env, repo_root=<백엔드 루트>, role="serving")`` 한 줄로 바뀌어 자체 복사본이 얇아졐다.
+파이프 진입점은 여전히 인자 없이 부른다(코어 루트 폴백 · 동작 불변).
+
 **탐색 위치 2곳**(2026-08-05 추가): ``.env.{env}`` 를 **작업 디렉터리 → 코어 레포 루트** 순으로 찾는다.
 작업 디렉터리를 앞에 둔 이유는 ``_REPO_ROOT`` 가 **비-editable 설치에서 레포 루트가 아니기 때문**이다 —
 ``pip install .`` 로 깔면 이 파일이 ``site-packages/src/config/bootstrap.py`` 가 되어 ``parents[2]`` 는
@@ -37,7 +42,7 @@ from typing import Literal
 
 from dotenv import load_dotenv
 
-from src.config.settings import PipelineSettings, init_settings
+from src.config.settings import PipelineSettings, Role, init_settings
 
 # src/config/bootstrap.py → parents[2] = **코어 레포 루트**. 코어 내부 호출자에겐 이 한 줄이 유일 출처
 # (진입점별 parents[N] 분산 제거)다. ※ 소비 레포(파이프/백엔드)는 이 값을 재사용하지 말 것 — 설치된 코어
@@ -45,7 +50,9 @@ from src.config.settings import PipelineSettings, init_settings
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def _dotenv_candidates(env: Literal["dev", "prod"]) -> tuple[Path, ...]:
+def _dotenv_candidates(
+    env: Literal["dev", "prod"], repo_root: Path | None = None
+) -> tuple[Path, ...]:
     """``.env.{env}`` 탐색 후보를 **우선순위 순서**로 돌려준다.
 
     작업 디렉터리를 먼저 보는 이유는 모듈 docstring 참조(비-editable 설치에서 ``_REPO_ROOT`` 가
@@ -53,15 +60,23 @@ def _dotenv_candidates(env: Literal["dev", "prod"]) -> tuple[Path, ...]:
 
     Args:
         env: 설정 프로파일(``dev``·``prod``). 파일명 접미사가 된다.
+        repo_root: 두 번째 후보로 볼 레포 루트. ``None`` 이면 코어 레포 루트(종전과 같음). 소비 레포는
+            자기 루트를 넘겨 **자기** ``.env`` 를 읽는다.
 
     Returns:
         탐색할 경로 튜플. 존재 여부는 호출자가 확인한다(첫 번째로 존재하는 것만 로드).
     """
-    return (Path.cwd() / f".env.{env}", _REPO_ROOT / f".env.{env}")
+    root = _REPO_ROOT if repo_root is None else Path(repo_root)
+    return (Path.cwd() / f".env.{env}", root / f".env.{env}")
 
 
-def bootstrap_env(env: Literal["dev", "prod"]) -> PipelineSettings:
-    """``.env.{env}`` 로드 후 ``init_settings(env)`` 로 설정을 초기화하고 그 frozen 설정을 돌려준다.
+def bootstrap_env(
+    env: Literal["dev", "prod"],
+    *,
+    repo_root: Path | None = None,
+    role: Role = "processing",
+) -> PipelineSettings:
+    """``.env.{env}`` 로드 후 ``init_settings(env, role=)`` 로 설정을 초기화하고 그 frozen 설정을 돌려준다.
 
     운영 진입점(CLI ``main()``·포탈 lifespan)의 표준 부트스트랩 순서다:
     1) ``.env.{env}`` 를 **작업 디렉터리 → 코어 레포 루트** 순으로 찾아 **처음 발견한 하나만**
@@ -73,12 +88,15 @@ def bootstrap_env(env: Literal["dev", "prod"]) -> PipelineSettings:
 
     Args:
         env: 설정 프로파일(``dev``·``prod``).
+        repo_root: ``.env`` 를 찾을 레포 루트(작업 디렉터리 다음 후보). ``None`` 이면 코어 레포 루트.
+            소비 레포(백엔드 등)는 자기 루트를 넘긴다 — 그래야 코어의 ``.env`` 가 아니라 자기 것을 읽는다.
+        role: 설정 초기화 역할. ``processing``(기본 · 적재)·``serving``(HTTP API — 적재 전용 필수값 면제).
 
     Returns:
         ``init_settings`` 가 만든 frozen 설정.
     """
-    for dotenv_path in _dotenv_candidates(env):
+    for dotenv_path in _dotenv_candidates(env, repo_root):
         if dotenv_path.is_file():
             load_dotenv(dotenv_path=dotenv_path, override=False)
             break  # 두 곳에 다 있으면 앞선 것(작업 디렉터리)만 쓴다 — 병합하지 않는다
-    return init_settings(env)
+    return init_settings(env, role=role)

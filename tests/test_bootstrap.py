@@ -54,14 +54,14 @@ class TestBootstrapEnv(unittest.TestCase):
         m_load.assert_called_once()
         self.assertEqual(m_load.call_args.kwargs.get("dotenv_path"), root / ".env.dev")
         self.assertIs(m_load.call_args.kwargs.get("override"), False)  # OS 기존 환경변수 우선 보존
-        m_init.assert_called_once_with("dev")
+        m_init.assert_called_once_with("dev", role="processing")
         self.assertIs(out, sentinel)  # bootstrap_env 는 init_settings 결과를 그대로 돌려준다
 
     def test_skips_dotenv_when_absent_but_still_inits(self) -> None:
         # 두 곳 모두 부재(컨테이너 환경변수 직접 주입 등) → load_dotenv 미호출·init_settings 는 여전히 검증.
         out, sentinel, m_load, m_init, _cwd, _root = self._run(cwd_has_env=False, root_has_env=False)
         m_load.assert_not_called()
-        m_init.assert_called_once_with("dev")
+        m_init.assert_called_once_with("dev", role="processing")
         self.assertIs(out, sentinel)
 
     def test_cwd_dotenv_is_found_when_repo_root_has_none(self) -> None:
@@ -70,7 +70,7 @@ class TestBootstrapEnv(unittest.TestCase):
         _out, _s, m_load, m_init, cwd, _root = self._run(cwd_has_env=True, root_has_env=False)
         m_load.assert_called_once()
         self.assertEqual(m_load.call_args.kwargs.get("dotenv_path"), cwd / ".env.dev")
-        m_init.assert_called_once_with("dev")
+        m_init.assert_called_once_with("dev", role="processing")
 
     def test_cwd_wins_when_both_exist_and_only_one_is_loaded(self) -> None:
         # 두 곳에 다 있으면 **작업 디렉터리 것 하나만** 쓴다(병합하지 않는다 — 어느 값이 이겼는지
@@ -86,6 +86,39 @@ class TestBootstrapEnv(unittest.TestCase):
         self.assertEqual(len(got), 2)
         self.assertEqual(got[0], Path(d).resolve() / ".env.prod")
         self.assertEqual(got[1], bootstrap._REPO_ROOT / ".env.prod")
+
+
+class TestBootstrapForConsumerRepos(unittest.TestCase):
+    """093 5단계 — 소비 레포가 ``repo_root=``·``role=`` 로 이 함수를 자기 것처럼 쓴다."""
+
+    def test_repo_root_replaces_core_root_as_second_candidate(self) -> None:
+        # 자기 루트를 넘기면 두 번째 후보가 코어 루트가 아니라 그 루트다(첫 후보 = 작업 디렉터리는 그대로).
+        with tempfile.TemporaryDirectory() as d, contextlib.chdir(d):
+            other = Path(d).resolve() / "svc"
+            got = bootstrap._dotenv_candidates("dev", other)
+        self.assertEqual(got, (Path(d).resolve() / ".env.dev", other / ".env.dev"))
+
+    def test_consumer_dotenv_is_loaded_and_role_forwarded(self) -> None:
+        # 백엔드 호출 모양: 코어 .env 가 아니라 **백엔드 루트의 .env** 를 읽고, 역할은 init_settings 로 그대로 간다.
+        sentinel = object()
+        with tempfile.TemporaryDirectory() as d_cwd, tempfile.TemporaryDirectory() as d_svc:
+            cwd, svc = Path(d_cwd).resolve(), Path(d_svc).resolve()
+            (svc / ".env.dev").write_text("Z=3\n", encoding="utf-8")
+            with (
+                contextlib.chdir(cwd),
+                mock.patch.object(bootstrap, "load_dotenv") as m_load,
+                mock.patch.object(bootstrap, "init_settings", return_value=sentinel) as m_init,
+            ):
+                out = bootstrap.bootstrap_env("dev", repo_root=svc, role="serving")
+        self.assertEqual(m_load.call_args.kwargs.get("dotenv_path"), svc / ".env.dev")
+        m_init.assert_called_once_with("dev", role="serving")
+        self.assertIs(out, sentinel)
+
+    def test_default_call_shape_is_unchanged(self) -> None:
+        # 인자 없이 부르면(파이프 진입점) 종전과 같이 코어 루트 폴백 + processing 역할.
+        with tempfile.TemporaryDirectory() as d, contextlib.chdir(d):
+            got = bootstrap._dotenv_candidates("dev")
+        self.assertEqual(got[1], bootstrap._REPO_ROOT / ".env.dev")
 
 
 if __name__ == "__main__":

@@ -226,6 +226,25 @@ class PipelineSettings:
 
 _SETTINGS: PipelineSettings | None = None
 
+# ── 093 5단계 — 설정을 초기화하는 **역할** ────────────────────────────────────
+# processing(적재·파이프라인)은 종전과 완전히 같다. serving(HTTP API)은 적재 전용 필수값을 요구하지 않는다 —
+# 백엔드 서버가 텍스트 청킹 크기 같은 값을 몰라도 떠야 하기 때문이다(감사 C3 · ADR 2026-09-02 §8 5단계).
+Role = Literal["processing", "serving"]
+_ROLES: tuple[str, ...] = ("processing", "serving")
+
+# 서빙이 읽지 않는 적재 전용 **필수** 필드와 그 자리값. 코어 요약기 3종(text/image/video)과 파이프 텍스트
+# 스킬만 읽고 백엔드 코드는 참조하지 않는다(2026-09-07 grep 실측 · 감사의 "4개 추정"은 5개로 정정).
+# 서빙 역할에서 env 가 비어 있으면 이 값이 들어간다 — 값은 `.env.example` 의 기본과 같게 유지한다
+# (test_settings_role 이 봉인). 서빙 경로에서 이 자리값이 실제로 읽힌다면 그것은 적재 코드를 서빙에서 부른
+# 경계 위반이다.
+_SERVING_EXEMPT_DEFAULTS: dict[str, Any] = {
+    "encoding": "utf-8",
+    "summary_max_chars": 500,
+    "top_k_keywords": 10,
+    "chunk_size": 1000,
+    "overlap_size": 100,
+}
+
 
 def _require_env(name: str) -> str:
     """**필수** 환경변수를 읽는다 — 없거나 비어 있으면 기동을 멈춘다.
@@ -854,25 +873,49 @@ _FIELD_SPECS: tuple[_Spec, ...] = (
 )
 
 
-def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
+def _read_spec(spec: _Spec, role: Role) -> Any:
+    """필드 표 한 행을 **역할에 맞게** 읽는다.
+
+    서빙 역할이고 적재 전용 필수 필드인데 env 가 비어 있으면 자리값(``_SERVING_EXEMPT_DEFAULTS``)을 쓴다.
+    그 외 — 처리 역할이거나, 서빙이라도 값이 주어져 있으면 — ``spec.read`` 그대로라 형식 검증도 종전과 같다.
+
+    Args:
+        spec: 필드 표의 한 행.
+        role: 설정을 초기화하는 역할.
+
+    Returns:
+        읽은 값(또는 서빙 자리값).
+    """
+    if role == "serving" and spec.group == "" and spec.attr in _SERVING_EXEMPT_DEFAULTS:
+        raw = os.getenv(spec.env)
+        if raw is None or not raw.strip():
+            return _SERVING_EXEMPT_DEFAULTS[spec.attr]
+    return spec.read(spec.env)
+
+
+def _build_settings(profile: Literal["dev", "prod"], role: Role = "processing") -> PipelineSettings:
     """환경변수를 읽어 설정 객체를 조립한다.
 
     필드 표(``_FIELD_SPECS``)를 그룹별로 모아 하위 설정부터 만들고 마지막에 전체를 조립한다 —
     필드가 표 한 줄로 선언되므로 env 키·기본값·검증이 한곳에 모인다.
-    ``profile`` 만 환경변수가 아니라 인자로 받는다(어느 환경으로 띄울지는 호출자가 정한다).
+    ``profile``·``role`` 만 환경변수가 아니라 인자로 받는다(어느 환경·어느 역할로 띄울지는 호출자가 정한다).
 
     Args:
         profile: ``dev`` 또는 ``prod``.
+        role: ``processing``(기본 · 적재 — 필수 11개 전부 요구) 또는 ``serving``(HTTP API — 적재 전용 5개는
+            없어도 자리값으로 기동). 모르는 값은 예외.
 
     Returns:
         조립된 설정 객체.
 
     Raises:
-        ValueError: 필수 환경변수 누락·형식 오류·설정 간 모순.
+        ValueError: 필수 환경변수 누락·형식 오류·설정 간 모순·모르는 역할.
     """
+    if role not in _ROLES:
+        raise ValueError(f"알 수 없는 설정 역할: {role!r} (허용: {', '.join(_ROLES)})")
     by_group: dict[str, dict[str, Any]] = {}
     for spec in _FIELD_SPECS:
-        by_group.setdefault(spec.group, {})[spec.attr] = spec.read(spec.env)
+        by_group.setdefault(spec.group, {})[spec.attr] = _read_spec(spec, role)
     common = by_group.pop("", {})
     groups = {name: cls(**by_group[name]) for name, cls in _GROUP_CLASSES.items()}
     settings = PipelineSettings(profile=profile, **common, **groups)
@@ -882,7 +925,7 @@ def _build_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
     return settings
 
 
-def init_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
+def init_settings(profile: Literal["dev", "prod"], *, role: Role = "processing") -> PipelineSettings:
     """설정을 만들어 **프로세스 전역에 고정**한다 — 실행 진입점이 가장 먼저 부른다.
 
     이후 어디서든 ``get_current_settings()`` 가 같은 객체를 돌려준다. 한 프로세스가 도중에 다른
@@ -890,12 +933,14 @@ def init_settings(profile: Literal["dev", "prod"]) -> PipelineSettings:
 
     Args:
         profile: ``dev`` 또는 ``prod``.
+        role: ``processing``(기본 · 종전과 같음) 또는 ``serving``(HTTP API — 적재 전용 필수값 5개 면제 ·
+            093 5단계). 파이프라인은 인자를 주지 않고, 백엔드는 ``serving`` 을 준다.
 
     Returns:
         확정된 설정 객체.
     """
     global _SETTINGS
-    _SETTINGS = _build_settings(profile)
+    _SETTINGS = _build_settings(profile, role)
     return _SETTINGS
 
 
