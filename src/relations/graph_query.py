@@ -386,7 +386,374 @@ def mm_meta_bundle(
         "entity_uid": uid,
         "name": str(node["name"] or uid),
         "source": str(canonical.get("source") or "auto"),
+        # 생성 설명(있으면). 카드가 쓰는 값인데 종전엔 없어 소비자가 node 를 한 번 더 읽었다(095 · 질의 1회 절약).
+        "description": (canonical.get("description") or None),
         "total": len(rows),
         "modalities": [{"modality": m, "count": len(items), "assets": items}
                        for m, items in groups.items()],
     }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 095 개체(멀티모달 메타) 화면 seam — 데모 라우트의 직접 SQL 네 덩어리를 코어로 올린 것.
+#
+# 왜 여기인가(093 세 질문 ③): 전부 ``graph_edge`` 를 읽는 질의라 잘못 짜면 조용히 틀린다 — 상태 필터를
+# 빠뜨리면 거절된 소속이 세어지고, DISTINCT 를 빠뜨리면 라벨이 여러 개인 자산이 두 번 세어진다. 그래서
+# 백엔드는 이 함수들을 부르기만 하고 SQL 을 갖지 않는다. 응답 모양(키 이름·문구·상위 N 절단)은 백엔드 몫.
+#
+# "노출 개체" 의 정의는 네 함수가 같다: node_kind='entity' · 소속(mm_member) 엣지 · 상태 active+proposed(기본)
+# · 구성 자산(DISTINCT src) 수 ≥ ``min_bundle_size``. 임계값 자체는 호출자가 준다(화면 정책 — 목록은 3,
+# 갈래 필터 시 2 처럼 갈릴 수 있다 · spec 095 §6). 조건식은 데모와 글자까지 같게 두어 응답이 바뀌지 않는다.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# 갈래(개체 라벨) AND 필터 — "고른 갈래 이름을 **모두** 가진 개체". 라벨 이름의 정본은 ``mm_skill.labels`` 다
+# (코드→이름 표를 소비자가 들고 있지 않게). 이름이 스킬마다 겹칠 수 있어 COUNT(DISTINCT 이름) 으로 센다.
+_ENTITY_AREA_FILTER_SQL = """
+      (%(areas)s::text[] IS NULL OR EXISTS (
+            SELECT 1
+              FROM entity_mm_skill_label el
+              JOIN mm_skill es ON es.skill_code = el.skill_code
+              CROSS JOIN LATERAL jsonb_array_elements(es.labels) AS elb
+             WHERE el.entity_type = {alias}.entity_type
+               AND el.entity_uid = {alias}.entity_uid
+               AND (elb->>'code') = el.label_code
+               AND (elb->>'name') = ANY(%(areas)s)
+             GROUP BY el.entity_type, el.entity_uid
+            HAVING COUNT(DISTINCT (elb->>'name')) = %(area_n)s))
+"""
+
+# 노출 개체 집합(공통 CTE 본문). ``{type_cond}``·``{area_cond}`` 자리에 조건을 끼운다 — 같은 조각을 축마다
+# **다른 조건으로** 쓰기 때문이다(종류 칩은 조건 없이 · 갈래 칩은 종류+갈래 적용 · spec 087 2차 정정).
+_EXPOSED_ENTITIES_SQL = """
+    SELECT n.entity_type, n.entity_uid, n.node_id
+      FROM node n
+      JOIN graph_edge ge    ON ge.dst_node = n.node_id
+      JOIN relation_kind rk ON rk.relation_kind_id = ge.relation_kind_id
+     WHERE n.node_kind = 'entity' AND rk.kind_code = %(kind)s
+       AND ge.status = ANY(%(statuses)s)
+       {type_cond}
+       {area_cond}
+     GROUP BY n.entity_type, n.entity_uid, n.node_id
+    HAVING COUNT(DISTINCT ge.src_node) >= %(minsize)s
+"""
+_TYPE_COND_SQL = "AND (%(etype)s::text IS NULL OR n.entity_type = %(etype)s)"
+
+_LIST_ENTITIES_SQL = """
+SELECT n.entity_type, n.entity_uid, n.node_id,
+       COALESCE(n.canonical->>'name', n.entity_uid) AS name,
+       COALESCE(n.canonical->>'source', 'auto')     AS source,
+       n.canonical->>'description'                  AS description,
+       COUNT(DISTINCT ge.src_node)                  AS confirmed_count,
+       -- 이 개체에 묶인 **전량**(종류·갈래 필터와 무관). 화면이 "이 갈래 5건 / 전체 6건"을 함께 보인다
+       -- (2026-08-27 개념 감사 — 자산 라벨로 좁히면 한 개체가 갈래마다 쪼개져 카드 5건·상세 6건이 됐다).
+       (SELECT COUNT(DISTINCT ge2.src_node)
+          FROM graph_edge ge2
+          JOIN relation_kind rk2 ON rk2.relation_kind_id = ge2.relation_kind_id
+         WHERE ge2.dst_node = n.node_id
+           AND rk2.kind_code = %(kind)s
+           AND ge2.status = ANY(%(statuses)s))       AS total_count,
+       ARRAY_AGG(DISTINCT a.modality)               AS modalities,
+       -- 근거 키워드 = 소속 엣지 reason 의 kw= 값(어떤 낱말로 묶였나) — 새 LLM 호출 없이 저장된 사실만 모은다.
+       ARRAY_AGG(DISTINCT substring(ge.reason from 'kw=([^|]*)'))
+           FILTER (WHERE ge.reason IS NOT NULL)     AS keywords,
+       ARRAY_AGG(DISTINCT t.topic_ko)
+           FILTER (WHERE t.topic_ko IS NOT NULL)    AS topics,
+       -- 형식 축(085 자산 라벨) 이름. 자산 하나가 라벨 여러 개를 가질 수 있어 합이 자산 수보다 클 수 있다.
+       ARRAY_AGG(DISTINCT fl.form_name)
+           FILTER (WHERE fl.form_name IS NOT NULL)  AS forms,
+       -- 갈래 = **대상에 붙은** 라벨(spec 087). 자산 라벨(forms)과 층이 다르다 — 좁혀도 대상이 쪼개지지 않는다.
+       (SELECT ARRAY_AGG(DISTINCT (elb->>'name') ORDER BY (elb->>'name'))
+          FROM entity_mm_skill_label el
+          JOIN mm_skill es ON es.skill_code = el.skill_code
+          CROSS JOIN LATERAL jsonb_array_elements(es.labels) AS elb
+         WHERE el.entity_type = n.entity_type
+           AND el.entity_uid = n.entity_uid
+           AND (elb->>'code') = el.label_code
+           AND el.label_code <> 'unassigned')          AS areas
+  FROM node n
+  JOIN graph_edge ge    ON ge.dst_node = n.node_id
+  JOIN relation_kind rk ON rk.relation_kind_id = ge.relation_kind_id
+  JOIN node sn          ON sn.node_id = ge.src_node
+  JOIN asset a          ON a.asset_id = sn.asset_id
+  LEFT JOIN asset_topic t ON t.asset_id = sn.asset_id
+  LEFT JOIN (
+        SELECT l.asset_id, (lb->>'name') AS form_name
+          FROM asset_mm_skill_label l
+          JOIN mm_skill s ON s.skill_code = l.skill_code
+          CROSS JOIN LATERAL jsonb_array_elements(s.labels) AS lb
+         WHERE l.skill_code = ANY(%(form_skills)s)
+           AND (lb->>'code') = l.label_code
+       ) fl ON fl.asset_id = sn.asset_id
+ WHERE n.node_kind = 'entity'
+   AND rk.kind_code = %(kind)s
+   AND ge.status = ANY(%(statuses)s)
+   AND (%(etype)s::text IS NULL OR n.entity_type = %(etype)s)
+   AND {area_filter}
+ -- node_id 를 함께 묶는다: 전체 건수 서브쿼리가 이 컬럼을 참조한다. 그룹이 쪼개질 위험은 없다 —
+ -- uq_node_entity(entity_type, entity_uid) 가 개체마다 node_id 1개를 보장한다.
+ GROUP BY n.node_id, n.entity_type, n.entity_uid, n.canonical
+HAVING COUNT(DISTINCT ge.src_node) >= %(minsize)s
+ ORDER BY confirmed_count DESC, n.entity_uid ASC
+ LIMIT %(limit)s
+"""
+
+_COUNT_BY_TYPE_SQL = """
+SELECT t.entity_type, COUNT(*) AS n
+  FROM ({exposed}) t
+ GROUP BY t.entity_type
+ ORDER BY t.entity_type
+"""
+
+# 갈래(개체 라벨)별 노출 개체 수. **0건 라벨도 돌려준다**(커버리지 갭 신호 — 감추는 것은 화면 몫).
+# ⚠️ LEFT JOIN + COUNT(DISTINCT (a,b)) 는 쓰지 않는다 — 매칭이 없을 때 (NULL,NULL) 복합값이 1로 세어져
+#    0건 라벨이 전부 1건으로 나왔다(2026-08-27 실측 함정). 그래서 hit 를 따로 세고 LEFT JOIN 한다.
+_COUNT_BY_AREA_SQL = """
+WITH ex AS ({exposed}),
+lab AS (
+    SELECT s.skill_code, s.name AS skill,
+           (lb->>'code') AS code, (lb->>'name') AS name, ord
+      FROM mm_skill s,
+           LATERAL jsonb_array_elements(s.labels) WITH ORDINALITY AS t(lb, ord)
+     WHERE s.status = 'active' AND s.skill_code <> ALL(%(reserved)s)
+),
+hit AS (
+    SELECT el.skill_code, el.label_code, COUNT(*) AS n
+      FROM (
+        SELECT DISTINCT el2.skill_code, el2.label_code, el2.entity_type, el2.entity_uid
+          FROM entity_mm_skill_label el2
+          JOIN ex ON ex.entity_type = el2.entity_type AND ex.entity_uid = el2.entity_uid
+      ) el
+     GROUP BY 1, 2
+)
+SELECT lab.name, lab.skill, lab.skill_code, COALESCE(hit.n, 0) AS n
+  FROM lab
+  LEFT JOIN hit ON hit.skill_code = lab.skill_code AND hit.label_code = lab.code
+ WHERE lab.code <> 'unassigned'
+ ORDER BY n DESC, lab.skill_code, lab.ord
+"""
+
+_ASSETS_OF_ENTITIES_SQL = """
+WITH picked AS ({exposed})
+SELECT DISTINCT a.asset_id::text AS asset_id, a.modality, a.fs_path,
+       COALESCE(a.file_size, 0) AS file_size
+  FROM picked
+  JOIN graph_edge ge    ON ge.dst_node = picked.node_id
+  JOIN relation_kind rk ON rk.relation_kind_id = ge.relation_kind_id
+  JOIN node sn          ON sn.node_id = ge.src_node
+  JOIN asset a          ON a.asset_id = sn.asset_id
+ WHERE rk.kind_code = %(kind)s AND ge.status = ANY(%(statuses)s)
+   AND a.status = 'registered'
+   AND (NOT %(exclude_video)s OR a.modality <> 'video')
+ -- DISTINCT 와 함께 쓰므로 정렬 키는 선택 목록의 컬럼이어야 한다(첫 컬럼 = asset_id 문자열).
+ -- 데모 SQL 은 여기서 `a.asset_id` 로 정렬해 PG17 이 거부했다(정식화 중 발견한 데모 결함).
+ ORDER BY 1
+"""
+
+
+def _area_params(area_names: list[str] | None) -> dict[str, Any]:
+    """갈래 필터 바인딩 — 이름 목록과 그 고유 개수(AND 판정용).
+
+    Args:
+        area_names: 고른 갈래 이름들. ``None``·빈 목록이면 필터 없음(``areas`` 를 ``None`` 으로 묶는다).
+
+    Returns:
+        ``{"areas": 목록 또는 None, "area_n": 고유 개수}``.
+    """
+    names = [str(n) for n in (area_names or []) if str(n).strip()]
+    return {"areas": names or None, "area_n": len(set(names))}
+
+
+def _sorted_strs(values: Any) -> list[str]:
+    """배열 컬럼을 **빈 값 제거 · 문자열 · 가나다 순**의 리스트로 만든다(결정적 순서).
+
+    Args:
+        values: SQL ``ARRAY_AGG`` 결과(``None`` 가능).
+
+    Returns:
+        정렬된 문자열 리스트.
+    """
+    return sorted(str(v) for v in (values or []) if v)
+
+
+def list_entities(
+    conn: Connection[Any],
+    *,
+    entity_type: str | None = None,
+    area_names: list[str] | None = None,
+    min_bundle_size: int,
+    limit: int,
+    statuses: list[str] | None = None,
+    form_skill_codes: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """노출 개체(멀티모달 메타) **목록**을 구성 자산 수 내림차순으로 조회한다(읽기 전용 · 095 FR-1).
+
+    개체 화면의 카드 그리드가 쓰는 재료다. 카드 한 장에 필요한 사실을 한 질의로 모은다 — 이름·출처·생성
+    설명·구성 자산 수(필터 안)·전체 자산 수(필터 무관)·모달리티·근거 키워드·주제·형식 라벨·갈래.
+    새 LLM 호출은 없다(저장된 사실의 집계).
+
+    Args:
+        entity_type: 종류(타입) 필터. ``None`` 이면 전체.
+        area_names: 갈래(개체 라벨) 이름들 — **모두 가진** 개체만(AND). ``None``·빈 목록이면 필터 없음.
+        min_bundle_size: 노출 임계 — 구성 자산 수가 이 값 이상인 개체만. 값은 호출자(화면 정책)가 정한다.
+        limit: 최대 개체 수(구성 자산 수 상위). 검색·좁히기 **전** 집계 상한이다.
+        statuses: 소속 엣지 상태. ``None`` 이면 active+proposed(초기엔 전건 proposed 라 빼면 화면이 빈다).
+        form_skill_codes: 형식 축(``forms``)으로 읽을 자산 라벨 스킬 코드들. ``None``·빈 목록이면 ``forms``
+            는 빈 리스트다. 어느 스킬을 형식 축으로 보이나는 화면 정책이라 호출자가 준다(데모는 ``content_form`` 하나).
+
+    Returns:
+        ``[{entity_type, entity_uid, node_id, name, source, description, confirmed_count, total_count,
+        modalities, keywords, topics, forms, areas}]`` — 구성 자산 수 내림차순 → 표기 키 오름차순.
+        배열 필드는 빈 값을 뺀 **가나다 순**이다(같은 입력이면 같은 순서 · 헌법 3조). ``keywords`` 는 원문
+        **전부**다 — 상위 몇 개를 어떤 순서로 보일지는 호출자 몫. id 는 전부 문자열.
+    """
+    params = {
+        "kind": MM_MEMBER_KIND_CODE,
+        "statuses": _wanted_statuses(statuses),
+        "etype": entity_type,
+        "minsize": int(min_bundle_size),
+        "limit": int(limit),
+        "form_skills": [str(c) for c in (form_skill_codes or [])],
+        **_area_params(area_names),
+    }
+    sql = _LIST_ENTITIES_SQL.format(area_filter=_ENTITY_AREA_FILTER_SQL.format(alias="n"))
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(sql, params)
+        rows = cur.fetchall()
+    return [
+        {
+            "entity_type": str(r["entity_type"]),
+            "entity_uid": str(r["entity_uid"]),
+            "node_id": str(r["node_id"]),
+            "name": str(r["name"]),
+            "source": str(r["source"]),
+            "description": (r["description"] or None),
+            "confirmed_count": int(r["confirmed_count"]),
+            "total_count": int(r["total_count"]),
+            "modalities": _sorted_strs(r["modalities"]),
+            "keywords": _sorted_strs(r["keywords"]),
+            "topics": _sorted_strs(r["topics"]),
+            "forms": _sorted_strs(r["forms"]),
+            "areas": [str(x) for x in (r["areas"] or []) if x],  # SQL 이 이미 이름순
+        }
+        for r in rows
+    ]
+
+
+def count_entities_by_type(
+    conn: Connection[Any], *, min_bundle_size: int, statuses: list[str] | None = None
+) -> dict[str, int]:
+    """종류(타입)별 **노출 개체 수**(읽기 전용 · 095 FR-1).
+
+    종류 칩·타입 어휘 화면이 쓴다. **아무 필터도 걸지 않는다** — 종류는 좁히는 축이 아니라 갈아타는 축이라
+    "이 종류로 갈아타면 몇 개"가 필요하다(spec 087 2차 정정: 갈래 조건을 적용하면 갈아탈 칩이 0건으로 사라졌다).
+
+    Args:
+        min_bundle_size: 노출 임계(구성 자산 수 하한).
+        statuses: 소속 엣지 상태. ``None`` 이면 active+proposed.
+
+    Returns:
+        ``{entity_type: 개체 수}`` — 타입 이름 오름차순 삽입. 어휘에 있으나 개체가 없는 타입은 키가 없다
+        (0 으로 채우는 것은 어휘를 아는 호출자 몫).
+    """
+    params = {"kind": MM_MEMBER_KIND_CODE, "statuses": _wanted_statuses(statuses),
+              "minsize": int(min_bundle_size)}
+    exposed = _EXPOSED_ENTITIES_SQL.format(type_cond="", area_cond="")
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(_COUNT_BY_TYPE_SQL.format(exposed=exposed), params)
+        rows = cur.fetchall()
+    return {str(r["entity_type"]): int(r["n"]) for r in rows}
+
+
+def count_entities_by_area(
+    conn: Connection[Any],
+    *,
+    entity_type: str | None = None,
+    area_names: list[str] | None = None,
+    min_bundle_size: int,
+    statuses: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """갈래(개체 라벨)별 **노출 개체 수** — 고른 종류와 이미 고른 갈래를 적용한 뒤 센다(095 FR-1).
+
+    갈래 칩이 쓴다. 갈래는 다중 선택·AND 라 "이 칩을 더 누르면 몇 개가 되나"가 맞는 숫자다(더할수록
+    좁아진다). 그래서 종류 조건과 이미 고른 갈래를 **먼저 적용**한 노출 개체 안에서 라벨마다 센다.
+    활성 스킬의 라벨 전부를 돌려주며 **0건도 포함**한다 — 0 은 "이 갈래엔 아직 자료가 없다"는 커버리지 갭
+    신호라 API 가 지우지 않는다(감추는 것은 화면 몫). 예약 스킬(타입 어휘 저장용)과 ``unassigned`` 는 뺀다.
+
+    Args:
+        entity_type: 고른 종류. ``None`` 이면 종류 조건 없음.
+        area_names: 이미 고른 갈래들(AND). ``None``·빈 목록이면 갈래 조건 없음.
+        min_bundle_size: 노출 임계.
+        statuses: 소속 엣지 상태. ``None`` 이면 active+proposed.
+
+    Returns:
+        ``[{name, skill, skill_code, count}]`` — 개체 수 내림차순 → 스킬 코드 → 스킬 정의 순서(라벨 순).
+    """
+    from src.mm_classify.model import NON_CLASSIFY_SKILL_CODES  # 순환 import 회피(model 은 순수)
+
+    params = {
+        "kind": MM_MEMBER_KIND_CODE,
+        "statuses": _wanted_statuses(statuses),
+        "etype": entity_type,
+        "minsize": int(min_bundle_size),
+        "reserved": sorted(NON_CLASSIFY_SKILL_CODES),
+        **_area_params(area_names),
+    }
+    exposed = _EXPOSED_ENTITIES_SQL.format(
+        type_cond=_TYPE_COND_SQL,
+        area_cond="AND " + _ENTITY_AREA_FILTER_SQL.format(alias="n"),
+    )
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(_COUNT_BY_AREA_SQL.format(exposed=exposed), params)
+        rows = cur.fetchall()
+    return [
+        {"name": str(r["name"]), "skill": str(r["skill"]), "skill_code": str(r["skill_code"]),
+         "count": int(r["n"])}
+        for r in rows
+    ]
+
+
+def assets_of_entities(
+    conn: Connection[Any],
+    *,
+    entity_type: str | None = None,
+    area_names: list[str] | None = None,
+    min_bundle_size: int,
+    statuses: list[str] | None = None,
+    exclude_video: bool = False,
+) -> list[dict[str, Any]]:
+    """좁힌 **노출 개체들의 구성 자산 전부**(중복 제거 · 등록 자산만)를 조회한다(095 FR-1).
+
+    "지금 보고 있는 대상들을 한 zip 으로 받기"가 쓴다 — 화면의 좁히기 축(종류·갈래)과 다운로드 축이 같아야
+    "지금 보는 것을 받는다"가 성립한다. 용량 상한·잘림·헤더·파일명은 다운로드 정책이라 호출자 몫이다.
+
+    Args:
+        entity_type: 종류 필터. ``None`` 이면 전체.
+        area_names: 갈래 이름들(AND). ``None``·빈 목록이면 필터 없음.
+        min_bundle_size: 노출 임계.
+        statuses: 소속 엣지 상태. ``None`` 이면 active+proposed.
+        exclude_video: 참이면 영상 자산을 뺀다(용량이 크게 준다).
+
+    Returns:
+        ``[{asset_id, modality, fs_path, file_size}]`` — 자산 id 오름차순. ``file_size`` 는 없으면 0.
+        경로가 비어 있는 행도 그대로 준다(빼는 판단은 호출자 — manifest 에 남길 수 있게).
+    """
+    params = {
+        "kind": MM_MEMBER_KIND_CODE,
+        "statuses": _wanted_statuses(statuses),
+        "etype": entity_type,
+        "minsize": int(min_bundle_size),
+        "exclude_video": bool(exclude_video),
+        **_area_params(area_names),
+    }
+    exposed = _EXPOSED_ENTITIES_SQL.format(
+        type_cond=_TYPE_COND_SQL,
+        area_cond="AND " + _ENTITY_AREA_FILTER_SQL.format(alias="n"),
+    )
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(_ASSETS_OF_ENTITIES_SQL.format(exposed=exposed), params)
+        rows = cur.fetchall()
+    return [
+        {"asset_id": str(r["asset_id"]), "modality": str(r["modality"] or ""),
+         "fs_path": r["fs_path"], "file_size": int(r["file_size"] or 0)}
+        for r in rows
+    ]

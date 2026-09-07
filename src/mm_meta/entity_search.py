@@ -43,6 +43,13 @@ from src.search.fusion import gate_signal, passes_cutoff
 REASON_KEYWORD = "근거 키워드 일치"
 REASON_DESCRIPTION = "설명 일치"
 
+# 095 FR-3 — 걸린 이유의 **코드**. 문구(위 REASON_*)는 화면 몫이라 코어는 코드와 토큰만 돌려준다
+# (``match_entity_reason``). 문구를 고칠 때 화면이 문자열을 파싱하다 조용히 깨지는 일(092 에서 실제 발생)을
+# 막는다. 기존 ``match_entity`` 는 종전 문구를 그대로 만들어 돌려주므로 호출자는 바뀐 것이 없다.
+REASON_CODE_NAME = "name"
+REASON_CODE_KEYWORD = "keyword"
+REASON_CODE_DESCRIPTION = "description"
+
 
 def split_query(q: str | None) -> tuple[str, ...]:
     """검색어를 공백으로 쪼개 **정규화된 토큰**으로 만든다(빈 토큰은 버린다).
@@ -90,8 +97,59 @@ def split_query(q: str | None) -> tuple[str, ...]:
     return tuple(t for t in tokens if t)
 
 
+def match_entity_reason(
+    item: Mapping[str, Any], tokens: Sequence[str]
+) -> tuple[int, str | None, str | None]:
+    """개체 하나가 토큰을 **몇 개 맞췄는지**와 **걸린 이유(코드·토큰)**를 돌려준다(095 FR-3).
+
+    ``match_entity`` 와 판정 규칙이 같다(그 함수가 이것을 부른다). 다른 점은 이유를 문구가 아니라
+    **코드**(``name``·``keyword``·``description``)와 걸린 토큰으로 준다는 것 — 문구는 화면이 정한다.
+
+    Args:
+        item: 목록 행. ``name``·``keywords``(리스트)·``description`` 을 읽으며, 없거나 ``None`` 이면
+            빈 값으로 본다.
+        tokens: ``split_query`` 가 만든 정규화 토큰들. 빈 시퀀스면 0점이다.
+
+    Returns:
+        ``(맞은 토큰 수, 이유 코드, 걸린 토큰)``. 이름으로 걸렸으면 ``("name", None)`` — 이름은 카드에
+        이미 보이므로 토큰을 따로 적지 않는다(종전 계약). 아무것도 못 맞췼으면 ``(0, None, None)``.
+    """
+    name = normalize_text_key(str(item.get("name") or ""))
+    keywords = [normalize_text_key(str(k)) for k in (item.get("keywords") or [])]
+    description = normalize_text_key(str(item.get("description") or ""))
+
+    hit = 0
+    name_hit = False
+    keyword_token: str | None = None
+    description_token: str | None = None
+    for token in tokens:
+        if not token:
+            continue  # 방어: 빈 토큰은 모든 개체에 걸린다
+        in_name = token in name
+        in_keyword = any(token in kw for kw in keywords)
+        in_description = token in description
+        if not (in_name or in_keyword or in_description):
+            continue
+        hit += 1
+        if in_name:
+            name_hit = True
+        elif in_keyword:
+            if keyword_token is None:
+                keyword_token = token
+        elif description_token is None:
+            description_token = token
+
+    if name_hit:
+        return hit, REASON_CODE_NAME, None
+    if keyword_token is not None:
+        return hit, REASON_CODE_KEYWORD, keyword_token
+    if description_token is not None:
+        return hit, REASON_CODE_DESCRIPTION, description_token
+    return 0, None, None
+
+
 def match_entity(item: Mapping[str, Any], tokens: Sequence[str]) -> tuple[int, str | None]:
-    """개체 하나가 토큰을 **몇 개 맞췄는지**와 **걸린 이유**를 돌려준다.
+    """개체 하나가 토큰을 **몇 개 맞췼는지**와 **걸린 이유(문구)**를 돌려준다.
 
     찾는 곳은 셋이다 — 이름 · 근거 키워드(묶인 이유가 된 원문 낱말들) · 설명문. 토큰 하나가
     셋 중 **어디든** 있으면 그 토큰은 맞은 것으로 1점이며, 같은 토큰이 두 곳에 있어도 1점이다
@@ -112,40 +170,13 @@ def match_entity(item: Mapping[str, Any], tokens: Sequence[str]) -> tuple[int, s
         ``(맞은 토큰 수, 걸린 이유)``. 이유는 ``"근거 키워드 일치: 가수"`` 꼴이며, 이름으로
         걸렸거나 아무것도 못 맞췄으면 ``None``.
     """
-    name = normalize_text_key(str(item.get("name") or ""))
-    keywords = [normalize_text_key(str(k)) for k in (item.get("keywords") or [])]
-    description = normalize_text_key(str(item.get("description") or ""))
-
-    hit = 0
-    name_hit = False
-    keyword_token: str | None = None
-    description_token: str | None = None
-    for token in tokens:
-        if not token:
-            # 방어: 호출부가 정규화를 건너뛰고 빈 토큰을 넘기면 모든 개체가 걸린다.
-            continue
-        in_name = token in name
-        in_keyword = any(token in kw for kw in keywords)
-        in_description = token in description
-        if not (in_name or in_keyword or in_description):
-            continue
-        hit += 1
-        # 이유는 가장 높은 축 하나만 남긴다. 각 축의 **첫 번째** 토큰을 기억한다.
-        if in_name:
-            name_hit = True
-        elif in_keyword:
-            if keyword_token is None:
-                keyword_token = token
-        elif description_token is None:
-            description_token = token
-
-    if name_hit:
-        return hit, None
-    if keyword_token is not None:
-        return hit, f"{REASON_KEYWORD}: {keyword_token}"
-    if description_token is not None:
-        return hit, f"{REASON_DESCRIPTION}: {description_token}"
-    return 0, None  # 여기 오는 경우는 맞은 토큰이 하나도 없을 때뿐이다.
+    # 판정은 코드 함수 하나에만 있다 — 문구 조립만 여기서 한다(규칙 사본 금지).
+    hit, code, token = match_entity_reason(item, tokens)
+    if code == REASON_CODE_KEYWORD:
+        return hit, f"{REASON_KEYWORD}: {token}"
+    if code == REASON_CODE_DESCRIPTION:
+        return hit, f"{REASON_DESCRIPTION}: {token}"
+    return hit, None  # 이름으로 걸렸거나(hit>0) 아무것도 못 맞췼을 때(hit==0)
 
 
 def narrow_entities(
@@ -370,6 +401,10 @@ __all__ = [
     "fuse_entity_results",
     "REASON_DESCRIPTION",
     "REASON_KEYWORD",
+    "REASON_CODE_NAME",
+    "REASON_CODE_KEYWORD",
+    "REASON_CODE_DESCRIPTION",
+    "match_entity_reason",
     "match_entity",
     "narrow_entities",
     "split_query",

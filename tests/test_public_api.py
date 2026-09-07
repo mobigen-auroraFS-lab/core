@@ -20,13 +20,13 @@ from pathlib import Path
 
 # 정본은 README 표다. 여기 목록은 그 표를 코드로 옮긴 것이고, 아래 테스트 ③ 이 둘을 대조한다.
 PUBLIC_API: dict[str, tuple[str, ...]] = {
-    "src.config.settings": ("init_settings", "get_current_settings", "PipelineSettings"),
+    "src.config.settings": ("init_settings", "get_current_settings", "PipelineSettings", "active_embed_channel"),
     "src.config.embedding_constants": (
         "FIX_EMBEDDING_DIMENSION", "EMBEDDING_KIND_ST", "EMBEDDING_KIND_CLIP", "DEFAULT_CLIP_MODEL_NAME",
     ),
     "src.config.filename_util": ("basename_of", "strip_asset_id_prefix", "display_file_name"),
     "src.config.bootstrap": ("bootstrap_env",),
-    "src.config.search_constants": ("TAG_FACET_TOP_N_DEFAULT", "TAG_FACET_MIN_COUNT_DEFAULT"),
+    "src.config.search_constants": ("TAG_FACET_TOP_N_DEFAULT", "TAG_FACET_MIN_COUNT_DEFAULT", "ENTITY_INDEX_DEFAULT"),
     "src.config.search_modalities": (
         "VALID_SEARCH_MODALITIES", "parse_modalities_csv", "MODALITY_TO_BUCKET", "BUCKET_TO_MODALITY",
     ),
@@ -43,7 +43,7 @@ PUBLIC_API: dict[str, tuple[str, ...]] = {
     "src.registry.access_tier": ("project_ext_meta", "principal_clearance"),
     "src.registry.ext_meta_field_registry": ("fetch_access_tiers", "validate_ext_meta"),
     "src.relations.graph_query": (
-        "fetch_relations_for_asset", "fetch_active_relations_for_asset", "mm_meta_of_asset", "mm_meta_bundle",
+        "fetch_relations_for_asset", "fetch_active_relations_for_asset", "mm_meta_of_asset", "mm_meta_bundle", "list_entities", "count_entities_by_type", "count_entities_by_area", "assets_of_entities",
     ),
     "src.relations.approval_policy": ("TIER_ORDER", "tier_rank"),
     "src.relations.review": (
@@ -55,12 +55,22 @@ PUBLIC_API: dict[str, tuple[str, ...]] = {
     "src.search.refine": ("refine_rows", "refine_tokens"),
     "src.search.facets": ("aggregate_facets",),
     "src.search.tag_facets": ("aggregate_tag_facets", "normalize_tag_key"),
+    "src.search.query_embed": ("embed_query_for_media_search",),
+    "src.search.opensearch_sync": ("get_client",),
+    "src.search.entity_search_os": ("search_entities_hybrid",),
+    "src.mm_meta.entity_search": (
+        "split_query", "match_entity_reason", "narrow_entities", "fuse_entity_results", "gate_semantic_hits",
+        "entity_refine_fields", "REASON_CODE_NAME", "REASON_CODE_KEYWORD", "REASON_CODE_DESCRIPTION",
+        "REASON_KEYWORD", "REASON_DESCRIPTION", "REASON_SEMANTIC", "REASON_TEXT_MATCH",
+    ),
+    "src.mm_meta.entity_embedding": ("find_similar_entities",),
     "src.topic.asset_topic_query": (
         "fetch_asset_topic", "find_same_topic_groups", "list_topics", "assets_in_topic", "assets_unclassified",
     ),
     "src.mm_meta.rules": ("MIN_BUNDLE_SIZE",),
     "src.mm_meta.persist": ("fetch_meta_type_vocab",),
     "src.mm_classify.persist": ("fetch_active_skills",),
+    "src.mm_classify.read": ("label_names_of_assets", "fetch_active_skills"),
     "src.llm.client": ("get_llm_client", "complete_text", "complete_json", "complete_vision_json"),
 }
 

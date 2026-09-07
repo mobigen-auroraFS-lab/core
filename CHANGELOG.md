@@ -11,6 +11,15 @@
 | **MINOR** | 공개 API **추가** — 기존 호출은 그대로 동작 |
 | **PATCH** | 공개 API 무변경 — 내부 수정·버그 수정 |
 
+## [v0.5.0] — 2026-09-07 (095 개체 화면 seam · 라벨 읽기 · 이유 코드)
+
+### 추가 (MINOR — 기존 호출 무변경)
+- `relations.graph_query.list_entities` · `count_entities_by_type` · `count_entities_by_area` · `assets_of_entities` — 개체(멀티모달 메타) 화면의 목록·종류별 수·갈래별 수·구성 자산 조회 seam. 데모 라우트의 직접 SQL 을 코어로 올린 것(실 DB 대조 테스트로 결과 동일 증명).
+- `relations.graph_query.mm_meta_bundle` 반환에 `description` 키 추가(키 추가만 · 기존 키 불변).
+- `mm_classify.read.label_names_of_assets` — 자산들의 스킬 라벨 **이름**을 정의 순서로(미부여 제외). `fetch_active_skills` 재수출.
+- `mm_meta.entity_search.match_entity_reason` + `REASON_CODE_NAME|KEYWORD|DESCRIPTION` — 걸린 이유를 문구가 아니라 코드·토큰으로. 종전 `match_entity` 문구는 이 코드에서 조립되며 동일.
+- 공개 API 표에 개체 화면이 쓰는 기존 이름들을 등재: `entity_search` 함수·상수, `entity_embedding.find_similar_entities`, `search.entity_search_os.search_entities_hybrid`, `search.query_embed.embed_query_for_media_search`, `search.opensearch_sync.get_client`, `settings.active_embed_channel`, `search_constants.ENTITY_INDEX_DEFAULT`(코드 변경 0 · 계약면 명시).
+
 ## [v0.4.0] — 2026-09-07 (093 5단계 · 설정 역할 · 소비 레포 부트스트랩)
 
 ### 추가 (MINOR — 기존 호출 무변경)
