@@ -20,6 +20,21 @@ from __future__ import annotations
 # 검색이 다루는 모달리티 버킷의 유효값(단일 출처). 진입점 3곳이 이 튜플로 미지 모달리티를 거부한다.
 VALID_SEARCH_MODALITIES: tuple[str, ...] = ("text", "image", "video", "audio")
 
+# 요청 모달리티 라벨 → 응답 버킷 키(093 1단계 · 종전 ``search_service._MODALITY_BUCKETS``).
+# ⚠️ **순서가 계약이다** — 검색 서비스가 응답 버킷을 이 dict 의 순회 순서로 조립하므로, 순서를 보장하지
+#    않는 타입으로 바꾸면 같은 질의가 매번 다른 버킷 순서를 내놓는다. 텍스트만 ``text_documents`` 라는
+#    다른 키를 쓰는 것은 옛 응답 계약(프론트가 그 키를 읽는다)이다.
+MODALITY_TO_BUCKET: dict[str, str] = {
+    "text": "text_documents",
+    "audio": "audio",
+    "image": "image",
+    "video": "video",
+}
+
+# 응답 버킷 키 → 모달리티 라벨(위 표의 역표). 백엔드가 화면용 모달리티 이름을 붙일 때 쓴다 —
+# 종전엔 백엔드가 같은 표를 사본으로 들고 있었다(검색 쪽이 버킷 이름을 바꾸면 한쪽만 바뀌는 구조).
+BUCKET_TO_MODALITY: dict[str, str] = {bucket: modality for modality, bucket in MODALITY_TO_BUCKET.items()}
+
 
 def parse_modalities_csv(raw: str | None) -> list[str] | None:
     """콤마 구분 모달리티 문자열 → 라벨 리스트. 미지정/공백이면 ``None``(전체 버킷).
@@ -34,4 +49,4 @@ def parse_modalities_csv(raw: str | None) -> list[str] | None:
     return items or None
 
 
-__all__ = ["VALID_SEARCH_MODALITIES", "parse_modalities_csv"]
+__all__ = ["BUCKET_TO_MODALITY", "MODALITY_TO_BUCKET", "VALID_SEARCH_MODALITIES", "parse_modalities_csv"]

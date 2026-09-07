@@ -8,6 +8,8 @@ OM 039~042 에서 쓰이는 어휘
     ``RegistryFieldStatus``     — 041 ``ext_meta_field_registry.status``
     ``GraphEdgeStatus``         — cross-asset (v230, 042에서 타입 정본화만)
     ``RelationResolutionStatus``— 관계 큐 (v250/v260, 042에서 타입 정본화만)
+    ``RelationKindStatus``      — 관계 종류 카탈로그 ``relation_kind.status`` (v140 · 093 1단계에서 정본화 —
+                                  종전엔 코어 3곳·백엔드 1곳이 ``'active'``/``'inactive'`` 리터럴을 각자 들고 있었다)
 
 ``AssetStatus`` 는 **값 목록만 여기 있고 전이 규칙은 파이프라인**(``processing.ingest.status``)에 있다.
 왜 나눴나(2026-09-02): 값은 파이프·백엔드 **둘 다** 쓰는데 전이(FSM)는 파이프만 쓴다. 값까지 파이프에
@@ -76,6 +78,18 @@ class RelationResolutionStatus(StrEnum):
     RESOLVED = "resolved"  # 관계≥1 생성 완료.
     ISOLATED = "isolated"  # 평가 완료·관계 0(고립, 실패≠) — 재평가 대상.
     FAILED = "failed"  # 재시도 상한 도달(DLQ).
+
+
+class RelationKindStatus(StrEnum):
+    """``relation_kind.status`` CHECK 2값 (v140 · `migrations/sql/140_asset_relation.sql`).
+
+    LLM 이 새로 제안한 관계 종류는 ``inactive``(검토 대기)로 등록되고, 사람이 ``promote_relation_kind`` 로
+    승격하면 ``active`` 가 된다. 프롬프트 카탈로그·자동승인은 ``active`` 종류만 본다.
+    선언 순서(active → inactive)가 백엔드 필터 드롭다운의 "허용: [...]" 문구 순서다.
+    """
+
+    ACTIVE = "active"      # 사람이 승격했거나 시드로 등록된 종류 — 관계 제안·노출 대상.
+    INACTIVE = "inactive"  # LLM 제안 직후 검토 대기 — 승격 전까지 카탈로그에 실리지 않는다.
 
 
 class RegistryFieldStatus(StrEnum):

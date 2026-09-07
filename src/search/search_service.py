@@ -17,6 +17,7 @@ from typing import Any
 
 from src.config import search_constants
 from src.config.embedding_constants import EMBEDDING_KIND_ST
+from src.config.search_modalities import MODALITY_TO_BUCKET
 from src.config.settings import (
     active_embed_channel,
     get_current_settings,
@@ -33,15 +34,11 @@ from src.search.search_tuning import SearchTuning
 
 _LOG = logging.getLogger(__name__)
 
-# 요청 모달리티 라벨 → 응답 버킷 키.
+# 요청 모달리티 라벨 → 응답 버킷 키. 정본은 ``src.config.search_modalities.MODALITY_TO_BUCKET``(093 1단계) —
+# 백엔드가 역표(``BUCKET_TO_MODALITY``)를 같은 곳에서 가져가므로 버킷 이름이 두 벌로 갈리지 않는다.
 # ⚠️ **순서가 계약이다** — 응답 버킷 조립이 이 dict 의 순회 순서를 그대로 따르므로, set 처럼 순서를
 # 보장하지 않는 타입으로 바꾸면 같은 질의가 매번 다른 순서를 내놓는다.
-_MODALITY_BUCKETS: dict[str, str] = {
-    "text": "text_documents",
-    "audio": "audio",
-    "image": "image",
-    "video": "video",
-}
+_MODALITY_BUCKETS: dict[str, str] = MODALITY_TO_BUCKET
 
 # 이미지·영상도 텍스트와 **같은 인덱스·같은 방식**으로 찾는다 — 한국어 캡션과 텍스트 임베딩으로
 # 색인돼 있기 때문이다(이미지 벡터로 직접 매칭하는 경로가 아니다). 그래서 모달리티가 몇 개든

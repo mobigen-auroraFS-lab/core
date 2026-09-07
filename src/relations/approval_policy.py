@@ -34,6 +34,28 @@ SIMILARITY_KINDS: frozenset[str] = frozenset({"duplicate_near", "same_domain"})
 # 명시적 근거 계열 — 인용·파생·연작. 저신뢰여도 폐기하지 않는다(위 모듈 docstring 참조).
 EXPLICIT_KINDS: frozenset[str] = frozenset({"references", "derived_from", "same_series"})
 
+# 노출 등급의 순서 — 강칸(``strong`` · 연관 자료)이 약칸(``weak`` · 참고 자료)보다 앞. 그래프 조회와
+# 백엔드 상세가 이웃을 정렬할 때 같은 순위표를 써야 "고신뢰 약칸이 저신뢰 강칸을 밀어내는" 일이 없다 —
+# 종전엔 같은 표 사본이 코어 ``graph_query._TIER_RANK`` 와 백엔드 ``asset_detail._TIER_RANK`` 두 곳에
+# 있었다(093 1단계에서 여기로 모음). 값은 ``exposure_tier`` 가 돌려주는 문자열과 같다.
+TIER_ORDER: tuple[str, ...] = ("strong", "weak")
+
+
+def tier_rank(tier: str | None) -> int:
+    """등급 → 정렬 순위(0 이 맨 앞). 모르는 값·``None``·빈 문자열은 **맨 뒤**(``len(TIER_ORDER)``).
+
+    Args:
+        tier: ``exposure_tier`` 가 돌려준 등급 문자열. ``None`` 이나 빈 값이 와도 예외 없이 맨 뒤로 간다.
+
+    Returns:
+        ``TIER_ORDER`` 안의 위치. 종전 사본 ``{"strong": 0, "weak": 1}.get(t, 2)`` 와 같은 값이다.
+    """
+    try:
+        return TIER_ORDER.index(str(tier))
+    except ValueError:
+        return len(TIER_ORDER)
+
+
 # 노출·검토에서 "끝난 것"으로 보는 상태 — 사람이 내린 결정을 되살리지 않는다.
 # DB CHECK 가 허용하는 값만 담는다(`tests/test_status_vocab.py` 가 봉인). 여기에 어휘 밖 값을
 # 적어두면 그 값으로 UPDATE 하는 순간 CHECK 위반이 나는데, 그때까지는 조용하다.

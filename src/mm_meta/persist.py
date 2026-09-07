@@ -73,6 +73,7 @@ from psycopg import Connection
 from psycopg.rows import dict_row
 
 from src.database.ids import uuid7_str
+from src.database.lineage_activity import LineageActivity
 from src.database.lineage_persist import record_lineage
 from src.domain.status_vocab import GraphEdgeStatus, MmSkillStatus
 from src.domain.text_norm import normalize_text_key
@@ -114,7 +115,7 @@ MM_MEMBER_KIND_DESCRIPTION = (
 # 판정 이력 activity — 관계의 ``relations.proposed.v1`` 선례와 같은 표기 규약(``<대상>.<사건>.<판>``).
 # 🔴 이 문자열이 **백필 대상 선별의 축**이다(이력 없음 = 재대상). 바꾸면 과거 판정이 전부 "이력 없음"이
 #    되어 전량 재판정이 돈다 — 바꿀 이유가 생기면 그것은 재판정 결정과 함께여야 한다.
-LINEAGE_ACTIVITY = "entity.judged.v1"
+LINEAGE_ACTIVITY = LineageActivity.ENTITY_JUDGED  # 값 "entity.judged.v1" — 정본은 코어 lineage_activity
 # 이력의 수행 주체(누가 했나). 배치 러너 이름과 같게 둔다 — 계보만 보고 어느 실행 경로가 만든
 # 판정인지 알 수 있어야 한다(관계는 ``llm_propose`` 를 쓴다).
 LINEAGE_AGENT = "mm_meta_binding"
