@@ -62,6 +62,7 @@ def _grouped_via_opensearch(
     llm_verify_judge_fn: Callable[[str, str, str], bool] | None = None,
     search_mode: str = "auto",
     search_filters: SearchFilters | None = None,
+    tuning: SearchTuning | None = None,
 ) -> dict[str, Any]:
     """OpenSearch 경로의 모달리티 버킷을 조립한다.
 
@@ -83,6 +84,8 @@ def _grouped_via_opensearch(
         llm_verify_judge_fn: 상위 결과 LLM 검증의 판정 함수 주입.
         search_mode: ``auto``|``keyword``.
         search_filters: 확장자·기간·주제 선필터.
+        tuning: 검색 튜닝 묶음. ``None`` 이면 설정(``cfg``)에서 해소하고 — 종전과 완전히 같은 경로 —
+            주면 그 값을 그대로 쓴다. ``disable_os_cutoff`` 는 어느 쪽이든 그 위에 덧씌워진다.
 
     Returns:
         ``{text_documents, audio, image, video, meta}`` grouped dict. ``meta.os_gate`` 는 버킷별
@@ -108,9 +111,11 @@ def _grouped_via_opensearch(
 
     plan = build_query_plan(query, mode=search_mode)
 
-    # 튜닝값 12종을 여기서 **한 번에** 해소해 묶음으로 넘긴다 — 아래 호출부들이 설정을 각자 읽으면
-    # 같은 요청 안에서 서로 다른 값을 볼 수 있다. cfg 가 없으면(설정 미초기화 테스트) 상수 기본값.
-    tuning = SearchTuning.from_settings(cfg) if cfg is not None else SearchTuning()
+    # 튜닝값을 여기서 **한 번에** 확정해 묶음으로 넘긴다 — 아래 호출부들이 설정을 각자 읽으면
+    # 같은 요청 안에서 서로 다른 값을 볼 수 있다. 호출자가 묶음을 주면(093 2단계 — 백엔드 프리셋)
+    # 그것을 쓰고, 없으면 설정에서 해소한다. cfg 도 없으면(설정 미초기화 테스트) 상수 기본값.
+    if tuning is None:
+        tuning = SearchTuning.from_settings(cfg) if cfg is not None else SearchTuning()
     if disable_os_cutoff:
         # 디버그 우회는 게이트 스위치 하나만 덮는다 — 나머지 튜닝값은 운영과 동일하게 두어야
         # "컷만 없는 상태"를 관측할 수 있다.
@@ -241,6 +246,7 @@ def search_hybrid(
     _llm_verify_judge_fn: Callable[[str, str, str], bool] | None = None,
     search_mode: str = "auto",
     search_filters: SearchFilters | None = None,
+    tuning: SearchTuning | None = None,
 ) -> dict[str, Any]:
     """질의를 OpenSearch 하이브리드 검색해 모달리티 버킷으로 반환한다.
 
@@ -264,6 +270,10 @@ def search_hybrid(
         _llm_verify_judge_fn: 상위 결과 LLM 검증 판정 함수 주입 seam.
         search_mode: ``auto``|``keyword``.
         search_filters: 확장자·기간·주제 선필터.
+        tuning: 검색 튜닝 묶음(가중치·컷 기준선·연산자·리랭크 등 ``SearchTuning``). ``None`` 이면
+            설정에서 해소한다 — 인자를 주지 않은 호출은 종전과 완전히 같다. 주면 그 값을 쓴다.
+            호출자(백엔드)가 닫힌 프리셋을 값으로 바꿔 넘기는 손잡이다(093 2단계 · ADR §6).
+            원시 실수를 프론트에서 직접 받지 않는 것은 호출자의 몫이다.
 
     Returns:
         ``{text_documents, audio, image, video, meta}`` grouped dict.
@@ -321,6 +331,7 @@ def search_hybrid(
         llm_verify_judge_fn=_llm_verify_judge_fn,
         search_mode=search_mode,
         search_filters=search_filters,
+        tuning=tuning,
     )
     # 여기에 점수 하한 필터가 없는 것은 누락이 아니다 — 약한 결과 제거는 검색 seam 안에서
     # 코사인 척도로 이미 끝났다(같은 걸 여기서 또 걸면 이중 절삭이 된다).

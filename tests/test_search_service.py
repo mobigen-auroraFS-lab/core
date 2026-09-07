@@ -707,3 +707,56 @@ class TestBackendOpenSearchUnreachable(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSearchTuningInjection(unittest.TestCase):
+    """093 2단계 — ``tuning=`` 손잡이. 주면 그 묶음이 **그대로** 검색층에 가고, 안 주면 종전과 같다.
+
+    백엔드가 닫힌 프리셋을 ``SearchTuning`` 으로 바꿔 넘기는 자리다(ADR 2026-09-02 §6). 디버그 우회
+    ``disable_os_cutoff`` 는 어느 쪽 위에도 덧씌워진다(컷 스위치 하나만 끄고 나머지는 보존).
+    """
+
+    def test_tuning_given_is_passed_through_as_is(self) -> None:
+        import src.search.search_service as svc
+        from src.search.search_tuning import SearchTuning
+
+        # 설정은 0.22/0.55 인데 호출자가 다른 묶음을 주면 설정을 읽지 않고 준 것을 쓴다.
+        cfg = _cfg(search_backend="opensearch", search_os_cutoff_eps=0.22, search_os_cutoff_floor=0.55)
+        given = SearchTuning(cutoff_eps=0.01, cutoff_floor=0.02, weights=(0.7, 0.3))
+        fake_os, os_cap = _recording_os({"text": [{"id": "os_t"}]})
+        with mock.patch.object(svc, "get_current_settings", return_value=cfg):
+            svc.search_hybrid(
+                "질의", modalities=["text"], tuning=given,
+                _os_search_fn=fake_os, _os_client_fn=lambda: "C",
+            )
+        self.assertIs(os_cap["tuning"], given)
+
+    def test_disable_os_cutoff_overrides_given_tuning_only_for_cutoff_switch(self) -> None:
+        import src.search.search_service as svc
+        from src.search.search_tuning import SearchTuning
+
+        given = SearchTuning(cutoff_enabled=True, cutoff_eps=0.01, weights=(0.7, 0.3))
+        fake_os, os_cap = _recording_os({"text": [{"id": "os_t"}]})
+        with mock.patch.object(svc, "get_current_settings", return_value=_cfg(search_backend="opensearch")):
+            svc.search_hybrid(
+                "질의", modalities=["text"], tuning=given, disable_os_cutoff=True,
+                _os_search_fn=fake_os, _os_client_fn=lambda: "C",
+            )
+        self.assertIs(os_cap["tuning"].cutoff_enabled, False)
+        self.assertEqual(os_cap["tuning"].cutoff_eps, 0.01)  # 나머지 값은 준 대로 보존
+        self.assertEqual(os_cap["tuning"].weights, (0.7, 0.3))
+
+    def test_tuning_none_resolves_from_settings_exactly_as_before(self) -> None:
+        import src.search.search_service as svc
+        from src.search.search_tuning import SearchTuning
+
+        cfg = _cfg(search_backend="opensearch", search_os_cutoff_eps=0.22, search_os_cutoff_floor=0.55)
+        fake_os, os_cap = _recording_os({"text": [{"id": "os_t"}]})
+        with mock.patch.object(svc, "get_current_settings", return_value=cfg):
+            svc.search_hybrid(
+                "질의", modalities=["text"], tuning=None,
+                _os_search_fn=fake_os, _os_client_fn=lambda: "C",
+            )
+        # 명시 None = 인자 생략 = 설정에서 해소(종전 경로). 값이 설정의 것과 같다.
+        self.assertEqual(os_cap["tuning"], SearchTuning.from_settings(cfg))
+        self.assertEqual(os_cap["tuning"].cutoff_eps, 0.22)
