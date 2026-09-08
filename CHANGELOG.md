@@ -11,6 +11,13 @@
 | **MINOR** | 공개 API **추가** — 기존 호출은 그대로 동작 |
 | **PATCH** | 공개 API 무변경 — 내부 수정·버그 수정 |
 
+## [v0.6.0] — 2026-09-08 (096 파일 검색 조회 — 조건으로 좁히고 정확히 센다)
+
+### 추가 (MINOR — 기존 호출 무변경)
+- `src.search.file_search.search_files(client, index, *, query, query_vector, filters=None, from_=0, size=50, …)` — 파일 검색 화면(시나리오 ③)용 조회. 집합을 **단어 일치 + 조건**으로 확정하고, 순서는 검색 엔진의 정규화·결합 파이프라인이 매기며, 개수·좁히기 칩을 **검색 엔진이 센다**. 그래서 "적힌 숫자 = 누르면 나오는 수"가 성립한다(실측 410건 불일치 0).
+  - 함께 공개: `build_rank_body`·`build_facet_body`(순수 · 본문 조립) · `FACET_FIELDS` · 설계 상수 `RANK_DEPTH_DEFAULT`(1,000) · `TOTAL_CAP_DEFAULT`(10,000) · `FACET_SIZE_DEFAULT`(24) · `SEARCH_PIPELINE_DEFAULT` · `WORD_FIELDS_DEFAULT`.
+  - ⚠️ **관련도 컷오프를 쓰지 않는다** — 컷오프는 받아온 뒤 파이썬에서 계산하므로 검색 엔진이 셀 수 없고, 세는 대상이 확정되지 않으면 칩 건수가 클릭 결과와 어긋난다. 기존 `search_hybrid`(멀티모달 검색 화면)는 컷오프를 그대로 유지한다.
+
 ## [v0.5.0] — 2026-09-07 (095 개체 화면 seam · 라벨 읽기 · 이유 코드)
 
 ### 추가 (MINOR — 기존 호출 무변경)
