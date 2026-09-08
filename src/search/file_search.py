@@ -6,10 +6,13 @@
 | | 멀티모달 검색(`search_hybrid`) | 파일 검색(이 모듈) |
 |---|---|---|
 | 목적 | 뜻으로 **찾아오기** — 관련도 상위만 | 조건으로 **좁혀 훑기** — 전부 세고 페이지로 넘기기 |
-| 집합 | 관련도 컷을 통과한 것 | **단어 일치 + 조건**에 맞는 것 |
+| 집합 | 단어 ∪ 뜻 상위 k → **컷오프로 걸러낸 것** | 단어 ∪ **뜻이 임계 이상** + 조건 |
 | 개수 | 화면에 내려간 행 수 | 검색 엔진이 센 **정확한 수**(상한까지) |
 | 순위 | 파이썬에서 두 순위를 섞는다 | **검색 엔진이** 정규화·결합한다(`assets-hybrid` 파이프라인) |
-| 컷오프 | 쓴다 | **쓰지 않는다** |
+| 컷오프 | 쓴다 | **쓰지 않는다**(집합 조건이 그 역할을 대신한다) |
+
+**단어 절은 두 화면이 같은 것을 쓴다**(`query_builder.build_word_should` · 096). 각자 만들면 같은
+질의가 다른 파일을 찾는다 — 실측으로 파일명 가중치만 달라도(0.5 대 2.0) 상위 10 중 3건만 겹쳤다.
 
 ## 왜 컷오프를 쓰지 않나 (실측 근거 · 골든 464질의)
 
@@ -21,6 +24,32 @@
 그리고 컷오프는 결과를 받아온 **뒤** 파이썬에서 계산하므로 검색 엔진이 셀 수 없다. 세는 대상이 확정되지
 않으면 "적힌 숫자 = 누르면 나오는 수"가 성립하지 않는다(2026-08-26 원칙). 그래서 이 화면은 집합을 단어·조건
 으로 확정하고, 관련 없는 것을 걸러내는 일은 **조건**이, 약한 것을 아래로 내리는 일은 **순위**가 맡는다.
+
+## 뜻에는 **경계**를 준다 — 「상위 k개」가 아니라 「이만큼 가까운 것」
+
+뜻으로만 걸린 자료를 버리면 퇴보다 — 멀티모달 검색은 `클래식 피아노 연주회`(글자로는 0건)에 피아노·
+베토벤 자료를 준다. 그런데 벡터 검색에 「가까운 순 k개」를 청하면 **관련이 없어도 k개를 채워 준다**
+(실측: 코퍼스에 없는 `컬링`·`베이글` 도 k=100 이면 100건). 그러면 개수가 질의가 아니라 k 가 정한다.
+
+그래서 **유사도 하한**(radial kNN · `min_score`)으로 청한다 — 「코사인 0.60 이상인 것 전부」. 조건이라
+집합 크기가 질의에 따라 정해진다.
+
+🔴 **그 결과를 id 목록으로 굳혀 모든 질의가 공유한다**(2026-09-08 실측 결함). 벡터 검색은 근사라
+**필터가 있을 때와 없을 때 찾아내는 문서가 다르다**(작은 집합에서는 전수 비교로 바뀐다). 축별 집계는
+필터를 일부러 바꾸므로, 질의마다 벡터 검색을 다시 하면 칩 건수와 클릭 결과가 어긋난다 — `등산` 에서
+칩 12 대 클릭 13 이었다. 조건 없이 **한 번만** 구해 굳히면 조건이 무엇이든 같은 문서를 가리킨다.
+
+골든 464질의 전수 측정으로 임계를 골랐다:
+
+| 임계 | 되찾음(멀티모달 검색이 주던 것) | 잡음(그것도 안 주던 것) | 자료 없는 질의 0건 유지 |
+|---|---|---|---|
+| 0.55 | 213 | 1,022 | 27/34 |
+| **0.60** | **101** | **107** | **32/34** |
+
+0.55 는 하나를 되찾는 대가로 다섯이 섞인다. 0.60 은 거의 반반이고 자료 없는 질의가 0건을 지킨다.
+
+⚠️ **정렬을 바꿔도 집합은 같아야 한다** — 그래서 이름·날짜순 정렬에도 질의 임베딩이 필요하다(집합
+판정에 쓰이므로). 정렬에 따라 개수가 달라지면 화면이 거짓말을 한다.
 
 ## 두 번 묻는 이유
 
@@ -62,6 +91,7 @@ from typing import Any
 from src.config.filename_util import display_file_name
 from src.domain.numeric import safe_float
 from src.domain.text_norm import normalize_text_key
+from src.search.query_builder import build_word_should
 from src.search.search_filters import SearchFilters, filters_to_opensearch_bool
 
 # ── 설계 상수 — **코퍼스 크기에 비례시키지 않는다** ──────────────────────────────
@@ -85,9 +115,21 @@ FACET_SIZE_DEFAULT = 24
 # 검색 엔진에 등록된 정규화·결합 파이프라인(min-max + 가중평균). 파이썬 융합과 같은 계산을 서버가 한다.
 SEARCH_PIPELINE_DEFAULT = "assets-hybrid"
 
-# 단어를 찾을 필드. 파일명에 가중치를 두는 이유: "파일 이름과 내용을 함께 검색" 이 이 화면의 계약이고,
-# 이름이 맞은 것은 사용자가 의도한 파일일 확률이 높다.
-WORD_FIELDS_DEFAULT: tuple[str, ...] = ("file_name^2", "summary", "keywords")
+# 단어 매칭 연산자. **모든 형태소가 맞아야** 후보다.
+# 왜 ``and`` 인가: 한국어는 낱말이 형태소로 쪼개진다(``남한산성`` → 남한/산/성). ``or`` 로 두면
+# 「산」이나 「성」만 든 파일까지 세어져 개수가 뜻을 잃는다(실측 354건 대 3건).
+WORD_OPERATOR_DEFAULT = "and"
+
+# 뜻으로 집합에 들어올 유사도 **하한**(코사인). 이 값 이상인 파일은 글자가 안 겹쳐도 집합에 든다.
+# 왜 0.60 인가: 골든 464질의 전수 측정에서 되찾음:잡음이 101:107(0.55 는 213:1,022)이고, 자료 없는
+# 질의 34개 중 32개가 0건을 유지한다. 코퍼스의 코사인이 0.27~0.36 좁은 띠에 몰려 있어 이보다 낮추면
+# 무관한 파일이 급증한다. **코퍼스 성격이 크게 바뀌면 재측정한다**.
+SEMANTIC_MIN_COSINE_DEFAULT = 0.60
+
+# 뜻으로 걸린 자산 id 를 받아올 상한. 넘치면 가까운 순으로 잘린다(결정적).
+# 왜 500 인가: 골든 464질의 실측에서 임계 0.60 을 넘는 자산은 질의당 평균 1건 미만이고 최대 수십
+# 건이다. 500 은 넉넉한 여유이면서 ``terms`` 절이 커져 질의가 무거워지는 것을 막는 선이다.
+SEMANTIC_CAP_DEFAULT = 500
 
 # 좁히기 축 → 색인 필드. 셋 다 keyword 필드라 정확히 집계된다.
 #   ⚠️ 태그 축은 **정규화 키** 필드다 — 표시 라벨은 원문이라 대표 문서에서 되찾는다(``_tag_label``).
@@ -134,29 +176,117 @@ __all__ = [
     "FACET_SIZE_DEFAULT",
     "RANK_DEPTH_DEFAULT",
     "SEARCH_PIPELINE_DEFAULT",
+    "SEMANTIC_CAP_DEFAULT",
+    "SEMANTIC_MIN_COSINE_DEFAULT",
     "SORT_DEFAULT",
     "SORT_DEPTH_DEFAULT",
     "SORT_OPTIONS",
     "TOTAL_CAP_DEFAULT",
-    "WORD_FIELDS_DEFAULT",
+    "WORD_OPERATOR_DEFAULT",
     "build_facet_body",
     "build_facet_plan",
+    "build_semantic_body",
     "build_rank_body",
     "search_files",
 ]
 
 
-def _word_clause(query: str, fields: Sequence[str]) -> dict[str, Any]:
-    """검색어를 단어 일치 절로 만든다.
+def _word_clause(query: str, *, operator: str = WORD_OPERATOR_DEFAULT) -> dict[str, Any]:
+    """검색어를 단어 일치 절로 만든다 — **멀티모달 검색과 같은 절**(096).
 
     Args:
         query: 검색어. 앞뒤 공백은 호출자가 다듬는다.
-        fields: 찾을 필드(가중치 표기 포함).
+        operator: 단어 매칭 연산자(``and`` 면 모든 형태소가 맞아야 한다).
 
     Returns:
-        ``multi_match`` 절.
+        ``bool`` 절(필드별 절 5개 · ``minimum_should_match: 1``).
     """
-    return {"multi_match": {"query": query, "fields": list(fields)}}
+    return {"bool": {"should": build_word_should(query, operator=operator),
+                     "minimum_should_match": 1}}
+
+
+def build_semantic_body(
+    query_vector: Sequence[float],
+    *,
+    min_cosine: float = SEMANTIC_MIN_COSINE_DEFAULT,
+    cap: int = SEMANTIC_CAP_DEFAULT,
+) -> dict[str, Any]:
+    """뜻이 **임계 이상** 가까운 파일의 id 를 구하는 질의 본문(순수 · radial kNN).
+
+    「가까운 순 k개」가 아니라 「이만큼 가까운 것 전부」라 집합에 경계가 생긴다 — 그래서 코퍼스에 없는
+    질의는 0건이 된다(k 로 청하면 관련이 없어도 k 개를 채워 준다 · 실측 `컬링` 100건).
+
+    🔴 **조건(주제·태그·기간)을 걸지 않는다.** 벡터 검색은 근사라 **필터가 있을 때와 없을 때 찾아내는
+    문서가 다르다**(작은 집합에서는 전수 비교로 바뀐다). 조건마다 다른 답이 나오면 칩 건수와 클릭
+    결과가 어긋난다 — 실측으로 `등산` 에서 칩 12 대 클릭 13 이었다. 그래서 **조건 없이 한 번만** 구해
+    id 목록으로 굳히고, 그 목록을 모든 질의가 공유한다(조건은 그 뒤에 걸린다).
+
+    Args:
+        query_vector: 질의 임베딩. 문서 색인과 **같은 채널**로 만든 것이어야 한다.
+        min_cosine: 유사도 하한(코사인). 색인 점수 규약은 ``(코사인+1)/2`` 이므로 그렇게 환산한다.
+        cap: 받아올 id 수 상한. 넘치면 **가까운 순으로** 잘린다(결정적).
+
+    Returns:
+        OpenSearch 검색 본문. 행 내용은 필요 없으므로 ``asset_id`` 만 받는다.
+    """
+    return {
+        "size": int(cap),
+        "track_total_hits": False,
+        "_source": ["asset_id"],
+        "query": {"knn": {"embedding": {
+            "vector": list(query_vector),
+            # 코사인 공간의 색인 점수는 (코사인+1)/2 다 — 코어 ``knn_score_to_cosine`` 의 역변환.
+            "min_score": (float(min_cosine) + 1.0) / 2.0,
+        }}},
+    }
+
+
+def _semantic_clause(semantic_ids: Sequence[str]) -> dict[str, Any] | None:
+    """뜻으로 걸린 자산들을 **id 목록 절**로 만든다.
+
+    id 목록이라 조건이 무엇이든 **같은 문서를 가리킨다** — 근사 벡터 검색을 질의마다 다시 하지 않기
+    때문이다. 이것이 칩 건수와 클릭 결과가 일치하는 근거다.
+
+    Args:
+        semantic_ids: ``build_semantic_body`` 로 구한 자산 id 들.
+
+    Returns:
+        ``terms`` 절. 목록이 비면 ``None``(절을 아예 넣지 않는다 — 빈 ``terms`` 는 무의미한 비용이다).
+    """
+    ids = [str(a) for a in semantic_ids if str(a)]
+    return {"terms": {"asset_id": ids}} if ids else None
+
+
+def _scope_clause(
+    query: str,
+    semantic_ids: Sequence[str] = (),
+    *,
+    filters: Sequence[dict[str, Any]] = (),
+    operator: str = WORD_OPERATOR_DEFAULT,
+) -> dict[str, Any]:
+    """**집합 정의** — 글자가 맞았거나 뜻이 임계 이상 가까운 파일, 그리고 조건에 맞는 것.
+
+    🔴 개수·칩·순위가 **모두 이 절 하나**를 쓴다. 하나라도 다른 절을 쓰면 "적힌 숫자 = 누르면
+    나오는 수"가 깨진다(2026-09-08 실측 결함이 그것이었다).
+
+    Args:
+        query: 검색어.
+        semantic_ids: 뜻으로 걸린 자산 id 들(``build_semantic_body`` 결과). 비면 단어만으로 정한다.
+        filters: 선필터에서 나온 조건 절.
+        operator: 단어 매칭 연산자.
+
+    Returns:
+        ``bool`` 절 — ``should``(단어·뜻) + ``minimum_should_match: 1`` + ``filter``(조건).
+    """
+    should = [_word_clause(query, operator=operator)]
+    semantic = _semantic_clause(semantic_ids)
+    if semantic is not None:
+        should.append(semantic)
+    return {"bool": {
+        "should": should,
+        "minimum_should_match": 1,
+        "filter": list(filters),
+    }}
 
 
 _ROW_SOURCE: tuple[str, ...] = (
@@ -167,34 +297,33 @@ _ROW_SOURCE: tuple[str, ...] = (
 
 def build_rank_body(
     query: str,
-    query_vector: Sequence[float] | None = None,
+    query_vector: Sequence[float],
     *,
+    semantic_ids: Sequence[str] = (),
     filters: SearchFilters | None = None,
     from_: int = 0,
     size: int = 50,
     rank_depth: int = RANK_DEPTH_DEFAULT,
-    fields: Sequence[str] = WORD_FIELDS_DEFAULT,
+    operator: str = WORD_OPERATOR_DEFAULT,
     sort: str = SORT_DEFAULT,
 ) -> dict[str, Any]:
-    """순위 질의 본문 — 집합은 단어·조건으로 한정하고 순서만 뜻으로 돕는다(순수).
+    """순위 질의 본문 — 집합은 ``_scope_clause`` 가 정하고 순서만 정렬 방식이 정한다(순수).
 
-    🔴 **벡터 쪽에도 같은 단어 조건을 필터로 건다.** 걸지 않으면 글자가 하나도 겹치지 않는 문서까지
-    집합에 들어와 개수가 부풀고(실측: `흉부` 1건 → 500건), 그러면 세는 숫자가 뜻을 잃는다. 벡터는
-    **순서를 돕는 역할**만 한다.
+    관련도 정렬이면 검색 엔진의 하이브리드 질의로 두 순위(단어·뜻)를 정규화·결합한다. 필드 정렬이면
+    순서를 필드가 정하므로 하이브리드가 아니라 평범한 질의를 보낸다.
 
-    **이름·등록일 정렬이면 벡터를 아예 쓰지 않는다**(096) — 순서를 필드가 정하므로 뜻이 관여할 이유가
-    없다. 그러면 하이브리드 질의가 아니게 되어 정규화 파이프라인도 필요 없고 깊이 제약도 사라진다.
+    🔴 **정렬을 바꿔도 집합은 같다** — 두 갈래 모두 같은 ``_scope_clause`` 를 쓴다. 정렬에 따라
+    개수가 달라지면 화면이 거짓말을 한다.
 
     Args:
         query: 검색어.
-        query_vector: 질의 임베딩. 문서 색인과 **같은 채널**로 만든 것이어야 같은 공간에서 비교된다.
-            관련도 정렬에만 필요하다 — 필드 정렬이면 무시하므로 ``None`` 을 줘도 된다.
+        query_vector: 질의 임베딩. **관련도 정렬의 순서**에 쓰인다(집합 판정은 ``semantic_ids``).
+        semantic_ids: 뜻으로 걸린 자산 id 들. 집합 판정에 쓰이므로 집계 질의와 **같은 값**이어야 한다.
         filters: 주제·하위주제·태그·기간·확장자 선필터. ``None`` 이면 조건 없음.
         from_: 페이지 시작 위치.
         size: 이 페이지의 행 수.
-        rank_depth: 순위를 매길 깊이(= 페이징 가능 깊이). 벡터 이웃 수에도 같은 값을 쓴다.
-            관련도 정렬에만 쓰인다.
-        fields: 단어를 찾을 필드.
+        rank_depth: 관련도 정렬에서 순위를 매길 깊이(= 페이징 가능 깊이).
+        operator: 단어 매칭 연산자.
         sort: 정렬 이름(``SORT_OPTIONS`` 의 키).
 
     Returns:
@@ -202,12 +331,10 @@ def build_rank_body(
         **관련도 정렬에만** 붙인다).
 
     Raises:
-        ValueError: 모르는 정렬 이름이거나, 관련도 정렬인데 질의 임베딩이 없을 때(벡터 없이 하이브리드를
-            보내면 엔진이 절 오류를 내므로 여기서 뜻이 분명한 예외로 막는다).
+        ValueError: 모르는 정렬 이름일 때.
     """
     if sort not in SORT_OPTIONS:
         raise ValueError(f"알 수 없는 정렬: {sort!r} (허용: {sorted(SORT_OPTIONS)})")
-    word = _word_clause(query, fields)
     clauses = filters_to_opensearch_bool(filters)
     body: dict[str, Any] = {
         "from": int(from_),
@@ -218,44 +345,49 @@ def build_rank_body(
     }
     order = SORT_OPTIONS[sort]
     if order is not None:
-        body["query"] = {"bool": {"must": [word], "filter": clauses}}
+        body["query"] = _scope_clause(query, semantic_ids, filters=clauses, operator=operator)
         body["sort"] = [dict(s) for s in order]
         return body
-    if query_vector is None:
-        raise ValueError("관련도 정렬에는 질의 임베딩이 필요하다(필드 정렬은 없어도 된다)")
-    scope = [word, *clauses]
+    # 하이브리드는 두 서브질의의 **합집합**이라 집합이 ``_scope_clause`` 와 같다. 두 서브질의의 절은
+    # 집합 절에서 **그대로 꺼내 쓴다** — 따로 조립하면 조건 위치가 어긋나 집합이 갈라진다(실측 1건).
+    # 하이브리드 두 서브질의: ① 단어(+조건) ② 벡터 이웃(+집합·조건). ②는 **순서를 매기기 위한**
+    # 것이라 여기서만 벡터를 쓴다 — 집합은 ①②의 합집합이 아니라 위 ``_scope_clause`` 가 정하므로,
+    # ② 에도 집합 절을 필터로 걸어 밖으로 새지 않게 한다.
+    scope = _scope_clause(query, semantic_ids, filters=clauses, operator=operator)
     body["query"] = {"hybrid": {"pagination_depth": int(rank_depth), "queries": [
-        {"bool": {"must": [word], "filter": clauses}},
+        {"bool": {"must": [_word_clause(query, operator=operator)], "filter": list(clauses)}},
         {"knn": {"embedding": {"vector": list(query_vector), "k": int(rank_depth),
-                               "filter": {"bool": {"filter": scope}}}}},
+                               "filter": scope}}},
     ]}}
     return body
 
 
 def build_facet_body(
     query: str,
+    semantic_ids: Sequence[str] = (),
     *,
     filters: SearchFilters | None = None,
     total_cap: int = TOTAL_CAP_DEFAULT,
     facet_size: int = FACET_SIZE_DEFAULT,
     axes: Sequence[str] = tuple(FACET_FIELDS),
-    fields: Sequence[str] = WORD_FIELDS_DEFAULT,
+    operator: str = WORD_OPERATOR_DEFAULT,
 ) -> dict[str, Any]:
-    """개수·좁히기 칩 질의 본문 — **세는 대상은 단어·조건에 맞는 전부**(순수).
+    """개수·좁히기 칩 질의 본문 — **세는 대상 = 순위 질의의 집합**(순수).
 
-    이 질의에는 벡터가 없다. 세는 대상이 "조건에 맞는 파일"이어야 클릭 결과와 숫자가 같아지기 때문이다
-    (뜻으로만 가까운 문서까지 세면 눌러도 그만큼 나오지 않는다 — 실제로 겪은 결함).
+    🔴 순위 질의와 **똑같은 ``_scope_clause``** 를 쓴다. 세는 대상과 보여주는 대상이 달라지면
+    "적힌 숫자 = 누르면 나오는 수"가 깨진다(2026-09-08 실측 결함이 그것이었다).
 
     태그 축만 대표 문서를 하나씩 함께 받는다(``sample``) — 색인의 태그 필드는 **정규화 키**라
     ``전통 음식`` 이 ``전통음식`` 으로 저장돼 있어, 화면에 보일 원문을 그 문서에서 되찾는다.
 
     Args:
         query: 검색어.
+        semantic_ids: 뜻으로 걸린 자산 id 들. 순위 질의와 **같은 값**이어야 한다.
         filters: 선필터.
         total_cap: 이 수까지 정확히 센다. 넘으면 응답의 ``relation`` 이 ``gte`` 가 된다.
         facet_size: 축마다 받을 항목 수.
         axes: 셀 축 이름들(``FACET_FIELDS`` 의 키).
-        fields: 단어를 찾을 필드.
+        operator: 단어 매칭 연산자.
 
     Returns:
         OpenSearch 검색 본문(행은 받지 않는다 · ``size`` 0).
@@ -285,8 +417,9 @@ def build_facet_body(
     return {
         "size": 0,
         "track_total_hits": int(total_cap),
-        "query": {"bool": {"must": [_word_clause(query, fields)],
-                           "filter": filters_to_opensearch_bool(filters)}},
+        "query": _scope_clause(query, semantic_ids,
+                               filters=filters_to_opensearch_bool(filters),
+                               operator=operator),
         "aggs": aggs,
     }
 
@@ -311,12 +444,13 @@ def _active_filter_fields(filters: SearchFilters | None) -> frozenset[str]:
 
 def build_facet_plan(
     query: str,
+    semantic_ids: Sequence[str] = (),
     *,
     filters: SearchFilters | None = None,
     total_cap: int = TOTAL_CAP_DEFAULT,
     facet_size: int = FACET_SIZE_DEFAULT,
     axes: Sequence[str] = tuple(FACET_FIELDS),
-    fields: Sequence[str] = WORD_FIELDS_DEFAULT,
+    operator: str = WORD_OPERATOR_DEFAULT,
 ) -> list[dict[str, Any]]:
     """집계 **계획** — 어떤 축을 어떤 조건으로 셀지 정한다(순수 · 질의를 보내지 않는다).
 
@@ -326,11 +460,12 @@ def build_facet_plan(
 
     Args:
         query: 검색어.
+        semantic_ids: 뜻으로 걸린 자산 id 들. 모든 질의가 **같은 목록**을 써야 칩과 클릭이 맞는다.
         filters: 선필터.
         total_cap: 전체 개수를 정확히 셀 상한.
         facet_size: 축마다 받을 항목 수.
         axes: 셀 축 이름들.
-        fields: 단어를 찾을 필드.
+        operator: 단어 매칭 연산자.
 
     Returns:
         ``[{"axes": (축…), "body": {…}, "total": bool}]``. **첫 항목이 조건을 전부 적용한 질의**이며
@@ -354,8 +489,8 @@ def build_facet_plan(
     plan: list[dict[str, Any]] = [{
         "axes": base_axes,
         "total": True,
-        "body": build_facet_body(query, filters=filters, total_cap=total_cap,
-                                 facet_size=facet_size, axes=base_axes, fields=fields),
+        "body": build_facet_body(query, semantic_ids, filters=filters, total_cap=total_cap,
+                                 facet_size=facet_size, axes=base_axes, operator=operator),
     }]
     # 순서를 못 박는다 — 질의 순서가 흔들리면 응답 짝짓기가 어긋난다.
     for drop in sorted(groups, key=lambda d: sorted(d)):
@@ -363,9 +498,9 @@ def build_facet_plan(
         plan.append({
             "axes": tuple(groups[drop]),
             "total": False,
-            "body": build_facet_body(query, filters=scoped, total_cap=total_cap,
+            "body": build_facet_body(query, semantic_ids, filters=scoped, total_cap=total_cap,
                                      facet_size=facet_size, axes=tuple(groups[drop]),
-                                     fields=fields),
+                                     operator=operator),
         })
     return plan
 
@@ -475,7 +610,7 @@ def search_files(
     index: str,
     *,
     query: str,
-    query_vector: Sequence[float] | None = None,
+    query_vector: Sequence[float],
     filters: SearchFilters | None = None,
     from_: int = 0,
     size: int = 50,
@@ -486,6 +621,9 @@ def search_files(
     pipeline: str = SEARCH_PIPELINE_DEFAULT,
     sort: str = SORT_DEFAULT,
     sort_depth: int = SORT_DEPTH_DEFAULT,
+    min_cosine: float = SEMANTIC_MIN_COSINE_DEFAULT,
+    semantic_cap: int = SEMANTIC_CAP_DEFAULT,
+    operator: str = WORD_OPERATOR_DEFAULT,
 ) -> dict[str, Any]:
     """조건으로 좁힌 파일을 **유사도 순 한 페이지 + 정확한 전체 개수 + 좁히기 칩**으로 조회한다.
 
@@ -496,8 +634,8 @@ def search_files(
         client: OpenSearch 클라이언트.
         index: 색인 이름.
         query: 검색어. 빈 값이면 ``ValueError``(조건만으로 훑는 화면은 이 함수의 몫이 아니다).
-        query_vector: 질의 임베딩. **문서와 같은 채널**로 만들어야 한다. 관련도 정렬에만 필요하다 —
-            필드 정렬이면 쓰지 않으므로 호출부는 만들 필요조차 없다(임베딩 비용을 아낀다).
+        query_vector: 질의 임베딩. **문서와 같은 채널**로 만들어야 한다. 정렬 방식과 무관하게
+            필요하다 — 뜻으로 집합에 들어오는 파일을 판정하는 데 쓰인다.
         filters: 선필터(주제·하위주제·태그·기간·확장자). 주제·하위주제·태그는 **여럿**을 받으며
             같은 축의 여러 값은 「또는」이다.
         from_: 페이지 시작 위치. ``from_ + size`` 가 정렬별 깊이 한계를 넘으면 ``ValueError`` —
@@ -513,6 +651,9 @@ def search_files(
             질의가 아니라 정규화할 것이 없다).
         sort: 정렬 이름(``SORT_OPTIONS`` 의 키). 기본은 관련도.
         sort_depth: 필드 정렬로 넘길 수 있는 깊이(색인 결과창 한계).
+        min_cosine: 뜻으로 집합에 들어올 유사도 하한(코사인).
+        semantic_cap: 뜻으로 걸린 자산 id 를 받아올 상한.
+        operator: 단어 매칭 연산자.
 
     Returns:
         ``{rows, total, total_capped, facets, from, size, sort}``. ``total_capped`` 가 참이면
@@ -543,8 +684,20 @@ def search_files(
     # 🔴 **개수를 먼저 센다.** 순위 질의는 결과 끝을 넘는 페이지를 요청하면 오류를 낸다
     #    ("Reached end of search result" · 실측). 끝을 넘은 페이지는 오류가 아니라 **빈 페이지**여야
     #    맞으므로, 총계를 먼저 알고 그때만 순위를 묻는다(질의 하나를 아끼는 효과도 있다).
-    plan = build_facet_plan(q, filters=filters, total_cap=total_cap, facet_size=facet_size,
-                            axes=axes)
+    # ① 뜻으로 걸린 자산을 **한 번만** 구해 id 로 굳힌다. 조건마다 벡터 검색을 다시 하면 근사
+    #    검색이 다른 답을 주어 칩 건수와 클릭 결과가 어긋난다(실측 `등산` 칩 12 대 클릭 13).
+    semantic = client.search(
+        index=index,
+        body=build_semantic_body(query_vector, min_cosine=min_cosine, cap=semantic_cap),
+    )
+    semantic_ids = [
+        str((h.get("_source") or {}).get("asset_id") or "")
+        for h in ((semantic.get("hits") or {}).get("hits") or [])
+    ]
+    semantic_ids = [a for a in semantic_ids if a]
+
+    plan = build_facet_plan(q, semantic_ids, filters=filters, total_cap=total_cap,
+                            facet_size=facet_size, axes=axes, operator=operator)
     responses = _run_facets(client, index, plan)
     total_info = (responses[0].get("hits") or {}).get("total") or {}
     total = int(total_info.get("value") or 0)
@@ -554,9 +707,11 @@ def search_files(
         params = {} if by_field else {"search_pipeline": pipeline}
         rank = client.search(
             index=index,
-            body=build_rank_body(q, query_vector, filters=filters, from_=from_,
+            body=build_rank_body(q, query_vector, semantic_ids=semantic_ids, filters=filters,
+                                 from_=from_,
                                  # 남은 것보다 더 달라고 하면 같은 오류가 난다 — 남은 만큼만 청한다.
-                                 size=min(size, total - from_), rank_depth=rank_depth, sort=sort),
+                                 size=min(size, total - from_), rank_depth=rank_depth, sort=sort,
+                                 operator=operator),
             params=params,
         )
         hits = ((rank.get("hits") or {}).get("hits") or [])

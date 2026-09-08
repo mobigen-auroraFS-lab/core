@@ -15,7 +15,11 @@
 
 ### 추가 (MINOR — 기존 호출 무변경)
 - `src.search.file_search.search_files(client, index, *, query, query_vector, filters=None, from_=0, size=50, …)` — 파일 검색 화면(시나리오 ③)용 조회. 집합을 **단어 일치 + 조건**으로 확정하고, 순서는 검색 엔진의 정규화·결합 파이프라인이 매기며, 개수·좁히기 칩을 **검색 엔진이 센다**. 그래서 "적힌 숫자 = 누르면 나오는 수"가 성립한다(실측 410건 불일치 0).
-  - 함께 공개: `build_rank_body`·`build_facet_body`·`build_facet_plan`(순수 · 본문·계획 조립) · `FACET_FIELDS` · `FACET_SELF_FILTERS` · 설계 상수 `RANK_DEPTH_DEFAULT`(1,000) · `TOTAL_CAP_DEFAULT`(10,000) · `FACET_SIZE_DEFAULT`(24) · `SORT_DEPTH_DEFAULT`(10,000) · `SEARCH_PIPELINE_DEFAULT` · `WORD_FIELDS_DEFAULT`.
+  - 함께 공개: `build_rank_body`·`build_facet_body`·`build_facet_plan`(순수 · 본문·계획 조립) · `FACET_FIELDS` · `FACET_SELF_FILTERS` · 설계 상수 `RANK_DEPTH_DEFAULT`(1,000) · `TOTAL_CAP_DEFAULT`(10,000) · `FACET_SIZE_DEFAULT`(24) · `SORT_DEPTH_DEFAULT`(10,000) · `SEARCH_PIPELINE_DEFAULT` · `WORD_OPERATOR_DEFAULT`(`and`) · `SEMANTIC_MIN_COSINE_DEFAULT`(0.60).
+  - **집합 = 단어 ∪ 뜻이 임계 이상**(2026-09-08 사용자 지시로 재설계). 단어 절은 멀티모달 검색과 **같은 것**을 쓰고(`query_builder.build_word_should` 신설 — 각자 만들면 같은 질의가 다른 파일을 찾는다 · 실측 상위 10 중 3건만 겹침), 뜻은 「상위 k개」가 아니라 **유사도 하한**(radial kNN `min_score`)으로 청한다. k 로 청하면 관련이 없어도 k 개를 채워 주므로 개수가 질의가 아니라 k 가 정한다(실측: 코퍼스에 없는 `컬링`·`베이글` 도 k=100 이면 100건).
+  - 🔴 **의미 집합은 id 목록으로 굳혀 모든 질의가 공유한다**(`build_semantic_body` · `SEMANTIC_CAP_DEFAULT` 500). 벡터 검색은 근사라 필터 유무로 찾아내는 문서가 달라지는데(작은 집합에서는 전수 비교로 바뀐다) 축별 집계는 필터를 일부러 바꾼다 — 질의마다 다시 하면 칩 건수와 클릭 결과가 어긋난다(실측 `등산` 칩 12 대 클릭 13). 조건 없이 한 번만 구해 굳히면 조건이 무엇이든 같은 문서를 가리킨다(질의 1회 추가).
+  - 임계 0.60 은 골든 464질의 전수 측정으로 골랐다 — 되찾음:잡음 101:107(0.55 는 213:1,022) · 자료 없는 질의 34개 중 32개가 0건 유지. 효과: `남한산성` 354→3건 · `클래식 피아노 연주회` 0→4건(글자로는 못 찾던 베토벤·피아노 자료 회복) · `컬링` 1건 · `증권 약관` 0건.
+  - ⚠️ **정렬과 무관하게 질의 임베딩이 필요하다** — 뜻이 집합 판정에 쓰이므로. 정렬에 따라 개수가 달라지면 화면이 거짓말을 한다(v0.6.0 개발 중 "필드 정렬은 임베딩 생략" 최적화를 철회).
   - ⚠️ **관련도 컷오프를 쓰지 않는다** — 컷오프는 받아온 뒤 파이썬에서 계산하므로 검색 엔진이 셀 수 없고, 세는 대상이 확정되지 않으면 칩 건수가 클릭 결과와 어긋난다. 기존 `search_hybrid`(멀티모달 검색 화면)는 컷오프를 그대로 유지한다.
   - **칩은 축마다 자기 조건을 뺀 채 센다**(`build_facet_plan`) — 그래야 주제를 고른 뒤에도 다른 주제로 갈아탈 수 있다(전부 적용해 세면 고른 주제 하나만 남는다 · 실측 칩 5·9개 → 1·3개). 하위주제는 주제의 자식이라 주제 축에서 함께 뺀다. 뺄 조건이 같은 축은 한 질의로 묶어 **왕복 한 번**으로 보낸다(`msearch`). 칩 숫자의 뜻 = **그 칩 하나만 골랐을 때 나오는 수**(다른 축 조건은 적용).
   - **정렬** `sort=` — `SORT_OPTIONS` 의 닫힌 목록 9종(`relevance` 기본 · 이름 · 수정일 · 등록일 · 크기 각 ↑↓). 필드 정렬은 **벡터 질의를 보내지 않는다**(순서를 필드가 정하므로) → 임베딩이 필요 없고(`query_vector=None` 허용) 정규화 파이프라인도 붙이지 않으며, 하이브리드의 깊이 제약이 사라져 `SORT_DEPTH_DEFAULT`(10,000)까지 넘길 수 있다. 동률은 자산 id 로 갈린다(페이징 중복·누락 방지).
@@ -25,6 +29,7 @@
 - `opensearch_sync.build_index_body` 에 정렬용 필드 3종 추가 — `file_name_sort`(keyword) · `file_size`(long) · `filter_date.updated_at`(date). 재동기화 SELECT 에 `a.updated_at`·`a.file_size` 를 싣고 `build_filter_index_fields(updated_at=…, file_size=…)` 가 채운다. 날짜는 생성일과 같은 **날짜 단위**(화면 표도 날짜까지만 보인다 · `filter_date.created_at` 의 단위는 **바꾸지 않았다** — 전체 타임스탬프로 바꾸면 `created_to` 가 그 날 오전 0시로 해석되어 하루가 빠진다).
 - `opensearch_sync.ensure_index` 가 기존 색인에 **빠진 매핑 속성만 보강**한다(반환값에 `'updated'` 추가). 보강 없이 재색인하면 검색 엔진 자동 매핑으로 문자열이 분석 필드가 되어 **정렬만 조용히 실패**한다. 기존 필드 정의는 건드리지 않는다(그때는 `--recreate`).
 - 🔴 **소비 레포 조치**: 새 정렬을 쓰려면 `run_opensearch_resync --env <env>` 를 한 번 돌려야 한다(매핑 보강 + 값 채우기). dev 실행 결과 = `updated · 1,526건 · 오류 0`.
+- `query_builder.build_word_should(query, *, operator)` — 검색어를 필드별 단어 절 묶음으로(순수). 두 검색 화면의 **단어 절 정본**. 종전 `build_bm25_body` 내부 로직을 그대로 뽑은 것이라 기존 호출의 결과는 바이트 동일. 공개 API 표에 `build_bm25_body`·`build_knn_body` 도 함께 등재(코드 변경 0 · 계약면 명시).
 - `search_filters.SearchFilters` 의 주제·하위주제가 **여럿**을 받는다 — `topics: tuple[str, ...]`·`subtopics: tuple[str, ...]`. 같은 축의 여러 값은 「또는」(태그와 같은 규칙)이며 OS 절은 종전과 같은 `terms` 배열이라 모양이 바뀌지 않는다. `parse_search_filters(topic=…, subtopic=…)` 는 **문자열 하나도 목록도** 받는다. 종전 이름 `.topic`·`.subtopic` 은 **첫 값을 주는 읽기 전용 속성**으로 남겨 소비 코드가 깨지지 않는다(새 코드는 복수 이름을 읽는다).
 
 ## [v0.5.0] — 2026-09-07 (095 개체 화면 seam · 라벨 읽기 · 이유 코드)

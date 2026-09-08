@@ -49,6 +49,77 @@ _MODALITY_VALUES: dict[str, frozenset[str]] = {
 }
 
 
+def build_word_should(query: str, *, operator: str = "or") -> list[dict[str, Any]]:
+    """검색어를 **필드별 단어 절 묶음**으로 만든다(순수·결정적 · 두 검색 화면 공용).
+
+    ``bool.should`` 안에 들어가는 절들이며 호출부가 ``minimum_should_match: 1`` 과 함께 쓴다.
+    필드마다 별도 절(``_name``)로 쪼개는 이유: 응답의 ``matched_queries`` 로 **어느 필드에서
+    맞았는지**를 관측해야 뒤쪽 증거 판정(``query_evidence``)이 가능하기 때문이다.
+    boost 차등(summary^3 … file_name^0.5)은 파일명 잡음이 랭킹을 압도하지 못하게 한다.
+
+    🔴 **한 곳에서 만든다**(096): 멀티모달 검색(`search_hybrid`)과 파일 검색(`file_search`)이 같은
+    절을 쓴다. 두 화면이 각자 단어 절을 만들면 **같은 질의가 다른 파일을 찾는다** — 실측으로
+    `file_name^2` 대 `file_name^0.5` 만 달라도 상위 10 중 3건만 겹쳤다.
+
+    Args:
+        query: 검색어(정규화가 끝난 문자열).
+        operator: ``or``(한 형태소만 맞아도 후보) 또는 ``and``(**모든 형태소**가 맞아야 후보).
+            한국어는 낱말이 형태소로 쪼개지므로(``남한산성`` → 남한/산/성) ``or`` 는 개수를 크게
+            부풀린다(실측 354건 대 3건).
+
+    Returns:
+        ``bool.should`` 절 목록(5개). 순수 데이터 — 실행은 호출부가 한다.
+    """
+    label_term = query.strip().casefold()
+
+    def _match(field: str, boost: float, _name: str) -> dict[str, Any]:
+        """텍스트 필드 하나에 대한 match 절을 만든다(``_name`` 으로 hit 관측 가능하게).
+
+        Args:
+            field: 색인 필드 이름.
+            boost: 이 필드의 가중치. 1.0 이면 표기를 생략한다(본문을 작게 유지).
+            _name: 관측용 절 이름(``matched_queries`` 에 실린다).
+
+        Returns:
+            ``match`` 절.
+        """
+        inner: dict[str, Any] = {"query": query, "_name": _name}
+        if boost != 1.0:
+            inner["boost"] = boost
+        if operator != "or":
+            inner["operator"] = operator
+        return {"match": {field: inner}}
+
+    def _cross_meta(*, boost: float, _name: str) -> dict[str, Any]:
+        """summary+keywords 를 **한 필드처럼** 보는 절 — 토큰이 두 필드에 나뉘어 있어도 맞는다.
+
+        Args:
+            boost: 이 절의 가중치.
+            _name: 관측용 절 이름.
+
+        Returns:
+            ``multi_match``(cross_fields) 절.
+        """
+        inner: dict[str, Any] = {
+            "query": query,
+            "type": "cross_fields",
+            "fields": list(_CROSS_META_FIELDS),
+            "_name": _name,
+            "boost": boost,
+        }
+        if operator != "or":
+            inner["operator"] = operator
+        return {"multi_match": inner}
+
+    return [
+        _match("keywords", 2.0, "hit_keywords"),
+        {"term": {"labels": {"value": label_term, "_name": "hit_labels", "boost": 1.0}}},
+        _match("file_name", 0.5, "hit_file_name"),
+        _match("summary", 3.0, "hit_summary"),
+        _cross_meta(boost=1.0, _name="hit_cross_meta"),
+    ]
+
+
 def build_bm25_body(
     query: str,
     *,
@@ -79,37 +150,7 @@ def build_bm25_body(
     """
     filters: list[dict[str, Any]] = [{"terms": {"modality": sorted(modality_values)}}]
     filters.extend(filters_to_opensearch_bool(search_filters))
-    label_term = query.strip().casefold()
-
-    def _match(field: str, boost: float, _name: str) -> dict[str, Any]:
-        """텍스트 필드 하나에 대한 match 절을 만든다(``_name`` 으로 hit 관측 가능하게)."""
-        inner: dict[str, Any] = {"query": query, "_name": _name}
-        if boost != 1.0:
-            inner["boost"] = boost
-        if operator != "or":
-            inner["operator"] = operator
-        return {"match": {field: inner}}
-
-    def _cross_meta(*, boost: float, _name: str) -> dict[str, Any]:
-        """summary+keywords 를 **한 필드처럼** 보는 절 — 토큰이 두 필드에 나뉘어 있어도 맞는다."""
-        inner: dict[str, Any] = {
-            "query": query,
-            "type": "cross_fields",
-            "fields": list(_CROSS_META_FIELDS),
-            "_name": _name,
-            "boost": boost,
-        }
-        if operator != "or":
-            inner["operator"] = operator
-        return {"multi_match": inner}
-
-    should: list[dict[str, Any]] = [
-        _match("keywords", 2.0, "hit_keywords"),
-        {"term": {"labels": {"value": label_term, "_name": "hit_labels", "boost": 1.0}}},
-        _match("file_name", 0.5, "hit_file_name"),
-        _match("summary", 3.0, "hit_summary"),
-        _cross_meta(boost=1.0, _name="hit_cross_meta"),
-    ]
+    should = build_word_should(query, operator=operator)
     # 배제 절은 필요할 때만 넣는다 — 빈 must_not 을 항상 붙이면 요청 본문이 커지고,
     # 봉인 테스트가 보는 body 모양도 달라진다.
     must_not: list[dict[str, Any]] = []
