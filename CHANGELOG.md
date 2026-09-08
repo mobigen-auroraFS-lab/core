@@ -15,8 +15,11 @@
 
 ### 추가 (MINOR — 기존 호출 무변경)
 - `src.search.file_search.search_files(client, index, *, query, query_vector, filters=None, from_=0, size=50, …)` — 파일 검색 화면(시나리오 ③)용 조회. 집합을 **단어 일치 + 조건**으로 확정하고, 순서는 검색 엔진의 정규화·결합 파이프라인이 매기며, 개수·좁히기 칩을 **검색 엔진이 센다**. 그래서 "적힌 숫자 = 누르면 나오는 수"가 성립한다(실측 410건 불일치 0).
-  - 함께 공개: `build_rank_body`·`build_facet_body`(순수 · 본문 조립) · `FACET_FIELDS` · 설계 상수 `RANK_DEPTH_DEFAULT`(1,000) · `TOTAL_CAP_DEFAULT`(10,000) · `FACET_SIZE_DEFAULT`(24) · `SEARCH_PIPELINE_DEFAULT` · `WORD_FIELDS_DEFAULT`.
+  - 함께 공개: `build_rank_body`·`build_facet_body`·`build_facet_plan`(순수 · 본문·계획 조립) · `FACET_FIELDS` · `FACET_SELF_FILTERS` · 설계 상수 `RANK_DEPTH_DEFAULT`(1,000) · `TOTAL_CAP_DEFAULT`(10,000) · `FACET_SIZE_DEFAULT`(24) · `SORT_DEPTH_DEFAULT`(10,000) · `SEARCH_PIPELINE_DEFAULT` · `WORD_FIELDS_DEFAULT`.
   - ⚠️ **관련도 컷오프를 쓰지 않는다** — 컷오프는 받아온 뒤 파이썬에서 계산하므로 검색 엔진이 셀 수 없고, 세는 대상이 확정되지 않으면 칩 건수가 클릭 결과와 어긋난다. 기존 `search_hybrid`(멀티모달 검색 화면)는 컷오프를 그대로 유지한다.
+  - **칩은 축마다 자기 조건을 뺀 채 센다**(`build_facet_plan`) — 그래야 주제를 고른 뒤에도 다른 주제로 갈아탈 수 있다(전부 적용해 세면 고른 주제 하나만 남는다 · 실측 칩 5·9개 → 1·3개). 하위주제는 주제의 자식이라 주제 축에서 함께 뺀다. 뺄 조건이 같은 축은 한 질의로 묶어 **왕복 한 번**으로 보낸다(`msearch`). 칩 숫자의 뜻 = **그 칩 하나만 골랐을 때 나오는 수**(다른 축 조건은 적용).
+  - **정렬** `sort=` — `SORT_OPTIONS` 의 닫힌 목록(`relevance` 기본 · `name_asc`/`name_desc` · `created_desc`/`created_asc`). 필드 정렬은 **벡터 질의를 보내지 않는다**(순서를 필드가 정하므로) → 임베딩이 필요 없고(`query_vector=None` 허용) 정규화 파이프라인도 붙이지 않으며, 하이브리드의 깊이 제약이 사라져 `SORT_DEPTH_DEFAULT` 까지 넘길 수 있다. ⚠️ **수정일·크기 정렬은 색인에 필드가 없어 불가**(넣으려면 파이프라인 색인 매핑 변경 + 전량 재색인).
+- `search_filters.SearchFilters` 의 주제·하위주제가 **여럿**을 받는다 — `topics: tuple[str, ...]`·`subtopics: tuple[str, ...]`. 같은 축의 여러 값은 「또는」(태그와 같은 규칙)이며 OS 절은 종전과 같은 `terms` 배열이라 모양이 바뀌지 않는다. `parse_search_filters(topic=…, subtopic=…)` 는 **문자열 하나도 목록도** 받는다. 종전 이름 `.topic`·`.subtopic` 은 **첫 값을 주는 읽기 전용 속성**으로 남겨 소비 코드가 깨지지 않는다(새 코드는 복수 이름을 읽는다).
 
 ## [v0.5.0] — 2026-09-07 (095 개체 화면 seam · 라벨 읽기 · 이유 코드)
 

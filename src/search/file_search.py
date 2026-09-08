@@ -27,11 +27,33 @@
 순위 질의와 집계 질의를 **따로** 보낸다. 순위는 하이브리드(단어+뜻)라 정규화 파이프라인을 타야 하고,
 집계·개수는 "단어·조건에 맞는 전부"라는 확정된 집합에서 세야 한다. 한 질의로 합치면 세는 대상이 두 순위의
 합집합이 되어 뜻이 흐려진다. 각 질의가 0.2초 미만이라 나눠도 싸다(파이썬 융합은 0.4~1.0초였다).
+
+## 칩은 **자기 조건을 뺀 채** 센다 (096 · 087 이 겪은 함정)
+
+주제 칩을 누른 뒤에도 **다른 주제로 갈아탈 수 있어야** 한다. 그런데 걸린 조건을 전부 적용해 세면 고른
+주제 하나만 남아(다른 주제는 건수 0이라 사라진다) 갈아탈 길이 막힌다 — 실측으로 주제 칩이 5·9개에서
+1·3개로 줄었다. 그래서 **축마다 자기 조건을 빼고** 센다. 옷 가게 비유: 「빨강」을 고른 상태에서 색깔
+선반에는 파랑·검정이 그대로 보여야 갈아입을 수 있고, 대신 사이즈 선반은 「빨강 옷 중에서」 세는 것이 맞다.
+
+숫자의 뜻은 이렇게 못 박는다 — **그 칩 하나만 골랐을 때 나오는 수**(다른 축 조건은 그대로 적용). 같은
+축에서 여럿 고르면 「또는」이라 결과는 각 칩 수의 합집합이므로 개별 칩 수보다 크거나 같다. 이는 일반적인
+좁히기 검색의 관행과 같다.
+
+하위주제는 주제의 **자식**이라 주제 축을 셀 때 하위주제 조건까지 뺀다. 빼지 않으면 「음악 > 가수」를 고른
+상태에서 가수가 음악에만 달려 있으므로 주제 축이 다시 음악 하나로 접힌다.
+
+## 정렬
+
+기본은 관련도(유사도)다. 이름·등록일로 정렬하면 뜻은 순서에 관여할 이유가 없으므로 **벡터 질의를 아예
+보내지 않는다** — 빨라지고, 하이브리드의 페이징 깊이 제약(``rank_depth``)도 사라진다.
+⚠️ **수정일·크기 정렬은 아직 불가**하다 — 색인에 그 필드가 없다(표시용으로 DB 에서 따로 읽는다).
+넣으려면 파이프라인의 색인 매핑 변경 + 전량 재색인이 필요하다.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from typing import Any
 
 from src.config.filename_util import display_file_name
@@ -72,14 +94,43 @@ FACET_FIELDS: dict[str, str] = {
     "tag": "keywords_norm",
 }
 
+# 축 → 그 축을 셀 때 **빼야 할** 필터 필드(위 docstring 「칩은 자기 조건을 뺀 채 센다」).
+#   하위주제는 주제의 자식이라 주제 축에서 함께 뺀다 — 빼지 않으면 주제 축이 다시 하나로 접힌다.
+FACET_SELF_FILTERS: dict[str, tuple[str, ...]] = {
+    "topic": ("topics", "subtopics"),
+    "subtopic": ("subtopics",),
+    "tag": ("tags",),
+}
+
+# 정렬 이름 → 색인 정렬 절. ``None`` 은 관련도(엔진 점수) 순.
+#   ⚠️ 마지막에 ``asset_id`` 를 덧붙이는 이유: 값이 같은 행들의 순서가 실행마다 흔들리면 페이지를 넘길 때
+#      같은 파일이 두 번 보이거나 아예 빠진다(결정성 요구사항).
+#   ⚠️ 수정일·크기는 색인에 없어 목록에 없다 — 넣으려면 색인 매핑 변경 + 전량 재색인.
+SORT_OPTIONS: dict[str, tuple[dict[str, Any], ...] | None] = {
+    "relevance": None,
+    "name_asc": ({"file_name.raw": "asc"}, {"asset_id": "asc"}),
+    "name_desc": ({"file_name.raw": "desc"}, {"asset_id": "asc"}),
+    "created_desc": ({"filter_date.created_at": "desc"}, {"asset_id": "asc"}),
+    "created_asc": ({"filter_date.created_at": "asc"}, {"asset_id": "asc"}),
+}
+SORT_DEFAULT = "relevance"
+
+# 필드 정렬로 넘길 수 있는 깊이. 하이브리드와 달리 이웃 탐색이 없어 깊이 제약이 색인 결과창뿐이다.
+SORT_DEPTH_DEFAULT = 10_000
+
 __all__ = [
     "FACET_FIELDS",
+    "FACET_SELF_FILTERS",
     "FACET_SIZE_DEFAULT",
     "RANK_DEPTH_DEFAULT",
     "SEARCH_PIPELINE_DEFAULT",
+    "SORT_DEFAULT",
+    "SORT_DEPTH_DEFAULT",
+    "SORT_OPTIONS",
     "TOTAL_CAP_DEFAULT",
     "WORD_FIELDS_DEFAULT",
     "build_facet_body",
+    "build_facet_plan",
     "build_rank_body",
     "search_files",
 ]
@@ -98,15 +149,22 @@ def _word_clause(query: str, fields: Sequence[str]) -> dict[str, Any]:
     return {"multi_match": {"query": query, "fields": list(fields)}}
 
 
+_ROW_SOURCE: tuple[str, ...] = (
+    "asset_id", "modality", "domain_label", "file_name", "fs_uri",
+    "summary", "keywords", "topics", "subtopics", "topic_pairs",
+)
+
+
 def build_rank_body(
     query: str,
-    query_vector: Sequence[float],
+    query_vector: Sequence[float] | None = None,
     *,
     filters: SearchFilters | None = None,
     from_: int = 0,
     size: int = 50,
     rank_depth: int = RANK_DEPTH_DEFAULT,
     fields: Sequence[str] = WORD_FIELDS_DEFAULT,
+    sort: str = SORT_DEFAULT,
 ) -> dict[str, Any]:
     """순위 질의 본문 — 집합은 단어·조건으로 한정하고 순서만 뜻으로 돕는다(순수).
 
@@ -114,34 +172,54 @@ def build_rank_body(
     집합에 들어와 개수가 부풀고(실측: `흉부` 1건 → 500건), 그러면 세는 숫자가 뜻을 잃는다. 벡터는
     **순서를 돕는 역할**만 한다.
 
+    **이름·등록일 정렬이면 벡터를 아예 쓰지 않는다**(096) — 순서를 필드가 정하므로 뜻이 관여할 이유가
+    없다. 그러면 하이브리드 질의가 아니게 되어 정규화 파이프라인도 필요 없고 깊이 제약도 사라진다.
+
     Args:
         query: 검색어.
         query_vector: 질의 임베딩. 문서 색인과 **같은 채널**로 만든 것이어야 같은 공간에서 비교된다.
+            관련도 정렬에만 필요하다 — 필드 정렬이면 무시하므로 ``None`` 을 줘도 된다.
         filters: 주제·하위주제·태그·기간·확장자 선필터. ``None`` 이면 조건 없음.
         from_: 페이지 시작 위치.
         size: 이 페이지의 행 수.
         rank_depth: 순위를 매길 깊이(= 페이징 가능 깊이). 벡터 이웃 수에도 같은 값을 쓴다.
+            관련도 정렬에만 쓰인다.
         fields: 단어를 찾을 필드.
+        sort: 정렬 이름(``SORT_OPTIONS`` 의 키).
 
     Returns:
-        OpenSearch 검색 본문. ``search_pipeline`` 은 호출부가 붙인다(정규화·결합이 그 파이프라인 몫).
+        OpenSearch 검색 본문. ``search_pipeline`` 은 호출부가 붙인다(정규화·결합이 그 파이프라인 몫이며
+        **관련도 정렬에만** 붙인다).
+
+    Raises:
+        ValueError: 모르는 정렬 이름이거나, 관련도 정렬인데 질의 임베딩이 없을 때(벡터 없이 하이브리드를
+            보내면 엔진이 절 오류를 내므로 여기서 뜻이 분명한 예외로 막는다).
     """
+    if sort not in SORT_OPTIONS:
+        raise ValueError(f"알 수 없는 정렬: {sort!r} (허용: {sorted(SORT_OPTIONS)})")
     word = _word_clause(query, fields)
     clauses = filters_to_opensearch_bool(filters)
-    scope = [word, *clauses]
-    return {
+    body: dict[str, Any] = {
         "from": int(from_),
         "size": int(size),
         # 개수는 집계 질의가 정확히 센다 — 여기서 또 세면 같은 일을 두 번 한다.
         "track_total_hits": False,
-        "query": {"hybrid": {"pagination_depth": int(rank_depth), "queries": [
-            {"bool": {"must": [word], "filter": clauses}},
-            {"knn": {"embedding": {"vector": list(query_vector), "k": int(rank_depth),
-                                   "filter": {"bool": {"filter": scope}}}}},
-        ]}},
-        "_source": ["asset_id", "modality", "domain_label", "file_name", "fs_uri",
-                    "summary", "keywords", "topics", "subtopics", "topic_pairs"],
+        "_source": list(_ROW_SOURCE),
     }
+    order = SORT_OPTIONS[sort]
+    if order is not None:
+        body["query"] = {"bool": {"must": [word], "filter": clauses}}
+        body["sort"] = [dict(s) for s in order]
+        return body
+    if query_vector is None:
+        raise ValueError("관련도 정렬에는 질의 임베딩이 필요하다(필드 정렬은 없어도 된다)")
+    scope = [word, *clauses]
+    body["query"] = {"hybrid": {"pagination_depth": int(rank_depth), "queries": [
+        {"bool": {"must": [word], "filter": clauses}},
+        {"knn": {"embedding": {"vector": list(query_vector), "k": int(rank_depth),
+                               "filter": {"bool": {"filter": scope}}}}},
+    ]}}
+    return body
 
 
 def build_facet_body(
@@ -178,6 +256,7 @@ def build_facet_body(
     """
     if total_cap < 1 or facet_size < 1:
         raise ValueError(f"범위 오류: total_cap={total_cap!r} facet_size={facet_size!r} (>=1)")
+    # 축이 하나도 없어도 유효하다 — 개수만 세는 질의다(096 축별 계획에서 그런 경우가 생긴다).
     unknown = [a for a in axes if a not in FACET_FIELDS]
     if unknown:
         raise ValueError(f"알 수 없는 좁히기 축: {unknown} (허용: {sorted(FACET_FIELDS)})")
@@ -200,6 +279,85 @@ def build_facet_body(
                            "filter": filters_to_opensearch_bool(filters)}},
         "aggs": aggs,
     }
+
+
+def _active_filter_fields(filters: SearchFilters | None) -> frozenset[str]:
+    """지금 **값이 들어 있는** 좁히기 필터 필드 이름들.
+
+    빈 축을 빼 봐야 질의가 같으므로, 값이 있는 축만 따로 세면 질의 수를 아낀다(조건이 없으면 질의 1개).
+
+    Args:
+        filters: 선필터 또는 ``None``.
+
+    Returns:
+        ``{"topics","subtopics","tags"}`` 의 부분집합.
+    """
+    if filters is None:
+        return frozenset()
+    return frozenset(
+        name for name in ("topics", "subtopics", "tags") if getattr(filters, name, ())
+    )
+
+
+def build_facet_plan(
+    query: str,
+    *,
+    filters: SearchFilters | None = None,
+    total_cap: int = TOTAL_CAP_DEFAULT,
+    facet_size: int = FACET_SIZE_DEFAULT,
+    axes: Sequence[str] = tuple(FACET_FIELDS),
+    fields: Sequence[str] = WORD_FIELDS_DEFAULT,
+) -> list[dict[str, Any]]:
+    """집계 **계획** — 어떤 축을 어떤 조건으로 셀지 정한다(순수 · 질의를 보내지 않는다).
+
+    축마다 자기 조건을 빼고 세야 칩으로 갈아탈 수 있다(모듈 docstring 「칩은 자기 조건을 뺀 채 센다」).
+    빼는 조합이 같은 축들은 **한 질의로 묶는다** — 예를 들어 주제만 골랐다면 하위주제·태그 축은 뺄 것이
+    없어 기본 질의에 함께 실리고, 주제 축만 따로 묻는다(질의 2개).
+
+    Args:
+        query: 검색어.
+        filters: 선필터.
+        total_cap: 전체 개수를 정확히 셀 상한.
+        facet_size: 축마다 받을 항목 수.
+        axes: 셀 축 이름들.
+        fields: 단어를 찾을 필드.
+
+    Returns:
+        ``[{"axes": (축…), "body": {…}, "total": bool}]``. **첫 항목이 조건을 전부 적용한 질의**이며
+        전체 개수를 센다(``total`` 참). 나머지는 칩 전용이라 개수를 쓰지 않는다.
+
+    Raises:
+        ValueError: 모르는 축 이름이거나 ``total_cap``·``facet_size`` 가 1 미만일 때.
+    """
+    unknown = [a for a in axes if a not in FACET_FIELDS]
+    if unknown:
+        raise ValueError(f"알 수 없는 좁히기 축: {unknown} (허용: {sorted(FACET_FIELDS)})")
+    active = _active_filter_fields(filters)
+
+    # 축을 "빼야 할 조건 조합" 으로 묶는다. 빼는 것이 없는 축은 기본 질의(조건 전부 적용)에 실린다.
+    groups: dict[frozenset[str], list[str]] = {}
+    for axis in axes:
+        drop = frozenset(FACET_SELF_FILTERS.get(axis, ())) & active
+        groups.setdefault(drop, []).append(axis)
+
+    base_axes = tuple(groups.pop(frozenset(), []))
+    plan: list[dict[str, Any]] = [{
+        "axes": base_axes,
+        "total": True,
+        "body": build_facet_body(query, filters=filters, total_cap=total_cap,
+                                 facet_size=facet_size, axes=base_axes, fields=fields),
+    }]
+    # 순서를 못 박는다 — 질의 순서가 흔들리면 응답 짝짓기가 어긋난다.
+    for drop in sorted(groups, key=lambda d: sorted(d)):
+        scoped = replace(filters, **dict.fromkeys(drop, ())) if filters is not None else None
+        plan.append({
+            "axes": tuple(groups[drop]),
+            "total": False,
+            "body": build_facet_body(query, filters=scoped, total_cap=total_cap,
+                                     facet_size=facet_size, axes=tuple(groups[drop]),
+                                     fields=fields),
+        })
+    return plan
 
 
 def _tag_label(bucket: Mapping[str, Any]) -> str:
@@ -270,12 +428,44 @@ def _row(hit: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _run_facets(client: Any, index: str, plan: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """집계 계획을 실행한다 — 여러 개면 **한 번의 왕복**(msearch)으로 묶는다.
+
+    질의가 하나면 평범한 검색으로 보낸다(묶을 것이 없는데 묶으면 응답 껍데기만 늘어난다).
+
+    Args:
+        client: OpenSearch 클라이언트.
+        index: 색인 이름.
+        plan: ``build_facet_plan`` 결과.
+
+    Returns:
+        계획과 **같은 순서**의 응답 목록.
+
+    Raises:
+        RuntimeError: 묶음 응답 중 하나라도 실패했을 때. 🔴 묶음 질의는 실패를 예외로 올리지 않고
+            응답 안에 담아 주므로, 확인하지 않으면 **칩이 조용히 빈 채로** 화면에 나간다.
+    """
+    if len(plan) == 1:
+        return [client.search(index=index, body=plan[0]["body"])]
+    lines: list[dict[str, Any]] = []
+    for entry in plan:
+        lines.append({})  # 색인은 위에서 한 번 지정하므로 머리줄은 비운다
+        lines.append(dict(entry["body"]))
+    responses = (client.msearch(index=index, body=lines) or {}).get("responses") or []
+    if len(responses) != len(plan):
+        raise RuntimeError(f"묶음 집계 응답 수가 맞지 않는다: {len(responses)} != {len(plan)}")
+    for entry, resp in zip(plan, responses, strict=True):
+        if isinstance(resp, Mapping) and resp.get("error"):
+            raise RuntimeError(f"집계 질의 실패(축 {entry['axes']}): {resp['error']}")
+    return list(responses)
+
+
 def search_files(
     client: Any,
     index: str,
     *,
     query: str,
-    query_vector: Sequence[float],
+    query_vector: Sequence[float] | None = None,
     filters: SearchFilters | None = None,
     from_: int = 0,
     size: int = 50,
@@ -284,6 +474,8 @@ def search_files(
     facet_size: int = FACET_SIZE_DEFAULT,
     axes: Sequence[str] = tuple(FACET_FIELDS),
     pipeline: str = SEARCH_PIPELINE_DEFAULT,
+    sort: str = SORT_DEFAULT,
+    sort_depth: int = SORT_DEPTH_DEFAULT,
 ) -> dict[str, Any]:
     """조건으로 좁힌 파일을 **유사도 순 한 페이지 + 정확한 전체 개수 + 좁히기 칩**으로 조회한다.
 
@@ -294,65 +486,84 @@ def search_files(
         client: OpenSearch 클라이언트.
         index: 색인 이름.
         query: 검색어. 빈 값이면 ``ValueError``(조건만으로 훑는 화면은 이 함수의 몫이 아니다).
-        query_vector: 질의 임베딩. **문서와 같은 채널**로 만들어야 한다.
-        filters: 선필터(주제·하위주제·태그·기간·확장자).
-        from_: 페이지 시작 위치. ``from_ + size`` 가 ``rank_depth`` 를 넘으면 ``ValueError`` —
+        query_vector: 질의 임베딩. **문서와 같은 채널**로 만들어야 한다. 관련도 정렬에만 필요하다 —
+            필드 정렬이면 쓰지 않으므로 호출부는 만들 필요조차 없다(임베딩 비용을 아낀다).
+        filters: 선필터(주제·하위주제·태그·기간·확장자). 주제·하위주제·태그는 **여럿**을 받으며
+            같은 축의 여러 값은 「또는」이다.
+        from_: 페이지 시작 위치. ``from_ + size`` 가 정렬별 깊이 한계를 넘으면 ``ValueError`` —
             그 밖은 순위를 **매기지 않은** 구간이라 빈 페이지로 돌려주면 "끝"과 구분되지 않는다.
             반면 ``from_`` 이 전체 개수를 넘는 것은 오류가 아니라 그냥 **끝을 지난 것**이므로
             빈 ``rows`` 와 정상 ``total`` 을 돌려준다(둘은 다른 상황이다).
         size: 이 페이지의 행 수(1 이상).
-        rank_depth: 순위·페이징 깊이.
+        rank_depth: 관련도 정렬의 순위·페이징 깊이. 필드 정렬은 ``sort_depth`` 를 쓴다.
         total_cap: 개수를 정확히 셀 상한.
         facet_size: 축마다 받을 칩 수.
         axes: 셀 축 이름들.
-        pipeline: 정규화·결합 파이프라인 이름.
+        pipeline: 정규화·결합 파이프라인 이름. **관련도 정렬에만** 붙인다(필드 정렬은 하이브리드
+            질의가 아니라 정규화할 것이 없다).
+        sort: 정렬 이름(``SORT_OPTIONS`` 의 키). 기본은 관련도.
+        sort_depth: 필드 정렬로 넘길 수 있는 깊이(색인 결과창 한계).
 
     Returns:
-        ``{rows, total, total_capped, facets, from, size}``. ``total_capped`` 가 참이면 ``total`` 은
-        "이 수 이상"이라는 뜻이다(화면이 "1만 건 이상"으로 표기한다). ``facets`` 는
-        ``{축: [{key, label, count}]}``.
+        ``{rows, total, total_capped, facets, from, size, sort}``. ``total_capped`` 가 참이면
+        ``total`` 은 "이 수 이상"이라는 뜻이다(화면이 "1만 건 이상"으로 표기한다). ``facets`` 는
+        ``{축: [{key, label, count}]}`` 이고, 각 칩 수는 **그 칩 하나만 골랐을 때 나오는 수**다
+        (모듈 docstring 참조 — 같은 축의 다른 선택은 세는 데서 빼기 때문이다).
 
     Raises:
-        ValueError: 빈 질의 · 범위 밖 페이지 · 잘못된 축·상한.
+        ValueError: 빈 질의 · 범위 밖 페이지 · 잘못된 축·상한·정렬 · 관련도 정렬인데 임베딩 없음.
+        RuntimeError: 묶음 집계 질의 중 하나가 실패했을 때.
         OpenSearch 미도달 예외는 감싸지 않고 그대로 올린다 — 결과가 백엔드 가용성에 따라 달라지면 안 된다.
     """
     q = (query or "").strip()
     if not q:
         raise ValueError("파일 검색은 검색어가 필요하다(조건만으로 훑는 경로는 따로 둔다)")
+    if sort not in SORT_OPTIONS:
+        raise ValueError(f"알 수 없는 정렬: {sort!r} (허용: {sorted(SORT_OPTIONS)})")
     if size < 1 or from_ < 0:
         raise ValueError(f"페이지 범위 오류: from_={from_!r} size={size!r}")
-    if from_ + size > rank_depth:
+    # 깊이 한계는 정렬 방식에 따라 다르다 — 관련도는 이웃 탐색 깊이에, 필드 정렬은 색인 결과창에 걸린다.
+    by_field = SORT_OPTIONS[sort] is not None
+    depth = int(sort_depth if by_field else rank_depth)
+    if from_ + size > depth:
         raise ValueError(
-            f"순위 깊이를 넘는 페이지다: from_+size={from_ + size} > rank_depth={rank_depth} — "
-            "조건을 더 걸거나 정렬을 바꿔야 한다")
+            f"넘길 수 있는 깊이를 넘는 페이지다: from_+size={from_ + size} > {depth} "
+            f"(정렬 {sort!r}) — 조건을 더 걸거나 정렬을 바꿔야 한다")
 
     # 🔴 **개수를 먼저 센다.** 순위 질의는 결과 끝을 넘는 페이지를 요청하면 오류를 낸다
     #    ("Reached end of search result" · 실측). 끝을 넘은 페이지는 오류가 아니라 **빈 페이지**여야
     #    맞으므로, 총계를 먼저 알고 그때만 순위를 묻는다(질의 하나를 아끼는 효과도 있다).
-    facet = client.search(
-        index=index,
-        body=build_facet_body(q, filters=filters, total_cap=total_cap, facet_size=facet_size,
-                              axes=axes),
-    )
-    total_info = (facet.get("hits") or {}).get("total") or {}
+    plan = build_facet_plan(q, filters=filters, total_cap=total_cap, facet_size=facet_size,
+                            axes=axes)
+    responses = _run_facets(client, index, plan)
+    total_info = (responses[0].get("hits") or {}).get("total") or {}
     total = int(total_info.get("value") or 0)
+
     hits: list[dict[str, Any]] = []
     if from_ < total:
+        params = {} if by_field else {"search_pipeline": pipeline}
         rank = client.search(
             index=index,
             body=build_rank_body(q, query_vector, filters=filters, from_=from_,
                                  # 남은 것보다 더 달라고 하면 같은 오류가 난다 — 남은 만큼만 청한다.
-                                 size=min(size, total - from_), rank_depth=rank_depth),
-            params={"search_pipeline": pipeline},
+                                 size=min(size, total - from_), rank_depth=rank_depth, sort=sort),
+            params=params,
         )
         hits = ((rank.get("hits") or {}).get("hits") or [])
-    aggs = facet.get("aggregations") or {}
+
+    facets: dict[str, list[dict[str, Any]]] = {}
+    for entry, resp in zip(plan, responses, strict=True):
+        aggs = resp.get("aggregations") or {}
+        for axis in entry["axes"]:
+            facets[axis] = _facet_items(axis, aggs.get(axis))
     return {
         "rows": [_row(h) for h in hits],
         "total": total,
         # 상한에 걸렸으면 검색 엔진이 ``gte``(이 수 이상)로 알려 준다.
         "total_capped": str(total_info.get("relation") or "eq") != "eq",
-        "facets": {axis: _facet_items(axis, aggs.get(axis)) for axis in axes},
+        # 축 순서는 요청 순서를 따른다(화면이 칩 묶음을 그 순서로 그린다).
+        "facets": {axis: facets.get(axis, []) for axis in axes},
         "from": int(from_),
         "size": int(size),
+        "sort": sort,
     }

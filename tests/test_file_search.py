@@ -8,6 +8,8 @@
 ③ **태그 라벨을 대표 문서에서 되찾는다** — 색인에는 정규화 키만 있어 `전통 음식` 이 `전통음식` 으로
    저장돼 있다. 정규화 규칙은 코어 한 곳뿐이라 색인·필터·표시가 갈라지지 않는다.
 ④ **범위를 넘는 페이지는 예외** — 순위를 매기지 않은 구간을 빈 페이지로 주면 "끝"과 구분되지 않는다.
+⑤ **칩은 자기 조건을 뺀 채 센다**(096) — 그래야 고른 뒤에도 다른 값으로 갈아탈 수 있다(087 함정).
+⑥ **필드 정렬은 벡터를 쓰지 않는다**(096) — 순서를 필드가 정하므로 뜻이 관여할 이유가 없다.
 """
 
 from __future__ import annotations
@@ -17,8 +19,12 @@ import unittest
 from src.search.file_search import (
     FACET_FIELDS,
     RANK_DEPTH_DEFAULT,
+    SORT_DEFAULT,
+    SORT_DEPTH_DEFAULT,
+    SORT_OPTIONS,
     TOTAL_CAP_DEFAULT,
     build_facet_body,
+    build_facet_plan,
     build_rank_body,
     search_files,
 )
@@ -26,7 +32,11 @@ from src.search.search_filters import parse_search_filters
 
 
 class _FakeClient:
-    """``search`` 호출을 기록하고 준비된 응답을 순서대로 돌려준다."""
+    """``search``/``msearch`` 호출을 기록하고 준비된 응답을 순서대로 돌려준다.
+
+    묶음 질의(``msearch``)는 준비된 응답에서 **머리줄 수만큼** 꺼내 한 묶음으로 돌려준다 — 실제
+    OpenSearch 처럼 계획과 같은 순서로 응답이 온다.
+    """
 
     def __init__(self, responses: list[dict]) -> None:
         self._responses = list(responses)
@@ -35,6 +45,11 @@ class _FakeClient:
     def search(self, *, index: str, body: dict, params: dict | None = None) -> dict:
         self.calls.append({"index": index, "body": body, "params": params or {}})
         return self._responses.pop(0)
+
+    def msearch(self, *, index: str, body: list, params: dict | None = None) -> dict:
+        self.calls.append({"index": index, "msearch": body, "params": params or {}})
+        bodies = [x for i, x in enumerate(body) if i % 2 == 1]
+        return {"responses": [self._responses.pop(0) for _ in bodies]}
 
 
 def _hit(asset_id: str, score: float, **src) -> dict:
@@ -212,6 +227,166 @@ class TestSearchFiles(unittest.TestCase):
         for kw in ({"size": 0}, {"from_": -1}):
             with self.assertRaises(ValueError):
                 search_files(_FakeClient([]), "assets", query="김치", query_vector=[0.0], **kw)
+
+
+class TestFacetScoping(unittest.TestCase):
+    """096 — 칩은 **자기 조건을 뺀 채** 센다(칩으로 갈아탈 수 있어야 한다).
+
+    옷 가게 비유: 「빨강」을 고른 상태에서 색깔 선반에는 파랑·검정이 그대로 보여야 갈아입을 수 있다.
+    조건을 전부 적용해 세면 고른 색 하나만 남아 갈아탈 길이 막힌다(087 이 겪은 함정 · 실측 5→1개).
+    """
+
+    def _fields_of(self, body: dict) -> list[str]:
+        out = []
+        for clause in body["query"]["bool"]["filter"]:
+            out.extend((clause.get("terms") or clause.get("range") or {}).keys())
+        return out
+
+    def test_no_filter_is_one_query(self) -> None:
+        plan = build_facet_plan("김치")
+        self.assertEqual(len(plan), 1)
+        self.assertEqual(plan[0]["axes"], ("topic", "subtopic", "tag"))
+        self.assertIs(plan[0]["total"], True)
+
+    def test_topic_axis_drops_its_own_filter(self) -> None:
+        plan = build_facet_plan("김치", filters=parse_search_filters(topic=["음악"]))
+        self.assertEqual(len(plan), 2)
+        # 기본 질의(개수·나머지 축)에는 주제 조건이 그대로 걸린다.
+        self.assertEqual(plan[0]["axes"], ("subtopic", "tag"))
+        self.assertIn("topics", self._fields_of(plan[0]["body"]))
+        # 주제 축은 주제 조건을 뺀 채 센다 → 다른 주제가 칩으로 남는다.
+        self.assertEqual(plan[1]["axes"], ("topic",))
+        self.assertNotIn("topics", self._fields_of(plan[1]["body"]))
+        self.assertIs(plan[1]["total"], False)
+
+    def test_topic_axis_also_drops_subtopic(self) -> None:
+        # 하위주제는 주제의 자식이다 — 남겨 두면 「음악 > 가수」에서 주제 축이 다시 음악 하나로 접힌다.
+        plan = build_facet_plan("김치",
+                                filters=parse_search_filters(topic=["음악"], subtopic=["가수"]))
+        topic_entry = next(e for e in plan if e["axes"] == ("topic",))
+        fields = self._fields_of(topic_entry["body"])
+        self.assertNotIn("topics", fields)
+        self.assertNotIn("subtopics", fields)
+
+    def test_subtopic_axis_keeps_the_topic(self) -> None:
+        # 하위주제 칩은 「고른 주제 안에서」 세는 것이 맞다(파고들기).
+        plan = build_facet_plan("김치",
+                                filters=parse_search_filters(topic=["음악"], subtopic=["가수"]))
+        sub = next(e for e in plan if e["axes"] == ("subtopic",))
+        fields = self._fields_of(sub["body"])
+        self.assertIn("topics", fields)
+        self.assertNotIn("subtopics", fields)
+
+    def test_other_axis_conditions_stay(self) -> None:
+        # 주제 축을 셀 때도 태그·확장자·기간 조건은 남는다 — 「그 칩 하나만 골랐을 때」의 수이므로.
+        plan = build_facet_plan("김치", filters=parse_search_filters(
+            topic=["음악"], tag=["김치"], file_ext=["txt"]))
+        topic_entry = next(e for e in plan if e["axes"] == ("topic",))
+        fields = self._fields_of(topic_entry["body"])
+        self.assertNotIn("topics", fields)
+        self.assertIn("keywords_norm", fields)
+        self.assertIn("file_ext", str(topic_entry["body"]))
+
+    def test_axes_with_the_same_drop_share_a_query(self) -> None:
+        # 하위주제만 골랐다면 주제·하위주제 축이 뺄 조건이 같다 → 한 질의로 묶어 왕복을 아낀다.
+        plan = build_facet_plan("김치", filters=parse_search_filters(subtopic=["가수"]))
+        self.assertEqual(len(plan), 2)
+        self.assertEqual(plan[1]["axes"], ("topic", "subtopic"))
+
+    def test_plan_order_is_stable(self) -> None:
+        # 계획 순서가 흔들리면 묶음 응답 짝짓기가 어긋나 칩이 엉뚱한 축에 붙는다.
+        f = parse_search_filters(topic=["음악"], subtopic=["가수"], tag=["김치"])
+        first = [e["axes"] for e in build_facet_plan("김치", filters=f)]
+        for _ in range(20):
+            self.assertEqual([e["axes"] for e in build_facet_plan("김치", filters=f)], first)
+
+    def test_search_files_bundles_and_pairs_responses(self) -> None:
+        # 계획이 여러 개면 묶음 질의 한 번으로 보내고, 축마다 자기 응답의 집계를 읽는다.
+        base = _facet_resp(12, aggs={"subtopic": _terms([("가수", 5)]),
+                                     "tag": _terms([("김치", 3)])})
+        scoped = _facet_resp(99, aggs={"topic": _terms([("음악", 12), ("미술", 40)])})
+        client = _FakeClient([base, scoped, _rank_resp([_hit("a1", 1.0)])])
+        out = search_files(client, "assets", query="김치", query_vector=[0.0],
+                           filters=parse_search_filters(topic=["음악"]))
+        self.assertIn("msearch", client.calls[0])
+        self.assertEqual(out["total"], 12, "개수는 조건을 전부 적용한 첫 질의가 센다")
+        self.assertEqual([c["key"] for c in out["facets"]["topic"]], ["음악", "미술"])
+        self.assertEqual([c["key"] for c in out["facets"]["subtopic"]], ["가수"])
+
+    def test_failed_bundle_member_raises(self) -> None:
+        # 묶음 질의는 실패를 예외로 올리지 않는다 — 확인하지 않으면 칩이 조용히 빈 채로 화면에 나간다.
+        client = _FakeClient([_facet_resp(1), {"error": {"type": "search_phase_execution"}}])
+        with self.assertRaises(RuntimeError):
+            search_files(client, "assets", query="김치", query_vector=[0.0],
+                         filters=parse_search_filters(topic=["음악"]))
+
+
+class TestSort(unittest.TestCase):
+    """096 — 정렬. 필드로 줄 세우면 뜻은 순서에 관여할 이유가 없다."""
+
+    def test_relevance_is_the_default(self) -> None:
+        self.assertEqual(SORT_DEFAULT, "relevance")
+        body = build_rank_body("김치", [0.0])
+        self.assertIn("hybrid", body["query"])
+        self.assertNotIn("sort", body)
+
+    def test_field_sort_drops_the_vector(self) -> None:
+        for name in ("name_asc", "name_desc", "created_desc", "created_asc"):
+            body = build_rank_body("김치", None, sort=name)
+            self.assertNotIn("knn", str(body), f"{name}: 벡터가 남아 있다")
+            self.assertNotIn("hybrid", body["query"])
+            self.assertEqual(body["query"]["bool"]["must"][0]["multi_match"]["query"], "김치")
+
+    def test_field_sort_has_a_tie_breaker(self) -> None:
+        # 값이 같은 행의 순서가 흔들리면 페이지를 넘길 때 같은 파일이 두 번 보이거나 아예 빠진다.
+        for name in ("name_asc", "name_desc", "created_desc", "created_asc"):
+            self.assertEqual(build_rank_body("김치", None, sort=name)["sort"][-1],
+                             {"asset_id": "asc"}, f"{name}: 동률 기준이 없다")
+
+    def test_sort_fields_exist_in_the_index(self) -> None:
+        # 색인에 없는 필드로 정렬하면 엔진이 오류를 낸다. 수정일·크기는 색인에 없어 목록에 없다.
+        allowed = {"file_name.raw", "filter_date.created_at", "asset_id"}
+        for order in SORT_OPTIONS.values():
+            for clause in order or ():
+                self.assertLessEqual(set(clause), allowed)
+
+    def test_conditions_still_apply_when_sorting(self) -> None:
+        f = parse_search_filters(topic=["음악", "미술"], file_ext=["txt"])
+        body = build_rank_body("김치", None, filters=f, sort="name_asc")
+        self.assertIn({"terms": {"topics": ["음악", "미술"]}}, body["query"]["bool"]["filter"])
+
+    def test_relevance_without_a_vector_is_rejected(self) -> None:
+        # 벡터 없이 하이브리드를 보내면 엔진이 절 오류를 낸다 — 뜻이 분명한 예외로 먼저 막는다.
+        with self.assertRaises(ValueError):
+            build_rank_body("김치", None)
+
+    def test_unknown_sort_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            build_rank_body("김치", [0.0], sort="크기순")
+        with self.assertRaises(ValueError):
+            search_files(_FakeClient([]), "assets", query="김치", query_vector=[0.0], sort="크기순")
+
+    def test_field_sort_skips_the_pipeline(self) -> None:
+        # 하이브리드가 아니면 정규화할 것이 없다 — 파이프라인을 붙이면 뜻 없는 비용이다.
+        client = _FakeClient([_facet_resp(3), _rank_resp([_hit("a1", 0.0)])])
+        out = search_files(client, "assets", query="김치", sort="name_asc")
+        self.assertEqual(client.calls[1]["params"], {})
+        self.assertEqual(out["sort"], "name_asc")
+
+    def test_field_sort_pages_deeper(self) -> None:
+        # 이웃 탐색이 없어 깊이 제약이 색인 결과창뿐이다 → 관련도보다 깊이 넘길 수 있다.
+        deep = RANK_DEPTH_DEFAULT + 100
+        client = _FakeClient([_facet_resp(deep + 50), _rank_resp([])])
+        search_files(client, "assets", query="김치", sort="created_desc", from_=deep, size=10)
+        self.assertEqual(client.calls[1]["body"]["from"], deep)
+        with self.assertRaises(ValueError):  # 그 창도 넘으면 막는다
+            search_files(_FakeClient([]), "assets", query="김치", sort="created_desc",
+                         from_=SORT_DEPTH_DEFAULT, size=10)
+
+    def test_relevance_depth_limit_is_unchanged(self) -> None:
+        with self.assertRaises(ValueError):
+            search_files(_FakeClient([]), "assets", query="김치", query_vector=[0.0],
+                         from_=RANK_DEPTH_DEFAULT, size=10)
 
 
 if __name__ == "__main__":

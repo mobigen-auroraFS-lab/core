@@ -55,9 +55,10 @@ PUBLIC_API: dict[str, tuple[str, ...]] = {
     "src.search.refine": ("refine_rows", "refine_tokens"),
     "src.search.facets": ("aggregate_facets",),
     "src.search.file_search": (
-        "search_files", "build_rank_body", "build_facet_body", "FACET_FIELDS",
-        "RANK_DEPTH_DEFAULT", "TOTAL_CAP_DEFAULT", "FACET_SIZE_DEFAULT",
-        "SEARCH_PIPELINE_DEFAULT", "WORD_FIELDS_DEFAULT",
+        "search_files", "build_rank_body", "build_facet_body", "build_facet_plan",
+        "FACET_FIELDS", "FACET_SELF_FILTERS", "RANK_DEPTH_DEFAULT", "TOTAL_CAP_DEFAULT",
+        "FACET_SIZE_DEFAULT", "SEARCH_PIPELINE_DEFAULT", "WORD_FIELDS_DEFAULT",
+        "SORT_OPTIONS", "SORT_DEFAULT", "SORT_DEPTH_DEFAULT",
     ),
     "src.search.tag_facets": ("aggregate_tag_facets", "normalize_tag_key"),
     "src.search.query_embed": ("embed_query_for_media_search",),

@@ -107,7 +107,7 @@ class TagFilterToOpensearchTest(unittest.TestCase):
         self.assertEqual(filters_to_opensearch_bool(SearchFilters()), [])
         self.assertEqual(
             filters_to_opensearch_bool(
-                SearchFilters(file_exts=("txt",), created_from=date(2026, 1, 1), topic="요리")
+                SearchFilters(file_exts=("txt",), created_from=date(2026, 1, 1), topics=("요리",))
             ),
             [
                 {"terms": {"filter_kw.file_ext": ["txt"]}},
