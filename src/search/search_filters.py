@@ -33,6 +33,11 @@ class SearchFilters:
     # 있으면 절 자체가 생기지 않아 **기존 질의 바디가 그대로**다(하위호환·동작 불변).
     tags: tuple[str, ...] = ()
 
+    # 모달리티(문서·이미지·영상·오디오) 필터. 096 에서 **칩 축**으로 추가했다 — 멀티모달 검색이
+    # 결과를 버킷으로 나눠 보이던 것을 대신한다(누르면 좁혀지고 건수가 함께 보인다).
+    # 여럿이면 「또는」이다(주제·태그와 같은 규칙).
+    modalities: tuple[str, ...] = ()
+
     @property
     def topic(self) -> str | None:
         """⚠️ **낡은 이름**(096 이전) — 첫 주제 하나만 돌려준다.
@@ -110,6 +115,7 @@ def parse_search_filters(
     created_to: str | None = None,
     topic: str | Sequence[str] | None = None,
     subtopic: str | Sequence[str] | None = None,
+    modality: str | Sequence[str] | None = None,
     tag: list[str] | None = None,
 ) -> SearchFilters | None:
     """API 질의 파라미터를 ``SearchFilters`` 로 파싱한다(순수).
@@ -121,6 +127,8 @@ def parse_search_filters(
         topic: 주제 정확 일치 필터. 색인된 keyword 원문과 맞춰야 하므로 **소문자화하지 않고**
             앞뒤 공백만 자른다.
         subtopic: 세부주제 정확 일치 필터(같은 규칙).
+        modality: 모달리티 필터(``text``·``image``·``video``·``audio``). 하나든 여럿이든 받고
+            여럿이면 「또는」이다.
         tag: 태그 목록(반복 파라미터 ``tag`` · 083). 앞뒤 공백만 자르고 **원문 표기·입력 순서를
             보존**한 채 중복만 없앤다 — 정규화는 절을 만들 때 하고(``filters_to_opensearch_bool``),
             여기 값은 화면에 "선택한 태그"로 되돌려 보여줄 수 있어야 한다.
@@ -141,6 +149,8 @@ def parse_search_filters(
     # 096: 문자열 하나도 여럿도 받는다 — 종전 호출부(문자열)를 고치지 않아도 되게.
     topics_v = _norm_names(topic)
     subtopics_v = _norm_names(subtopic)
+    # 모달리티는 색인 keyword 원문(``text``·``image``·``video``·``audio``)과 정확 일치한다.
+    modalities_v = _norm_names(modality)
     # 083: dict.fromkeys 는 **첫 등장 순서를 보존한 채** 중복을 없앤다(set 은 순서가 흔들린다).
     tags_v = tuple(dict.fromkeys(x.strip() for x in (tag or []) if x and x.strip()))
     # 🔴 "아무 필터도 없음"(None) 판정에 tags 를 **반드시** 포함한다 — 빼먹으면 태그만 지정한
@@ -151,6 +161,7 @@ def parse_search_filters(
         and ct is None
         and not topics_v
         and not subtopics_v
+        and not modalities_v
         and not tags_v
     ):
         return None
@@ -160,6 +171,7 @@ def parse_search_filters(
         created_to=ct,
         topics=topics_v,
         subtopics=subtopics_v,
+        modalities=modalities_v,
         tags=tags_v,
     )
 
@@ -203,6 +215,8 @@ def filters_to_opensearch_bool(filters: SearchFilters | None) -> list[dict[str, 
     # 056 FR-503 — 주제/하위주제 terms 필터. 색인된 keyword 필드(top-level ``topics``/``subtopics``·
     # opensearch_sync.build_index_body)에 정확 일치. 단일 값도 terms(1원소 배열)로 두어 향후 다중
     # 확장(반복 파라미터)과 형상 일관. filter 절이라 점수 기여 0 → 랭킹 무영향(결정적).
+    if filters.modalities:
+        clauses.append({"terms": {"modality": list(filters.modalities)}})
     # 096: 여럿이면 그대로 배열로 넣는다 — ``terms`` 는 값들의 **또는** 이므로 하나라도 맞으면 남는다.
     if filters.topics:
         clauses.append({"terms": {"topics": list(filters.topics)}})

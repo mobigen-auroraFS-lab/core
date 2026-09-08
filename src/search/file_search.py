@@ -1,7 +1,26 @@
 """파일 검색 — **조건으로 좁히고 유사도로 줄 세우고 정확히 세는** 조회(095 시나리오 ③).
 
-기존 `search_service.search_hybrid` 와 **다른 화면의 다른 요구**를 맡는다. 둘을 나눈 이유가 이 모듈의
-존재 이유다:
+🔴 **목적: 멀티모달 검색(`search_service.search_hybrid`)을 대체한다**(2026-09-09 사용자 확인).
+`search_hybrid` 는 관련도 컷으로 상위만 보여 주므로 **패싯도 페이징도 만들 수 없다** — 컷이 파이썬에서
+계산돼 검색 엔진이 셀 수 없기 때문이다. 이 모듈은 그 둘을 얻기 위해 만들었고, 그러려면 집합을 엔진이
+세는 조건으로 확정해야 했다. 그래서 컷오프를 조건으로 **번역**했다(아래 「집합을 어떻게 정하나」).
+
+대체가 성립하려면 `search_hybrid` 가 주던 것을 잃지 않아야 한다. 그 대조는 문서 레포 설계이력
+2026-09-09 의 「대체 가능 근거표」에 두고, 여기서는 각 갈래가 무엇을 대신하는지만 밝힌다:
+
+| `search_hybrid` 의 장치 | 이 모듈에서 |
+|---|---|
+| BM25 필드별 절(summary^3·keywords^2·file_name^0.5…) | **같은 절**(`query_builder.build_word_should` 공용) |
+| kNN 상위 k 합집합 + 버킷 게이트 + 행 컷 | 뜻 갈래를 **유사도 하한**으로(경계를 조건에 둔다) |
+| `about` 증거 필터(파이썬 후처리 · 실질 주력) | about 갈래로 **집합을 넓히는 데** 쓴다(완전일치) |
+| 모달리티별 버킷(문서·이미지·영상·오디오) | **모달리티 칩 축**(누르면 좁혀진다) |
+| `meta.tuning` 재현성 기록 | 응답 `meta` 에 적용값 전부(백엔드) |
+| 리랭커(현재 꺼짐)·질의 정규화(꺼짐)·LLM 검증(꺼짐) | 옮기지 않음 — 꺼져 있어 대체할 동작이 없다 |
+
+⚠️ **`search_hybrid` 코드는 지우지 않는다** — 과제 산출물 8건(006·021·023·024·025·027·028·029)의
+구현체이고 KPI F-4.3 에 완료로 기록돼 있다. 화면을 이 창구로 옮기는 것과 코드를 지우는 것은 다르다.
+
+둘을 나눈 이유:
 
 | | 멀티모달 검색(`search_hybrid`) | 파일 검색(이 모듈) |
 |---|---|---|
@@ -24,6 +43,28 @@
 그리고 컷오프는 결과를 받아온 **뒤** 파이썬에서 계산하므로 검색 엔진이 셀 수 없다. 세는 대상이 확정되지
 않으면 "적힌 숫자 = 누르면 나오는 수"가 성립하지 않는다(2026-08-26 원칙). 그래서 이 화면은 집합을 단어·조건
 으로 확정하고, 관련 없는 것을 걸러내는 일은 **조건**이, 약한 것을 아래로 내리는 일은 **순위**가 맡는다.
+
+## 집합을 어떻게 정하나 — 세 갈래의 합집합
+
+    집합 = 단어가 맞은 파일  ∪  뜻이 아주 가까운 파일  ∪  개체(about)가 맞은 파일   (그리고 조건)
+
+세 갈래 **모두 검색 엔진이 판정하는 조건**이라 엔진이 정확히 세고 축별로 집계한다 — 그것이 칩·페이징의
+전제다. 관련도 컷을 쓰지 않는 대신 이 세 갈래가 「무엇이 관련 있는가」를 정한다.
+
+**개체(about) 갈래**(2026-09-09): `about` 은 적재 때 LLM 이 확정한 「이 자산이 무엇에 관한 것인가」
+명사 1~3개이며 색인 keyword 다. 글자도 뜻도 못 잡은 자산을 개체로 잡는다 — `한라산 산맥` 은 단어로
+0건이지만(「산맥」이 없는 파일은 탈락) about 에 `한라산`·`산맥` 을 가진 자산 7건이 잡힌다.
+
+🔴 **완전일치만 쓴다.** 멀티모달 검색은 같은 규칙을 양방향 부분일치로 쓰는데(`about_filter._amatch`),
+거기서는 **걸러내는** 쪽이라 느슨해도 안전하다(느슨하면 덜 걸러낸다). 여기서는 **넓히는** 쪽이라
+느슨함이 곧 노이즈다 — `추천` 이 `명소 추천`·`추천 작물` 과 맞아 텃밭·단풍 영상이 들어온다(실측).
+방향이 반대라 위험도가 뒤집힌다. 골든 464질의 실측:
+
+| about 매칭 | 되찾음 : 잡음 | 0건 질의 | 자료 없는 34질의 중 0건 유지 |
+|---|---|---|---|
+| 없음(단어∪뜻) | — | 38 | 32 |
+| **완전일치** | **97 : 101 (49.0%)** | **33** | **31** |
+| 부분일치 | 250 : 357 (41.2%) | 23 | 23 |
 
 ## 뜻에는 **경계**를 준다 — 「상위 k개」가 아니라 「이만큼 가까운 것」
 
@@ -126,6 +167,9 @@ WORD_OPERATOR_DEFAULT = "and"
 # 무관한 파일이 급증한다. **코퍼스 성격이 크게 바뀌면 재측정한다**.
 SEMANTIC_MIN_COSINE_DEFAULT = 0.60
 
+# 개체(about) 갈래를 쓸지. 끄면 집합이 단어 ∪ 뜻으로 좁아진다(멀티모달 검색이 주던 것을 일부 잃는다).
+ABOUT_BRANCH_DEFAULT = True
+
 # 뜻으로 걸린 자산 id 를 받아올 상한. 넘치면 가까운 순으로 잘린다(결정적).
 # 왜 500 인가: 골든 464질의 실측에서 임계 0.60 을 넘는 자산은 질의당 평균 1건 미만이고 최대 수십
 # 건이다. 500 은 넉넉한 여유이면서 ``terms`` 절이 커져 질의가 무거워지는 것을 막는 선이다.
@@ -137,6 +181,9 @@ FACET_FIELDS: dict[str, str] = {
     "topic": "topics",
     "subtopic": "subtopics",
     "tag": "keywords_norm",
+    # 모달리티 축(2026-09-09) — 멀티모달 검색의 **버킷 구분을 대신한다**. 그 화면은 문서·이미지·
+    # 영상·오디오를 섹션으로 나눠 보였는데, 칩으로 두면 건수가 함께 보이고 눌러 좁힐 수 있다.
+    "modality": "modality",
 }
 
 # 축 → 그 축을 셀 때 **빼야 할** 필터 필드(위 docstring 「칩은 자기 조건을 뺀 채 센다」).
@@ -145,7 +192,14 @@ FACET_SELF_FILTERS: dict[str, tuple[str, ...]] = {
     "topic": ("topics", "subtopics"),
     "subtopic": ("subtopics",),
     "tag": ("tags",),
+    "modality": ("modalities",),
 }
+
+# 축이 자기 조건으로 쓰는 필터 필드 전부(``FACET_SELF_FILTERS`` 의 값들을 편 것).
+# 여기서 빠진 축은 자기 조건을 안고 세어 칩이 하나로 접힌다 — 두 곳을 따로 적지 않게 여기서 파생한다.
+_SELF_FILTER_FIELDS: frozenset[str] = frozenset(
+    name for names in FACET_SELF_FILTERS.values() for name in names
+)
 
 # 정렬 이름 → 색인 정렬 절. ``None`` 은 관련도(엔진 점수) 순.
 #   ⚠️ 마지막에 ``asset_id`` 를 덧붙이는 이유: 값이 같은 행들의 순서가 실행마다 흔들리면 페이지를 넘길 때
@@ -171,6 +225,7 @@ SORT_DEFAULT = "relevance"
 SORT_DEPTH_DEFAULT = 10_000
 
 __all__ = [
+    "ABOUT_BRANCH_DEFAULT",
     "FACET_FIELDS",
     "FACET_SELF_FILTERS",
     "FACET_SIZE_DEFAULT",
@@ -257,31 +312,56 @@ def _semantic_clause(semantic_ids: Sequence[str]) -> dict[str, Any] | None:
     return {"terms": {"asset_id": ids}} if ids else None
 
 
+def _about_clause(query: str, *, enabled: bool = ABOUT_BRANCH_DEFAULT) -> dict[str, Any] | None:
+    """개체(`about`)가 질의 낱말과 **완전히 같은** 파일을 고르는 절.
+
+    `about` 은 색인 keyword 라 낱말로 바로 ``terms`` 절을 만들면 된다 — 어휘를 미리 받아 걸러도 같은
+    집합이다(실측 확인). 그래서 질의가 하나 늘지 않는다.
+
+    🔴 **완전일치만** 쓴다(모듈 docstring 참조) — 부분일치로 넓히면 `추천` 이 `명소 추천` 과 맞아
+    엉뚱한 자산이 들어온다. 멀티모달 검색은 같은 규칙을 부분일치로 쓰지만 거기서는 **걸러내는** 쪽이라
+    느슨함이 안전한 방향으로 작동한다.
+
+    Args:
+        query: 검색어. 공백으로 쪼갠 낱말이 그대로 개체 이름 후보가 된다(멀티모달 검색과 같은 규칙).
+        enabled: 이 갈래를 쓸지. 끄면 ``None``.
+
+    Returns:
+        ``terms`` 절. 낱말이 없거나 꺼져 있으면 ``None``.
+    """
+    if not enabled:
+        return None
+    words = [w for w in (query or "").split() if w]
+    return {"terms": {"about": words}} if words else None
+
+
 def _scope_clause(
     query: str,
     semantic_ids: Sequence[str] = (),
     *,
     filters: Sequence[dict[str, Any]] = (),
     operator: str = WORD_OPERATOR_DEFAULT,
+    about_branch: bool = ABOUT_BRANCH_DEFAULT,
 ) -> dict[str, Any]:
-    """**집합 정의** — 글자가 맞았거나 뜻이 임계 이상 가까운 파일, 그리고 조건에 맞는 것.
+    """**집합 정의** — 단어 ∪ 뜻 ∪ 개체 중 조건에 맞는 것(모듈 docstring 「집합을 어떻게 정하나」).
 
     🔴 개수·칩·순위가 **모두 이 절 하나**를 쓴다. 하나라도 다른 절을 쓰면 "적힌 숫자 = 누르면
     나오는 수"가 깨진다(2026-09-08 실측 결함이 그것이었다).
 
     Args:
         query: 검색어.
-        semantic_ids: 뜻으로 걸린 자산 id 들(``build_semantic_body`` 결과). 비면 단어만으로 정한다.
+        semantic_ids: 뜻으로 걸린 자산 id 들(``build_semantic_body`` 결과). 비면 그 갈래를 뺀다.
         filters: 선필터에서 나온 조건 절.
         operator: 단어 매칭 연산자.
+        about_branch: 개체(about) 갈래를 쓸지.
 
     Returns:
-        ``bool`` 절 — ``should``(단어·뜻) + ``minimum_should_match: 1`` + ``filter``(조건).
+        ``bool`` 절 — ``should``(단어·뜻·개체) + ``minimum_should_match: 1`` + ``filter``(조건).
     """
     should = [_word_clause(query, operator=operator)]
-    semantic = _semantic_clause(semantic_ids)
-    if semantic is not None:
-        should.append(semantic)
+    for extra in (_semantic_clause(semantic_ids), _about_clause(query, enabled=about_branch)):
+        if extra is not None:
+            should.append(extra)
     return {"bool": {
         "should": should,
         "minimum_should_match": 1,
@@ -305,6 +385,7 @@ def build_rank_body(
     size: int = 50,
     rank_depth: int = RANK_DEPTH_DEFAULT,
     operator: str = WORD_OPERATOR_DEFAULT,
+    about_branch: bool = ABOUT_BRANCH_DEFAULT,
     sort: str = SORT_DEFAULT,
 ) -> dict[str, Any]:
     """순위 질의 본문 — 집합은 ``_scope_clause`` 가 정하고 순서만 정렬 방식이 정한다(순수).
@@ -324,6 +405,7 @@ def build_rank_body(
         size: 이 페이지의 행 수.
         rank_depth: 관련도 정렬에서 순위를 매길 깊이(= 페이징 가능 깊이).
         operator: 단어 매칭 연산자.
+        about_branch: 개체(about) 갈래를 쓸지.
         sort: 정렬 이름(``SORT_OPTIONS`` 의 키).
 
     Returns:
@@ -345,7 +427,8 @@ def build_rank_body(
     }
     order = SORT_OPTIONS[sort]
     if order is not None:
-        body["query"] = _scope_clause(query, semantic_ids, filters=clauses, operator=operator)
+        body["query"] = _scope_clause(query, semantic_ids, filters=clauses, operator=operator,
+                                      about_branch=about_branch)
         body["sort"] = [dict(s) for s in order]
         return body
     # 하이브리드는 두 서브질의의 **합집합**이라 집합이 ``_scope_clause`` 와 같다. 두 서브질의의 절은
@@ -353,7 +436,8 @@ def build_rank_body(
     # 하이브리드 두 서브질의: ① 단어(+조건) ② 벡터 이웃(+집합·조건). ②는 **순서를 매기기 위한**
     # 것이라 여기서만 벡터를 쓴다 — 집합은 ①②의 합집합이 아니라 위 ``_scope_clause`` 가 정하므로,
     # ② 에도 집합 절을 필터로 걸어 밖으로 새지 않게 한다.
-    scope = _scope_clause(query, semantic_ids, filters=clauses, operator=operator)
+    scope = _scope_clause(query, semantic_ids, filters=clauses, operator=operator,
+                          about_branch=about_branch)
     body["query"] = {"hybrid": {"pagination_depth": int(rank_depth), "queries": [
         {"bool": {"must": [_word_clause(query, operator=operator)], "filter": list(clauses)}},
         {"knn": {"embedding": {"vector": list(query_vector), "k": int(rank_depth),
@@ -371,6 +455,7 @@ def build_facet_body(
     facet_size: int = FACET_SIZE_DEFAULT,
     axes: Sequence[str] = tuple(FACET_FIELDS),
     operator: str = WORD_OPERATOR_DEFAULT,
+    about_branch: bool = ABOUT_BRANCH_DEFAULT,
 ) -> dict[str, Any]:
     """개수·좁히기 칩 질의 본문 — **세는 대상 = 순위 질의의 집합**(순수).
 
@@ -388,6 +473,7 @@ def build_facet_body(
         facet_size: 축마다 받을 항목 수.
         axes: 셀 축 이름들(``FACET_FIELDS`` 의 키).
         operator: 단어 매칭 연산자.
+        about_branch: 개체(about) 갈래를 쓸지.
 
     Returns:
         OpenSearch 검색 본문(행은 받지 않는다 · ``size`` 0).
@@ -419,7 +505,7 @@ def build_facet_body(
         "track_total_hits": int(total_cap),
         "query": _scope_clause(query, semantic_ids,
                                filters=filters_to_opensearch_bool(filters),
-                               operator=operator),
+                               operator=operator, about_branch=about_branch),
         "aggs": aggs,
     }
 
@@ -437,8 +523,10 @@ def _active_filter_fields(filters: SearchFilters | None) -> frozenset[str]:
     """
     if filters is None:
         return frozenset()
+    # 🔴 축을 늘릴 때 이 목록도 함께 늘려야 한다 — 빠지면 그 축이 **자기 조건을 안고 세어** 칩이
+    #    하나로 접힌다(갈아탈 수 없다). ``FACET_SELF_FILTERS`` 의 값들과 짝이 맞아야 한다.
     return frozenset(
-        name for name in ("topics", "subtopics", "tags") if getattr(filters, name, ())
+        name for name in _SELF_FILTER_FIELDS if getattr(filters, name, ())
     )
 
 
@@ -451,6 +539,7 @@ def build_facet_plan(
     facet_size: int = FACET_SIZE_DEFAULT,
     axes: Sequence[str] = tuple(FACET_FIELDS),
     operator: str = WORD_OPERATOR_DEFAULT,
+    about_branch: bool = ABOUT_BRANCH_DEFAULT,
 ) -> list[dict[str, Any]]:
     """집계 **계획** — 어떤 축을 어떤 조건으로 셀지 정한다(순수 · 질의를 보내지 않는다).
 
@@ -466,6 +555,7 @@ def build_facet_plan(
         facet_size: 축마다 받을 항목 수.
         axes: 셀 축 이름들.
         operator: 단어 매칭 연산자.
+        about_branch: 개체(about) 갈래를 쓸지.
 
     Returns:
         ``[{"axes": (축…), "body": {…}, "total": bool}]``. **첫 항목이 조건을 전부 적용한 질의**이며
@@ -490,7 +580,8 @@ def build_facet_plan(
         "axes": base_axes,
         "total": True,
         "body": build_facet_body(query, semantic_ids, filters=filters, total_cap=total_cap,
-                                 facet_size=facet_size, axes=base_axes, operator=operator),
+                                 facet_size=facet_size, axes=base_axes, operator=operator,
+                                 about_branch=about_branch),
     }]
     # 순서를 못 박는다 — 질의 순서가 흔들리면 응답 짝짓기가 어긋난다.
     for drop in sorted(groups, key=lambda d: sorted(d)):
@@ -500,7 +591,7 @@ def build_facet_plan(
             "total": False,
             "body": build_facet_body(query, semantic_ids, filters=scoped, total_cap=total_cap,
                                      facet_size=facet_size, axes=tuple(groups[drop]),
-                                     operator=operator),
+                                     operator=operator, about_branch=about_branch),
         })
     return plan
 
@@ -563,7 +654,8 @@ def _row(hit: Mapping[str, Any]) -> dict[str, Any]:
         "asset_id": str(src.get("asset_id") or ""),
         "modality": str(src.get("modality") or ""),
         "domain_label": str(src.get("domain_label") or "general"),
-        "file_name": display_file_name(str(src.get("fs_uri") or "")) or str(src.get("file_name") or ""),
+        "file_name": (display_file_name(str(src.get("fs_uri") or ""))
+                      or str(src.get("file_name") or "")),
         "summary": str(src.get("summary") or ""),
         "score": safe_float(hit.get("_score")),
         "tags": [str(k) for k in (src.get("keywords") or []) if k],
@@ -624,6 +716,7 @@ def search_files(
     min_cosine: float = SEMANTIC_MIN_COSINE_DEFAULT,
     semantic_cap: int = SEMANTIC_CAP_DEFAULT,
     operator: str = WORD_OPERATOR_DEFAULT,
+    about_branch: bool = ABOUT_BRANCH_DEFAULT,
 ) -> dict[str, Any]:
     """조건으로 좁힌 파일을 **유사도 순 한 페이지 + 정확한 전체 개수 + 좁히기 칩**으로 조회한다.
 
@@ -654,6 +747,7 @@ def search_files(
         min_cosine: 뜻으로 집합에 들어올 유사도 하한(코사인).
         semantic_cap: 뜻으로 걸린 자산 id 를 받아올 상한.
         operator: 단어 매칭 연산자.
+        about_branch: 개체(about) 갈래를 쓸지.
 
     Returns:
         ``{rows, total, total_capped, facets, from, size, sort}``. ``total_capped`` 가 참이면
@@ -697,7 +791,8 @@ def search_files(
     semantic_ids = [a for a in semantic_ids if a]
 
     plan = build_facet_plan(q, semantic_ids, filters=filters, total_cap=total_cap,
-                            facet_size=facet_size, axes=axes, operator=operator)
+                            facet_size=facet_size, axes=axes, operator=operator,
+                            about_branch=about_branch)
     responses = _run_facets(client, index, plan)
     total_info = (responses[0].get("hits") or {}).get("total") or {}
     total = int(total_info.get("value") or 0)
@@ -711,7 +806,7 @@ def search_files(
                                  from_=from_,
                                  # 남은 것보다 더 달라고 하면 같은 오류가 난다 — 남은 만큼만 청한다.
                                  size=min(size, total - from_), rank_depth=rank_depth, sort=sort,
-                                 operator=operator),
+                                 operator=operator, about_branch=about_branch),
             params=params,
         )
         hits = ((rank.get("hits") or {}).get("hits") or [])

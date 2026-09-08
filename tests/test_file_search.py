@@ -122,10 +122,40 @@ class TestScope(unittest.TestCase):
         self.assertEqual(scoped["query"]["bool"]["should"][1], should[1])
 
     def test_no_semantic_hit_means_no_clause(self) -> None:
-        # 뜻으로 걸린 것이 없으면 절을 아예 넣지 않는다(빈 terms 는 무의미한 비용이다).
+        # 뜻으로 걸린 것이 없으면 그 절을 아예 넣지 않는다(빈 terms 는 무의미한 비용이다).
+        # 개체 갈래는 낱말만 있으면 만들 수 있으므로 남는다(어휘 조회가 필요 없다).
         should = build_facet_body("김치")["query"]["bool"]["should"]
-        self.assertEqual(len(should), 1)
+        self.assertEqual(len(should), 2)
         self.assertIn("bool", should[0])
+        self.assertEqual(should[1], {"terms": {"about": ["김치"]}})
+
+    def test_about_branch_is_exact_match_only(self) -> None:
+        # 🔴 부분일치로 넓히면 `추천` 이 `명소 추천`·`추천 작물` 과 맞아 텃밭·단풍 영상이 들어온다
+        #    (실측). 멀티모달 검색은 같은 규칙을 부분일치로 쓰지만 거기서는 **걸러내는** 쪽이라
+        #    느슨함이 안전한 방향으로 작동한다 — 방향이 반대라 위험도가 뒤집힌다.
+        should = build_facet_body("한라산 산맥", SEM)["query"]["bool"]["should"]
+        self.assertEqual(should[2], {"terms": {"about": ["한라산", "산맥"]}})
+        # ``terms`` 는 완전일치다 — 부분일치를 쓰려면 wildcard 나 어휘 대조가 필요한데 쓰지 않는다.
+        self.assertNotIn("wildcard", str(should))
+        self.assertNotIn("prefix", str(should))
+
+    def test_about_branch_can_be_turned_off(self) -> None:
+        should = build_facet_body("김치", SEM, about_branch=False)["query"]["bool"]["should"]
+        self.assertNotIn("about", str(should))
+
+    def test_modality_axis_replaces_the_buckets(self) -> None:
+        # 멀티모달 검색은 결과를 문서·이미지·영상·오디오 버킷으로 나눠 보였다. 여기서는 칩 축이라
+        # 건수가 함께 보이고 누르면 좁혀진다 — 그래서 자기 조건을 빼고 세는 규칙도 적용된다.
+        self.assertEqual(FACET_FIELDS["modality"], "modality")
+        f = parse_search_filters(modality=["text", "video"])
+        assert f is not None
+        self.assertEqual(f.modalities, ("text", "video"))
+        self.assertIn({"terms": {"modality": ["text", "video"]}},
+                      build_facet_body("김치", filters=f)["query"]["bool"]["filter"])
+        plan = build_facet_plan("김치", filters=f)
+        mod = next(e for e in plan if "modality" in e["axes"])
+        self.assertNotIn("modality", str(mod["body"]["query"]["bool"]["filter"]),
+                         "모달리티 축을 셀 때 자기 조건이 남아 있다 — 갈아탈 수 없다")
 
     def test_word_clause_is_the_shared_one(self) -> None:
         # 🔴 단어 절은 멀티모달 검색과 **한 곳에서** 만든다. 각자 만들면 같은 질의가 다른 파일을
@@ -307,14 +337,14 @@ class TestFacetScoping(unittest.TestCase):
     def test_no_filter_is_one_query(self) -> None:
         plan = build_facet_plan("김치", VEC)
         self.assertEqual(len(plan), 1)
-        self.assertEqual(plan[0]["axes"], ("topic", "subtopic", "tag"))
+        self.assertEqual(plan[0]["axes"], ("topic", "subtopic", "tag", "modality"))
         self.assertIs(plan[0]["total"], True)
 
     def test_topic_axis_drops_its_own_filter(self) -> None:
         plan = build_facet_plan("김치", VEC, filters=parse_search_filters(topic=["음악"]))
         self.assertEqual(len(plan), 2)
         # 기본 질의(개수·나머지 축)에는 주제 조건이 그대로 걸린다.
-        self.assertEqual(plan[0]["axes"], ("subtopic", "tag"))
+        self.assertEqual(plan[0]["axes"], ("subtopic", "tag", "modality"))
         self.assertIn("topics", self._fields_of(plan[0]["body"]))
         # 주제 축은 주제 조건을 뺀 채 센다 → 다른 주제가 칩으로 남는다.
         self.assertEqual(plan[1]["axes"], ("topic",))

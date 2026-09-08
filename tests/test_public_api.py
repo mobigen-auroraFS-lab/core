@@ -56,6 +56,7 @@ PUBLIC_API: dict[str, tuple[str, ...]] = {
     "src.search.facets": ("aggregate_facets",),
     "src.search.file_search": (
         "search_files", "build_rank_body", "build_facet_body", "build_facet_plan",
+        "ABOUT_BRANCH_DEFAULT",
         "FACET_FIELDS", "FACET_SELF_FILTERS", "RANK_DEPTH_DEFAULT", "TOTAL_CAP_DEFAULT",
         "FACET_SIZE_DEFAULT", "SEARCH_PIPELINE_DEFAULT", "WORD_OPERATOR_DEFAULT",
         "SEMANTIC_MIN_COSINE_DEFAULT", "SEMANTIC_CAP_DEFAULT", "build_semantic_body",
