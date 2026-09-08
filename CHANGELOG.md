@@ -18,7 +18,13 @@
   - 함께 공개: `build_rank_body`·`build_facet_body`·`build_facet_plan`(순수 · 본문·계획 조립) · `FACET_FIELDS` · `FACET_SELF_FILTERS` · 설계 상수 `RANK_DEPTH_DEFAULT`(1,000) · `TOTAL_CAP_DEFAULT`(10,000) · `FACET_SIZE_DEFAULT`(24) · `SORT_DEPTH_DEFAULT`(10,000) · `SEARCH_PIPELINE_DEFAULT` · `WORD_FIELDS_DEFAULT`.
   - ⚠️ **관련도 컷오프를 쓰지 않는다** — 컷오프는 받아온 뒤 파이썬에서 계산하므로 검색 엔진이 셀 수 없고, 세는 대상이 확정되지 않으면 칩 건수가 클릭 결과와 어긋난다. 기존 `search_hybrid`(멀티모달 검색 화면)는 컷오프를 그대로 유지한다.
   - **칩은 축마다 자기 조건을 뺀 채 센다**(`build_facet_plan`) — 그래야 주제를 고른 뒤에도 다른 주제로 갈아탈 수 있다(전부 적용해 세면 고른 주제 하나만 남는다 · 실측 칩 5·9개 → 1·3개). 하위주제는 주제의 자식이라 주제 축에서 함께 뺀다. 뺄 조건이 같은 축은 한 질의로 묶어 **왕복 한 번**으로 보낸다(`msearch`). 칩 숫자의 뜻 = **그 칩 하나만 골랐을 때 나오는 수**(다른 축 조건은 적용).
-  - **정렬** `sort=` — `SORT_OPTIONS` 의 닫힌 목록(`relevance` 기본 · `name_asc`/`name_desc` · `created_desc`/`created_asc`). 필드 정렬은 **벡터 질의를 보내지 않는다**(순서를 필드가 정하므로) → 임베딩이 필요 없고(`query_vector=None` 허용) 정규화 파이프라인도 붙이지 않으며, 하이브리드의 깊이 제약이 사라져 `SORT_DEPTH_DEFAULT` 까지 넘길 수 있다. ⚠️ **수정일·크기 정렬은 색인에 필드가 없어 불가**(넣으려면 파이프라인 색인 매핑 변경 + 전량 재색인).
+  - **정렬** `sort=` — `SORT_OPTIONS` 의 닫힌 목록 9종(`relevance` 기본 · 이름 · 수정일 · 등록일 · 크기 각 ↑↓). 필드 정렬은 **벡터 질의를 보내지 않는다**(순서를 필드가 정하므로) → 임베딩이 필요 없고(`query_vector=None` 허용) 정규화 파이프라인도 붙이지 않으며, 하이브리드의 깊이 제약이 사라져 `SORT_DEPTH_DEFAULT`(10,000)까지 넘길 수 있다. 동률은 자산 id 로 갈린다(페이징 중복·누락 방지).
+  - 🔴 **줄을 세우는 값은 화면에 보이는 값이다** — 이름 정렬은 새 색인 필드 `file_name_sort`(= `display_file_name` 그대로)를 쓴다. 검색용 `file_name`(잡음 정제 값)으로 세우면 화면의 **84.5%가 제자리에 오지 않는다**(실측 1,526건 · 색인값과 화면값이 일치하는 자산은 0건).
+
+### 변경 (색인 매핑 · 소비 레포 조치 필요)
+- `opensearch_sync.build_index_body` 에 정렬용 필드 3종 추가 — `file_name_sort`(keyword) · `file_size`(long) · `filter_date.updated_at`(date). 재동기화 SELECT 에 `a.updated_at`·`a.file_size` 를 싣고 `build_filter_index_fields(updated_at=…, file_size=…)` 가 채운다. 날짜는 생성일과 같은 **날짜 단위**(화면 표도 날짜까지만 보인다 · `filter_date.created_at` 의 단위는 **바꾸지 않았다** — 전체 타임스탬프로 바꾸면 `created_to` 가 그 날 오전 0시로 해석되어 하루가 빠진다).
+- `opensearch_sync.ensure_index` 가 기존 색인에 **빠진 매핑 속성만 보강**한다(반환값에 `'updated'` 추가). 보강 없이 재색인하면 검색 엔진 자동 매핑으로 문자열이 분석 필드가 되어 **정렬만 조용히 실패**한다. 기존 필드 정의는 건드리지 않는다(그때는 `--recreate`).
+- 🔴 **소비 레포 조치**: 새 정렬을 쓰려면 `run_opensearch_resync --env <env>` 를 한 번 돌려야 한다(매핑 보강 + 값 채우기). dev 실행 결과 = `updated · 1,526건 · 오류 0`.
 - `search_filters.SearchFilters` 의 주제·하위주제가 **여럿**을 받는다 — `topics: tuple[str, ...]`·`subtopics: tuple[str, ...]`. 같은 축의 여러 값은 「또는」(태그와 같은 규칙)이며 OS 절은 종전과 같은 `terms` 배열이라 모양이 바뀌지 않는다. `parse_search_filters(topic=…, subtopic=…)` 는 **문자열 하나도 목록도** 받는다. 종전 이름 `.topic`·`.subtopic` 은 **첫 값을 주는 읽기 전용 속성**으로 남겨 소비 코드가 깨지지 않는다(새 코드는 복수 이름을 읽는다).
 
 ## [v0.5.0] — 2026-09-07 (095 개체 화면 seam · 라벨 읽기 · 이유 코드)

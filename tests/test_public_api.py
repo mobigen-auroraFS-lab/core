@@ -62,7 +62,14 @@ PUBLIC_API: dict[str, tuple[str, ...]] = {
     ),
     "src.search.tag_facets": ("aggregate_tag_facets", "normalize_tag_key"),
     "src.search.query_embed": ("embed_query_for_media_search",),
-    "src.search.opensearch_sync": ("get_client",),
+    # 096: 파이프라인 적재·재색인 경로가 쓰는 이름을 등재한다(코드 변경 0 · 계약면 명시).
+    # ``ensure_index`` 의 반환에 ``'updated'``(빠진 매핑 속성 보강)가 늘어난 것이 계약 변경이라,
+    # 이 표에 올려 두지 않으면 소비 레포가 무엇에 의존하는지 보이지 않는다.
+    "src.search.opensearch_sync": (
+        "get_client", "ensure_index", "sync_all", "index_asset", "asset_to_doc",
+        "resolve_channel", "check_pgvector_version", "update_asset_mm_skill_labels",
+        "mm_skill_label_keys", "build_index_body",
+    ),
     "src.search.entity_search_os": ("search_entities_hybrid",),
     "src.mm_meta.entity_search": (
         "split_query", "match_entity_reason", "narrow_entities", "fuse_entity_results", "gate_semantic_hits",

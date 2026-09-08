@@ -343,12 +343,21 @@ class TestSort(unittest.TestCase):
             self.assertEqual(build_rank_body("김치", None, sort=name)["sort"][-1],
                              {"asset_id": "asc"}, f"{name}: 동률 기준이 없다")
 
-    def test_sort_fields_exist_in_the_index(self) -> None:
-        # 색인에 없는 필드로 정렬하면 엔진이 오류를 낸다. 수정일·크기는 색인에 없어 목록에 없다.
-        allowed = {"file_name.raw", "filter_date.created_at", "asset_id"}
-        for order in SORT_OPTIONS.values():
+    def test_sort_fields_are_the_indexed_ones(self) -> None:
+        # 색인에 없는 필드로 정렬하면 엔진이 오류를 낸다 — 매핑(``build_index_body``)에 실제로 있는
+        # 필드만 쓴다. 🔴 이름은 화면 표시명 필드다(검색용 ``file_name.raw`` 로 세우면 화면의
+        # 84.5%가 제자리에 오지 않는다 · 실측 1,526건).
+        from src.search.opensearch_sync import build_index_body
+
+        props = build_index_body(dim=8)["mappings"]["properties"]
+        for name, order in SORT_OPTIONS.items():
             for clause in order or ():
-                self.assertLessEqual(set(clause), allowed)
+                for field in clause:
+                    head, _, sub = field.partition(".")
+                    self.assertIn(head, props, f"{name}: 색인에 없는 필드 {field}")
+                    if sub:
+                        self.assertIn(sub, props[head]["properties"], f"{name}: {field}")
+        self.assertEqual(SORT_OPTIONS["name_asc"][0], {"file_name_sort": "asc"})
 
     def test_conditions_still_apply_when_sorting(self) -> None:
         f = parse_search_filters(topic=["음악", "미술"], file_ext=["txt"])

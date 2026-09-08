@@ -44,10 +44,13 @@
 
 ## 정렬
 
-기본은 관련도(유사도)다. 이름·등록일로 정렬하면 뜻은 순서에 관여할 이유가 없으므로 **벡터 질의를 아예
-보내지 않는다** — 빨라지고, 하이브리드의 페이징 깊이 제약(``rank_depth``)도 사라진다.
-⚠️ **수정일·크기 정렬은 아직 불가**하다 — 색인에 그 필드가 없다(표시용으로 DB 에서 따로 읽는다).
-넣으려면 파이프라인의 색인 매핑 변경 + 전량 재색인이 필요하다.
+기본은 관련도(유사도)다. 필드로 정렬하면 뜻은 순서에 관여할 이유가 없으므로 **벡터 질의를 아예 보내지
+않는다** — 빨라지고, 하이브리드의 페이징 깊이 제약(``rank_depth``)도 사라진다.
+
+🔴 **정렬 기준은 화면에 보이는 값과 같아야 한다.** 이름은 화면 표시명(``file_name_sort``)으로 세운다 —
+검색용 ``file_name``(잡음 정제 값)으로 세우면 화면의 84.5%가 제자리에 오지 않아(실측 1,526건) 정렬한
+열이 정렬돼 보이지 않는다. 날짜는 색인이 날짜까지만 담고 표도 날짜까지만 보이므로 **보이지 않는 시각으로
+순서가 갈리지 않는다**(같은 날짜는 자산 id 로 갈린다).
 """
 
 from __future__ import annotations
@@ -105,13 +108,20 @@ FACET_SELF_FILTERS: dict[str, tuple[str, ...]] = {
 # 정렬 이름 → 색인 정렬 절. ``None`` 은 관련도(엔진 점수) 순.
 #   ⚠️ 마지막에 ``asset_id`` 를 덧붙이는 이유: 값이 같은 행들의 순서가 실행마다 흔들리면 페이지를 넘길 때
 #      같은 파일이 두 번 보이거나 아예 빠진다(결정성 요구사항).
-#   ⚠️ 수정일·크기는 색인에 없어 목록에 없다 — 넣으려면 색인 매핑 변경 + 전량 재색인.
+#   🔴 이름은 ``file_name_sort``(화면에 보이는 파일명)로 세운다. 검색용 ``file_name.raw`` 로 세우면
+#      화면의 84.5%가 제자리에 오지 않는다(실측) — 정렬한 열이 정렬돼 보이지 않는 표가 된다.
+#   ⚠️ 날짜는 색인 값이 **날짜까지**라 같은 날끼리는 자산 id 순이다. 화면 표도 날짜까지만 보이므로
+#      눈에 보이는 만큼만 기준이 되는 셈이다(보이지 않는 시각으로 순서가 갈리지 않는다).
 SORT_OPTIONS: dict[str, tuple[dict[str, Any], ...] | None] = {
     "relevance": None,
-    "name_asc": ({"file_name.raw": "asc"}, {"asset_id": "asc"}),
-    "name_desc": ({"file_name.raw": "desc"}, {"asset_id": "asc"}),
+    "name_asc": ({"file_name_sort": "asc"}, {"asset_id": "asc"}),
+    "name_desc": ({"file_name_sort": "desc"}, {"asset_id": "asc"}),
     "created_desc": ({"filter_date.created_at": "desc"}, {"asset_id": "asc"}),
     "created_asc": ({"filter_date.created_at": "asc"}, {"asset_id": "asc"}),
+    "updated_desc": ({"filter_date.updated_at": "desc"}, {"asset_id": "asc"}),
+    "updated_asc": ({"filter_date.updated_at": "asc"}, {"asset_id": "asc"}),
+    "size_desc": ({"file_size": "desc"}, {"asset_id": "asc"}),
+    "size_asc": ({"file_size": "asc"}, {"asset_id": "asc"}),
 }
 SORT_DEFAULT = "relevance"
 

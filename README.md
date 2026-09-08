@@ -171,7 +171,7 @@ tests/          단위 테스트
 | 파일 검색 | `src.search.file_search` | `search_files` · `build_rank_body` · `build_facet_body` · `build_facet_plan` · `FACET_FIELDS` · `FACET_SELF_FILTERS` · `RANK_DEPTH_DEFAULT` · `TOTAL_CAP_DEFAULT` · `FACET_SIZE_DEFAULT` · `SEARCH_PIPELINE_DEFAULT` · `WORD_FIELDS_DEFAULT` · `SORT_OPTIONS` · `SORT_DEFAULT` · `SORT_DEPTH_DEFAULT` |
 | 검색 | `src.search.tag_facets` | `aggregate_tag_facets` · `normalize_tag_key` |
 | 검색 | `src.search.query_embed` | `embed_query_for_media_search` |
-| 검색 | `src.search.opensearch_sync` | `get_client` |
+| 검색·색인 | `src.search.opensearch_sync` | `get_client` · `ensure_index` · `sync_all` · `index_asset` · `asset_to_doc` · `build_index_body` · `resolve_channel` · `check_pgvector_version` · `update_asset_mm_skill_labels` · `mm_skill_label_keys` |
 | 개체 검색 | `src.search.entity_search_os` | `search_entities_hybrid` |
 | 개체 검색 | `src.mm_meta.entity_search` | `split_query` · `match_entity_reason` · `narrow_entities` · `fuse_entity_results` · `gate_semantic_hits` · `entity_refine_fields` · `REASON_CODE_NAME` · `REASON_CODE_KEYWORD` · `REASON_CODE_DESCRIPTION` · `REASON_KEYWORD` · `REASON_DESCRIPTION` · `REASON_SEMANTIC` · `REASON_TEXT_MATCH` |
 | 개체 검색 | `src.mm_meta.entity_embedding` | `find_similar_entities` |
