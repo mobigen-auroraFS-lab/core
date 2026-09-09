@@ -29,6 +29,7 @@
 - `opensearch_sync.build_index_body` 에 정렬용 필드 3종 추가 — `file_name_sort`(keyword) · `file_size`(long) · `filter_date.updated_at`(date). 재동기화 SELECT 에 `a.updated_at`·`a.file_size` 를 싣고 `build_filter_index_fields(updated_at=…, file_size=…)` 가 채운다. 날짜는 생성일과 같은 **날짜 단위**(화면 표도 날짜까지만 보인다 · `filter_date.created_at` 의 단위는 **바꾸지 않았다** — 전체 타임스탬프로 바꾸면 `created_to` 가 그 날 오전 0시로 해석되어 하루가 빠진다).
 - `opensearch_sync.ensure_index` 가 기존 색인에 **빠진 매핑 속성만 보강**한다(반환값에 `'updated'` 추가). 보강 없이 재색인하면 검색 엔진 자동 매핑으로 문자열이 분석 필드가 되어 **정렬만 조용히 실패**한다. 기존 필드 정의는 건드리지 않는다(그때는 `--recreate`).
 - 🔴 **소비 레포 조치**: 새 정렬을 쓰려면 `run_opensearch_resync --env <env>` 를 한 번 돌려야 한다(매핑 보강 + 값 채우기). dev 실행 결과 = `updated · 1,526건 · 오류 0`.
+- `search_filters.applied_date_bounds(filters)` — 기간 필터가 **실제로 적용되는 날짜 문자열**(검색 절과 같은 계산). 백엔드가 「적용 조건」을 되돌릴 때 원문 대신 이것을 쓴다(리뷰 2026-09-09 — 원문을 되돌리면 공백·시각이 섞여 안 걸린 조건이 걸린 것처럼 보였다).
 - `query_builder.build_word_should(query, *, operator)` — 검색어를 필드별 단어 절 묶음으로(순수). 두 검색 화면의 **단어 절 정본**. 종전 `build_bm25_body` 내부 로직을 그대로 뽑은 것이라 기존 호출의 결과는 바이트 동일. 공개 API 표에 `build_bm25_body`·`build_knn_body` 도 함께 등재(코드 변경 0 · 계약면 명시).
 - `search_filters.SearchFilters` 의 주제·하위주제가 **여럿**을 받는다 — `topics: tuple[str, ...]`·`subtopics: tuple[str, ...]`. 같은 축의 여러 값은 「또는」(태그와 같은 규칙)이며 OS 절은 종전과 같은 `terms` 배열이라 모양이 바뀌지 않는다. `parse_search_filters(topic=…, subtopic=…)` 는 **문자열 하나도 목록도** 받는다. 종전 이름 `.topic`·`.subtopic` 은 **첫 값을 주는 읽기 전용 속성**으로 남겨 소비 코드가 깨지지 않는다(새 코드는 복수 이름을 읽는다).
 

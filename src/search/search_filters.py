@@ -190,6 +190,28 @@ def _to_utc_date(value: date | datetime) -> str:
     return value.isoformat()
 
 
+def applied_date_bounds(filters: SearchFilters | None) -> tuple[str | None, str | None]:
+    """기간 필터가 **실제로 적용되는 값**(날짜 문자열)을 돌려준다 — 되돌림(echo)용.
+
+    검색 절은 시각을 버리고 **UTC 날짜까지만** 쓴다(``_to_utc_date`` · 같은 함수를 쓴다). 화면이
+    「적용 조건」을 그릴 때 요청 원문(공백·시각 포함)을 되돌리면 "안 걸린 조건이 걸린 것처럼" 보이므로,
+    실제 절에 들어가는 값과 **같은 계산**으로 되돌려야 한다(리뷰 2026-09-09 · 093 규칙 ① — 같은 답이어야
+    하는 계산은 한 곳).
+
+    Args:
+        filters: 파싱된 필터. ``None`` 이면 둘 다 ``None``.
+
+    Returns:
+        ``(시작, 끝)`` — 각각 ``YYYY-MM-DD`` 또는 미지정이면 ``None``.
+    """
+    if filters is None:
+        return (None, None)
+    return (
+        _to_utc_date(filters.created_from) if filters.created_from is not None else None,
+        _to_utc_date(filters.created_to) if filters.created_to is not None else None,
+    )
+
+
 def filters_to_opensearch_bool(filters: SearchFilters | None) -> list[dict[str, Any]]:
     """``SearchFilters`` 를 OpenSearch ``bool.filter`` 절 목록으로 바꾼다(BM25·kNN 공통).
 
@@ -236,6 +258,7 @@ def filters_to_opensearch_bool(filters: SearchFilters | None) -> list[dict[str, 
 
 
 __all__ = [
+    "applied_date_bounds",
     "SearchFilters",
     "filters_to_opensearch_bool",
     "parse_search_filters",

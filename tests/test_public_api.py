@@ -50,7 +50,7 @@ PUBLIC_API: dict[str, tuple[str, ...]] = {
         "list_edges_for_review", "list_relation_kinds", "bulk_review", "revise_edge", "promote_relation_kind",
     ),
     "src.search.search_service": ("search_hybrid",),
-    "src.search.search_filters": ("SearchFilters", "parse_search_filters"),
+    "src.search.search_filters": ("SearchFilters", "parse_search_filters", "applied_date_bounds"),
     "src.search.search_tuning": ("SearchTuning",),
     "src.search.refine": ("refine_rows", "refine_tokens"),
     "src.search.facets": ("aggregate_facets",),
