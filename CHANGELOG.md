@@ -11,6 +11,13 @@
 | **MINOR** | 공개 API **추가** — 기존 호출은 그대로 동작 |
 | **PATCH** | 공개 API 무변경 — 내부 수정·버그 수정 |
 
+## [Unreleased] — 2026-09-09 (형태소 분석기가 조사를 걷어낸다 · 분석기 어긋남 감지)
+
+### 변경 (MINOR — 반환값 추가 · 기존 호출 무변경)
+- `ensure_index` 반환값에 **`'analysis-stale'`** 추가 — 색인의 분석기 설정이 코드 정본과 다르면 이 값을 준다(빠진 필드 보강은 그대로 한다). 분석기는 매핑처럼 덧붙여 못 고치므로 `recreate=True` 로 다시 만들어야 반영된다. 상태 문자열을 `'exists'`/`'updated'` 로만 분기하던 호출부는 이 값을 "재생성 필요" 로 다뤄야 한다.
+- `build_index_body` 의 `nori_user` 분석기에 **조사 제거**(`nori_part_of_speech` J* 9태그 + 불용어 `의`)를 붙였다 — `화학에서` 가 색인·질의 양쪽에서 `화학` 이 된다. 🔴 **기존 색인은 재생성해야 반영된다**(`run_opensearch_resync --recreate`). 근거: 골든 758질의 재측정 — 조사 층 파일 검색 재현 0.33→1.00 · 다른 층 회귀 0.
+- 상수 추가 `src.config.search_constants.NORI_STOPTAGS_DEFAULT` · `NORI_STOPWORDS_DEFAULT`(왜·태그 뜻은 상수 주석).
+
 ## [v0.6.0] — 2026-09-08 (096 파일 검색 조회 — 조건으로 좁히고 정확히 센다)
 
 ### 추가 (MINOR — 기존 호출 무변경)

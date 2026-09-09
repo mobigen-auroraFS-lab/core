@@ -173,6 +173,23 @@ NORI_USER_WORDS_DEFAULT: tuple[str, ...] = (
     "애플워치",
 )
 
+# ── 096 후속: 형태소 분석기에서 조사(기능어)를 걷어낸다 ─────────────────────────
+# nori 는 "화학에서" 를 화학(NNG)+에서(JKB) 로 쪼갠다. 조사(에서·은·을·으로…)는 뜻이 없는 기능어인데
+# 색인·질의 양쪽에 토큰으로 남아, **모든 형태소 일치**(파일 검색 단어 갈래 ``operator=and``)에서
+# "화학 과 에서 를 **둘 다** 가진 요약" 만 남겨 재현을 무너뜨렸다(측정 2026-09-09: 조사 층 60질의
+# 재현 0.33 · ``화학에서`` 1건 vs 원형 ``화학`` 19건). 아래 태그를 ``nori_part_of_speech`` 로 걷어낸다.
+# 태그 뜻 — JKS 주격(이/가) · JKC 보격(이/가 되다) · JKG 관형격(의) · JKO 목적격(을/를) ·
+# JKB 부사격(에/에서/로/와) · JKV 호격(아/야) · JKQ 인용격(라고) · JX 보조사(은/는/도/만) · JC 접속조사(와/과).
+# 범위는 **조사만** — 어미(E*)·접미사(XS*)는 두 창구 재측정 근거 없이 넓히지 않는다.
+# ⚠️ 분석기 변경은 매핑 보강으로 못 반영한다 — **재색인(recreate) 필수**(``ensure_index`` 가 어긋남을 알린다).
+NORI_STOPTAGS_DEFAULT: tuple[str, ...] = (
+    "JKS", "JKC", "JKG", "JKO", "JKB", "JKV", "JKQ", "JX", "JC",
+)
+# 질의 끝의 "~의" 는 nori 가 **명사(NNG)** 로 잘못 태깅해 위 태그 필터를 빠져나간다(실측 2026-09-09:
+# 화학의·호수의·김치의·국립공원의 전부 NNG — 문장 속 "한국의 명산" 은 JKG 로 제대로 걷힌다). 그래서
+# 낱말 자체를 불용어로 한 번 더 막는다. '의' 홀로 명사(義·醫)로 쓰인 검색어는 이 코퍼스에 없어 손실이 없다.
+NORI_STOPWORDS_DEFAULT: tuple[str, ...] = ("의",)
+
 # ── 073: aboutness OR-증거 필터 상수(단일 출처 F1) ─────────────────────────────
 # 적재시 확정한 about 개체 + keywords 를 증거로, 질의 개체와 무증거 행을 버킷에서 걸러낸다
 # (검색시점 LLM 0·전체 노출 깊이 적용). 측정(2026-07-13): @10 무관 −4~7%p·연관 무손실.
@@ -261,6 +278,8 @@ __all__ = [
     "ENTITY_SEARCH_TOP_N_DEFAULT",
     "ENTITY_SEMANTIC_GATE_ENABLED_DEFAULT",
     "ENTITY_SEMANTIC_GATE_EPS_DEFAULT",
+    "NORI_STOPTAGS_DEFAULT",
+    "NORI_STOPWORDS_DEFAULT",
     "NORI_USER_WORDS_DEFAULT",
     "OS_BM25_OPERATOR_DEFAULT",
     "OS_CUTOFF_ENABLED_DEFAULT",

@@ -253,6 +253,21 @@ class TestIndexBody(unittest.TestCase):
         analyzer = analysis["analyzer"]["nori_user"]
         self.assertEqual(analyzer["tokenizer"], "nori_user_tokenizer")
 
+    def test_josa_filter_in_analyzer(self) -> None:
+        # 096 후속 — 조사(J*) 태그 필터 + 불용어 '의' 가 analyzer 에 걸려 있어야 한다. "화학에서" 가
+        # 색인·질의 양쪽에서 "화학" 으로 같아져 모든-형태소-일치(and)가 원형과 같은 결과를 낸다
+        # (없으면 조사 층 재현 0.33 — 2026-09-09 실측). '의' 는 nori 가 명사로 태깅해 낱말로 따로 막는다.
+        analysis = build_index_body()["settings"]["analysis"]
+        self.assertEqual(
+            analysis["filter"]["nori_josa_pos"],
+            {"type": "nori_part_of_speech",
+             "stoptags": ["JKS", "JKC", "JKG", "JKO", "JKB", "JKV", "JKQ", "JX", "JC"]},
+        )
+        self.assertEqual(analysis["filter"]["nori_josa_word"], {"type": "stop", "stopwords": ["의"]})
+        self.assertEqual(
+            analysis["analyzer"]["nori_user"]["filter"], ["nori_josa_pos", "nori_josa_word"]
+        )
+
     def test_nori_user_words_override(self) -> None:
         # 사전 목록은 인자로 주입 가능(settings 단일 출처가 IO 층에서 전달) — 결정적 반영.
         body = build_index_body(nori_user_words=["갤럭시탭", "버즈"])
@@ -276,7 +291,12 @@ class _FakeIndices:
     빠진 필드 보강을 검증할 때는 일부러 몇 개를 뺀 것을 넣는다.
     """
 
-    def __init__(self, existing: bool = False, live_props: dict | None = None) -> None:
+    def __init__(
+        self,
+        existing: bool = False,
+        live_props: dict | None = None,
+        live_analysis: dict | None = None,
+    ) -> None:
         self._existing = existing
         self.created: list[tuple[str, dict]] = []
         self.deleted: list[str] = []
@@ -288,6 +308,11 @@ class _FakeIndices:
 
             live_props = build_index_body(dim=8)["mappings"]["properties"]
         self.live_props = live_props
+        if live_analysis is None:
+            from src.search.opensearch_sync import build_index_body
+
+            live_analysis = build_index_body(dim=8)["settings"]["analysis"]
+        self.live_analysis = live_analysis
 
     def exists(self, index: str) -> bool:
         self.exists_calls.append(index)
@@ -311,12 +336,21 @@ class _FakeIndices:
     def put_mapping(self, index: str, body: dict) -> None:
         self.put_mappings.append((index, body))
 
+    def get_settings(self, index: str) -> dict:
+        # 매핑과 같이 실 색인 이름으로 키가 잡힌 응답 모양.
+        return {f"{index}-000001": {"settings": {"index": {"analysis": self.live_analysis}}}}
+
 
 class _FakeClient:
     """OpenSearch 클라이언트 대역 — indices·index(단건)·bulk 호출 기록."""
 
-    def __init__(self, existing: bool = False, live_props: dict | None = None) -> None:
-        self.indices = _FakeIndices(existing, live_props)
+    def __init__(
+        self,
+        existing: bool = False,
+        live_props: dict | None = None,
+        live_analysis: dict | None = None,
+    ) -> None:
+        self.indices = _FakeIndices(existing, live_props, live_analysis)
         self.indexed: list[dict] = []
         self.bulk_calls: list[dict] = []
 
@@ -463,6 +497,55 @@ class TestEnsureIndex(unittest.TestCase):
         ensure_index(client, "assets", dim=8)
         (_idx, body), = client.indices.put_mappings
         self.assertEqual(set(body["properties"]), {"file_size"})
+
+    def test_analysis_stale_is_reported_not_repaired(self) -> None:
+        # 096 후속 — 분석기(조사 필터)가 코드와 다른 옛 색인이면 'analysis-stale' 로 알린다. 지우지도
+        # 않고(파괴는 recreate 옵트인) 매핑으로 고치려 들지도 않는다(분석기는 보강이 불가하다).
+        # 이게 없으면 "코드는 고쳤는데 색인은 옛 분석기" 가 조용히 이어진다.
+        from src.search.opensearch_sync import build_index_body, ensure_index
+
+        old = dict(build_index_body(dim=8)["settings"]["analysis"])
+        old.pop("filter")
+        old["analyzer"] = {"nori_user": {"type": "custom", "tokenizer": "nori_user_tokenizer"}}
+        client = _FakeClient(existing=True, live_analysis=old)
+        self.assertEqual(ensure_index(client, "assets", dim=8), "analysis-stale")
+        self.assertEqual(client.indices.deleted, [])
+        self.assertEqual(client.indices.created, [])
+        self.assertEqual(client.indices.put_mappings, [])
+
+    def test_analysis_stale_still_adds_missing_fields(self) -> None:
+        # 어긋남을 알리더라도 고칠 수 있는 것(빠진 필드)은 고친다 — 상태는 어긋남이 우선한다.
+        from src.search.opensearch_sync import build_index_body, ensure_index
+
+        body = build_index_body(dim=8)
+        props = dict(body["mappings"]["properties"])
+        props.pop("file_size")
+        old = dict(body["settings"]["analysis"])
+        old.pop("filter")
+        client = _FakeClient(existing=True, live_props=props, live_analysis=old)
+        self.assertEqual(ensure_index(client, "assets", dim=8), "analysis-stale")
+        (_idx, put), = client.indices.put_mappings
+        self.assertEqual(set(put["properties"]), {"file_size"})
+
+    def test_analysis_unreadable_skips_check(self) -> None:
+        # 설정을 못 읽었으면(빈 dict) 어긋남을 단정하지 않는다 — 헛울림보다 침묵을 택한다.
+        from src.search.opensearch_sync import ensure_index
+
+        client = _FakeClient(existing=True, live_analysis={})
+        self.assertEqual(ensure_index(client, "assets", dim=8), "exists")
+
+    def test_settings_normalized_before_compare(self) -> None:
+        # 엔진은 설정을 문자열로 돌려준다("1"·"true") — 값이 같으면 어긋남이 아니어야 한다.
+        from src.search.opensearch_sync import _analysis_stale, _normalize_settings
+
+        self.assertEqual(
+            _normalize_settings({"a": 1, "b": [True, False], "c": {"d": "x"}}),
+            {"a": "1", "b": ["true", "false"], "c": {"d": "x"}},
+        )
+        wanted = {"filter": {"f": {"type": "stop", "ignore_case": True, "n": 2}}}
+        live = {"filter": {"f": {"type": "stop", "ignore_case": "true", "n": "2"}}}
+        self.assertFalse(_analysis_stale(live, wanted))
+        self.assertTrue(_analysis_stale({"filter": {}}, wanted))
 
     def test_recreate_deletes_then_creates(self) -> None:
         # recreate=True 면 delete 후 재생성(파괴적·옵트인), 반환 'recreated'.
