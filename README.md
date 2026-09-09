@@ -163,7 +163,7 @@ tests/          단위 테스트
 | 그래프 읽기 | `src.relations.graph_query` | `fetch_relations_for_asset` · `fetch_active_relations_for_asset` · `mm_meta_of_asset` · `mm_meta_bundle` · `list_entities` · `count_entities_by_type` · `count_entities_by_area` · `assets_of_entities` |
 | 관계 정책 | `src.relations.approval_policy` | `TIER_ORDER` · `tier_rank` |
 | 관계 검토 | `src.relations.review` | `list_edges_for_review` · `list_relation_kinds` · `bulk_review` · `revise_edge` · `promote_relation_kind` |
-| 검색 | `src.search.search_service` | `search_hybrid` |
+| 검색 | `src.search.search_service` | `search_hybrid` — 기존 멀티모달 검색 화면(종류별 그룹) · ⚠️ **새 화면은 `file_search.search_files`**(대체 창구 · 남기는 이유는 모듈 docstring) |
 | 검색 | `src.search.search_filters` | `SearchFilters` · `parse_search_filters` · `applied_date_bounds` |
 | 검색 | `src.search.search_tuning` | `SearchTuning` |
 | 검색 | `src.search.refine` | `refine_rows` · `refine_tokens` |
