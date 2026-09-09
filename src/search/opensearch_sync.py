@@ -26,7 +26,11 @@ from typing import Any
 
 from src.config.embedding_constants import FIX_EMBEDDING_DIMENSION
 from src.config.filename_util import basename_of
-from src.config.search_constants import NORI_USER_WORDS_DEFAULT
+from src.config.search_constants import (
+    NORI_STOPTAGS_DEFAULT,
+    NORI_STOPWORDS_DEFAULT,
+    NORI_USER_WORDS_DEFAULT,
+)
 
 # 085 — 미부여(해당없음) 라벨 코드의 단일 출처. 패싯 축에서 제외할 값이라 문자열을 여기 다시
 # 적지 않고 정본을 가져온다(값이 갈리면 "해당없음"이 축에 새어 나온다).
@@ -188,6 +192,10 @@ def build_index_body(
     ``nori_tokenizer`` + ``user_dictionary_rules``(외래어 고유명사 목록)로 만든 **커스텀** analyzer 다.
     내장 'nori' analyzer 는 user_dictionary 를 받지 못해(설정 불가) 외래어가 분해되므로, 사전을 받는
     커스텀 토크나이저를 반드시 정의한다. ``nori_user_words`` 미지정 시 설정과 공유하는 기본 목록을 쓴다.
+
+    분석기는 토큰을 만든 뒤 **조사를 걷어낸다**(``nori_part_of_speech`` J* 태그 + 불용어 '의' —
+    왜·태그 뜻은 ``search_constants.NORI_STOPTAGS_DEFAULT`` 주석). 색인 시점과 질의 시점이 같은 분석기를
+    쓰므로 "화학에서" 는 양쪽에서 "화학" 하나가 되어, 모든-형태소-일치 질의가 원형과 같은 결과를 낸다.
     임베딩은 HNSW + 코사인. 차원은 단일 출처 상수를 따른다.
 
     Args:
@@ -215,10 +223,23 @@ def build_index_body(
                         "user_dictionary_rules": words,
                     }
                 },
+                "filter": {
+                    # 조사(J*) 제거 — "화학에서" → "화학". 왜·태그 뜻은 NORI_STOPTAGS_DEFAULT 주석.
+                    "nori_josa_pos": {
+                        "type": "nori_part_of_speech",
+                        "stoptags": list(NORI_STOPTAGS_DEFAULT),
+                    },
+                    # 질의 끝 "~의" 가 명사로 태깅돼 위 필터를 빠져나가는 구멍을 낱말 불용어로 막는다.
+                    "nori_josa_word": {
+                        "type": "stop",
+                        "stopwords": list(NORI_STOPWORDS_DEFAULT),
+                    },
+                },
                 "analyzer": {
                     "nori_user": {
                         "type": "custom",
                         "tokenizer": "nori_user_tokenizer",
+                        "filter": ["nori_josa_pos", "nori_josa_word"],
                     }
                 },
             },
@@ -628,6 +649,65 @@ def _live_properties(client: Any, index: str) -> dict[str, Any]:
     return ((entry or {}).get("mappings") or {}).get("properties") or {}
 
 
+def _normalize_settings(value: Any) -> Any:
+    """설정 값을 비교용으로 고른다(순수·재귀) — 스칼라는 전부 문자열로.
+
+    검색 엔진은 저장한 설정을 돌려줄 때 숫자·불리언을 문자열로 준다(``"1"``·``"true"``). 그대로
+    비교하면 값이 같아도 다르다고 나오므로 양쪽을 같은 모양으로 고른 뒤 비교한다.
+
+    Args:
+        value: 설정 트리의 한 마디(dict·list·스칼라).
+
+    Returns:
+        같은 구조에 스칼라만 문자열로 바뀐 값(불리언은 엔진 표기대로 ``"true"``/``"false"``).
+    """
+    if isinstance(value, Mapping):
+        return {str(k): _normalize_settings(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_normalize_settings(v) for v in value]
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _analysis_stale(live: Mapping[str, Any], wanted: Mapping[str, Any]) -> bool:
+    """지금 색인의 분석기 설정이 코드 정본과 **다른지**(순수).
+
+    분석기(토크나이저·필터·analyzer)는 매핑처럼 덧붙여 고칠 수 없다 — 색인을 다시 만들어야 바뀐다.
+    그런데 다르다는 것을 아무도 알려주지 않으면 코드는 새 분석기인데 색인은 옛 분석기인 채로
+    문서가 계속 들어가고, 검색 결과가 "고쳤는데 그대로" 가 된다(096 조사 필터가 바로 그 경우).
+    그래서 두 정의를 통째로 비교한다 — 코드가 정본이므로 어느 쪽에 더 있어도 어긋남이다.
+
+    Args:
+        live: 지금 색인의 ``settings.index.analysis``. 읽지 못했으면 빈 dict.
+        wanted: 코드가 정본으로 삼는 ``settings.analysis``.
+
+    Returns:
+        다르면 True. ``live`` 가 비어 있으면(읽기 실패) 판단을 보류하고 False 를 준다.
+    """
+    if not live:
+        return False
+    return _normalize_settings(live) != _normalize_settings(wanted)
+
+
+def _live_analysis(client: Any, index: str) -> dict[str, Any]:
+    """지금 색인의 분석기 설정(``settings.index.analysis``)을 읽는다.
+
+    ⚠️ 매핑과 같이 응답은 **실제 색인 이름**으로 키가 잡힌다 — 정확히 일치하는 키가 없으면 첫 항목을 쓴다.
+
+    Args:
+        client: OpenSearch 클라이언트.
+        index: 색인(또는 별칭) 이름.
+
+    Returns:
+        분석기 설정 dict. 읽지 못하면 빈 dict(그때는 어긋남 판단을 건너뛴다).
+    """
+    got = client.indices.get_settings(index=index) or {}
+    entry = got.get(index) or (next(iter(got.values()), {}) if got else {})
+    settings = ((entry or {}).get("settings") or {}).get("index") or {}
+    return settings.get("analysis") or {}
+
+
 def ensure_index(
     client: Any,
     index: str,
@@ -655,7 +735,8 @@ def ensure_index(
 
     Returns:
         ``'created'``(신규) · ``'recreated'``(삭제 후 재생성) · ``'updated'``(빠진 필드 보강) ·
-        ``'exists'``(손댈 것 없음).
+        ``'exists'``(손댈 것 없음) · ``'analysis-stale'``(**분석기 설정이 코드와 다르다** — 빠진 필드는
+        보강했지만 이 색인에 넣는 문서는 옛 분석기로 쪼개진다. ``recreate`` 로 다시 만들어야 반영된다).
     """
     body = build_index_body(dim=dim, nori_user_words=nori_user_words)
     exists = client.indices.exists(index=index)
@@ -671,8 +752,10 @@ def ensure_index(
     )
     if missing:
         client.indices.put_mapping(index=index, body={"properties": missing})
-        return "updated"
-    return "exists"
+    # 분석기 어긋남은 보강으로 못 고친다 — 고칠 수 있는 것(빠진 필드)은 고친 뒤 상태로 알린다.
+    if _analysis_stale(_live_analysis(client, index), body["settings"]["analysis"]):
+        return "analysis-stale"
+    return "updated" if missing else "exists"
 
 
 def _fetch_one(conn: Any, sql: str, params: tuple) -> dict[str, Any] | None:
@@ -1016,7 +1099,8 @@ def sync_all(
             주제가 지워지지 않는다.
 
     Returns:
-        ``(인덱스 상태, 색인 건수, 오류 목록)``. 상태는 ``created``·``recreated``·``exists``.
+        ``(인덱스 상태, 색인 건수, 오류 목록)``. 상태는 ``ensure_index`` 의 값 — ``created``·
+        ``recreated``·``updated``·``exists``·``analysis-stale``(분석기가 코드와 달라 ``recreate`` 필요).
     """
     if bulk_fn is None:
         from opensearchpy import helpers
