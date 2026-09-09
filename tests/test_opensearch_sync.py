@@ -9,6 +9,7 @@ IO 함수의 옳은 액션 조립만 단위로 보증하고, 실제 색인 결�
 """
 from __future__ import annotations
 
+import re
 import unittest
 
 from src.config.embedding_constants import FIX_EMBEDDING_DIMENSION
@@ -269,14 +270,24 @@ class TestIndexBody(unittest.TestCase):
 
 
 class _FakeIndices:
-    """`client.indices` 대역 — exists/create/delete/refresh 호출과 인자를 기록."""
+    """`client.indices` 대역 — exists/create/delete/refresh/매핑 호출과 인자를 기록.
 
-    def __init__(self, existing: bool = False) -> None:
+    ``live_props`` 는 "지금 색인에 있는 속성" 이다. 기본은 **코드 매핑 전부**(= 보강할 것 없음)이며,
+    빠진 필드 보강을 검증할 때는 일부러 몇 개를 뺀 것을 넣는다.
+    """
+
+    def __init__(self, existing: bool = False, live_props: dict | None = None) -> None:
         self._existing = existing
         self.created: list[tuple[str, dict]] = []
         self.deleted: list[str] = []
         self.refreshed: list[str] = []
         self.exists_calls: list[str] = []
+        self.put_mappings: list[tuple[str, dict]] = []
+        if live_props is None:
+            from src.search.opensearch_sync import build_index_body
+
+            live_props = build_index_body(dim=8)["mappings"]["properties"]
+        self.live_props = live_props
 
     def exists(self, index: str) -> bool:
         self.exists_calls.append(index)
@@ -293,12 +304,19 @@ class _FakeIndices:
     def refresh(self, index: str) -> None:
         self.refreshed.append(index)
 
+    def get_mapping(self, index: str) -> dict:
+        # 실제 응답은 **실 색인 이름**으로 키가 잡힌다 — 별칭 대비로 다른 이름을 쓴다.
+        return {f"{index}-000001": {"mappings": {"properties": self.live_props}}}
+
+    def put_mapping(self, index: str, body: dict) -> None:
+        self.put_mappings.append((index, body))
+
 
 class _FakeClient:
     """OpenSearch 클라이언트 대역 — indices·index(단건)·bulk 호출 기록."""
 
-    def __init__(self, existing: bool = False) -> None:
-        self.indices = _FakeIndices(existing)
+    def __init__(self, existing: bool = False, live_props: dict | None = None) -> None:
+        self.indices = _FakeIndices(existing, live_props)
         self.indexed: list[dict] = []
         self.bulk_calls: list[dict] = []
 
@@ -377,11 +395,17 @@ def _asset_row(**over) -> dict:
 
 
 def _is_read_only(sql: str) -> bool:
-    """SQL 이 읽기전용 SELECT 인지(쓰기 키워드 부재) 확인 — FR-004(헌법 6조) 가드."""
+    """SQL 이 읽기전용 SELECT 인지(쓰기 **문장** 부재) 확인 — FR-004(헌법 6조) 가드.
+
+    🔴 **단어 경계로 본다.** 부분 문자열로 찾으면 ``a.updated_at`` 컬럼이 ``UPDATE`` 문으로 오인된다
+    (096 에서 실제로 걸렸다 — 정렬용 수정일을 SELECT 에 넣자 이 가드가 헛울렸다). ``UPDATE asset SET``
+    같은 진짜 쓰기 문장은 그대로 잡힌다(뒤에 공백·줄바꿈이 오므로 경계가 성립한다).
+    """
     up = sql.upper()
     if "SELECT" not in up:
         return False
-    return not any(w in up for w in ("INSERT", "UPDATE", "DELETE", "DROP", "TRUNCATE", "MERGE"))
+    words = ("INSERT", "UPDATE", "DELETE", "DROP", "TRUNCATE", "MERGE")
+    return not any(re.search(rf"\b{w}\b", up) for w in words)
 
 
 class TestEnsureIndex(unittest.TestCase):
@@ -398,13 +422,47 @@ class TestEnsureIndex(unittest.TestCase):
         self.assertEqual(client.indices.deleted, [])
 
     def test_noop_when_exists(self) -> None:
-        # 이미 있으면 생성하지 않고 'exists'.
+        # 이미 있고 빠진 필드도 없으면 아무것도 하지 않고 'exists'.
         from src.search.opensearch_sync import ensure_index
 
         client = _FakeClient(existing=True)
-        self.assertEqual(ensure_index(client, "assets"), "exists")
+        self.assertEqual(ensure_index(client, "assets", dim=8), "exists")
         self.assertEqual(client.indices.created, [])
         self.assertEqual(client.indices.deleted, [])
+        self.assertEqual(client.indices.put_mappings, [])
+
+    def test_missing_fields_are_added(self) -> None:
+        # 096 — 코드 매핑에 필드가 생겼는데 색인에 없으면 **먼저 넣는다**. 넣지 않고 문서를 색인하면
+        # 검색 엔진이 값을 보고 타입을 정해(자동 매핑) 문자열이 분석 필드가 되고 **정렬이 거부된다**.
+        from src.search.opensearch_sync import build_index_body, ensure_index
+
+        props = dict(build_index_body(dim=8)["mappings"]["properties"])
+        props.pop("file_name_sort")
+        props.pop("file_size")
+        props["filter_date"] = {"properties": {"created_at": {"type": "date"}}}  # 수정일 없음
+        client = _FakeClient(existing=True, live_props=props)
+        self.assertEqual(ensure_index(client, "assets", dim=8), "updated")
+        self.assertEqual(client.indices.created, [])
+        self.assertEqual(client.indices.deleted, [], "보강은 색인을 지우지 않는다")
+        (idx, body), = client.indices.put_mappings
+        self.assertEqual(idx, "assets")
+        self.assertEqual(body, {"properties": {
+            "file_name_sort": {"type": "keyword"},
+            "file_size": {"type": "long"},
+            # 이미 있는 개체에는 **빠진 하위 항목만** 넣는다(있는 정의를 다시 넣으면 거절될 수 있다).
+            "filter_date": {"properties": {"updated_at": {"type": "date"}}},
+        }})
+
+    def test_existing_fields_are_never_redefined(self) -> None:
+        # 기존 필드 정의 변경은 검색 엔진이 허용하지 않는다 — 보강 요청에 들어가면 안 된다.
+        from src.search.opensearch_sync import build_index_body, ensure_index
+
+        props = dict(build_index_body(dim=8)["mappings"]["properties"])
+        props.pop("file_size")
+        client = _FakeClient(existing=True, live_props=props)
+        ensure_index(client, "assets", dim=8)
+        (_idx, body), = client.indices.put_mappings
+        self.assertEqual(set(body["properties"]), {"file_size"})
 
     def test_recreate_deletes_then_creates(self) -> None:
         # recreate=True 면 delete 후 재생성(파괴적·옵트인), 반환 'recreated'.

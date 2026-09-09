@@ -21,7 +21,7 @@ import 할 수 있어야 하기 때문이다.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from typing import Any
 
 from src.config.embedding_constants import FIX_EMBEDDING_DIMENSION
@@ -40,6 +40,7 @@ from src.search.tag_facets import normalize_tag_key
 # 임베딩이 없는 자산은 INNER JOIN 에서 자연히 빠진다 — 색인해도 벡터 검색이 안 되기 때문이다.
 _ASSET_SELECT = """
 SELECT a.asset_id, a.modality, a.domain_label, a.fs_path, a.created_at,
+       a.updated_at, a.file_size,
        am.ext_meta, e.emb AS emb
 FROM asset a
 LEFT JOIN asset_metadata am ON am.asset_id = a.asset_id
@@ -233,6 +234,13 @@ def build_index_body(
                     "fields": {"raw": {"type": "keyword"}},
                 },
                 "fs_uri": {"type": "keyword"},
+                # 096 정렬 — **화면에 보이는 파일명 그대로**(``display_file_name``). 위 ``file_name``
+                # 은 잡음을 정제한 검색용 값이라 화면 값과 다르다(실측 1,526건 전부 불일치). 그 필드로
+                # 줄을 세우면 화면의 84.5%가 제자리에 오지 않아 "이름순인데 이름순이 아닌 표"가 된다.
+                # 분석기 없는 keyword 라 랭킹(BM25)에는 기여하지 않는다 — 정렬 전용이다.
+                "file_name_sort": {"type": "keyword"},
+                # 096 정렬 — 파일 크기(바이트). 표에 찍는 값으로 줄을 세우려면 색인에 있어야 한다.
+                "file_size": {"type": "long"},
                 "summary": {"type": "text", "analyzer": "nori_user"},
                 "keywords": {"type": "text", "analyzer": "nori_user"},
                 # 083 T104 — 태그 필터·패싯용 **정규화 키**(keyword·정확 일치). 위 ``keywords``
@@ -272,6 +280,9 @@ def build_index_body(
                 "filter_date": {
                     "properties": {
                         "created_at": {"type": "date"},
+                        # 096 정렬 — 수정일. 생성일과 같은 **날짜까지만** 담는다(화면 표도 날짜까지만
+                        # 보이므로 눈에 보이는 만큼만 기준이 된다 · 같은 날짜는 자산 id 로 갈린다).
+                        "updated_at": {"type": "date"},
                     }
                 },
                 "embedding": {
@@ -525,6 +536,9 @@ def asset_to_doc(
         build_filter_index_fields(
             fs_path=str(row.get("fs_path") or ""),
             created_at=row.get("created_at"),
+            # 096 — 표에 찍는 값(수정일·크기)으로 줄을 세울 수 있게 함께 싣는다.
+            updated_at=row.get("updated_at"),
+            file_size=row.get("file_size"),
         )
     )
     return doc
@@ -565,6 +579,55 @@ def get_client(url: str | None = None) -> Any:
     )
 
 
+def _missing_properties(
+    live: Mapping[str, Any], wanted: Mapping[str, Any]
+) -> dict[str, Any]:
+    """살아 있는 매핑에 **없는 속성만** 골라낸다(순수·재귀).
+
+    있는 속성은 손대지 않는다 — 정의가 같아도 다시 넣으면 거절하는 필드(벡터 등)가 있고, 다르면
+    애초에 바꿀 수 없다(색인 재생성이 필요하다). 그래서 "빠진 것만" 이라는 좁은 일만 한다.
+
+    Args:
+        live: 지금 색인에 있는 속성 정의(``mappings.properties``).
+        wanted: 코드가 정본으로 삼는 속성 정의.
+
+    Returns:
+        빠진 속성만 담은 부분 정의. 하위 속성이 있는 개체 필드는 **빠진 하위 속성만** 담는다
+        (``filter_date`` 처럼 이미 있는 개체에 항목이 하나 늘어난 경우).
+    """
+    out: dict[str, Any] = {}
+    for name, spec in wanted.items():
+        current = live.get(name)
+        if current is None:
+            out[name] = spec
+            continue
+        sub_wanted = spec.get("properties") if isinstance(spec, Mapping) else None
+        if isinstance(sub_wanted, Mapping):
+            sub_live = (current.get("properties") if isinstance(current, Mapping) else None) or {}
+            sub = _missing_properties(sub_live, sub_wanted)
+            if sub:
+                out[name] = {"properties": sub}
+    return out
+
+
+def _live_properties(client: Any, index: str) -> dict[str, Any]:
+    """지금 색인의 속성 정의를 읽는다.
+
+    ⚠️ 응답은 **실제 색인 이름**으로 키가 잡힌다 — 별칭으로 물으면 요청한 이름과 다르다. 그래서
+    정확히 일치하는 키가 없으면 첫 항목을 쓴다.
+
+    Args:
+        client: OpenSearch 클라이언트.
+        index: 색인(또는 별칭) 이름.
+
+    Returns:
+        ``mappings.properties`` dict. 읽지 못하면 빈 dict(그때는 보강을 건너뛴다).
+    """
+    got = client.indices.get_mapping(index=index) or {}
+    entry = got.get(index) or (next(iter(got.values()), {}) if got else {})
+    return ((entry or {}).get("mappings") or {}).get("properties") or {}
+
+
 def ensure_index(
     client: Any,
     index: str,
@@ -573,7 +636,14 @@ def ensure_index(
     dim: int = FIX_EMBEDDING_DIMENSION,
     nori_user_words: Iterable[str] | None = None,
 ) -> str:
-    """인덱스가 없으면 생성한다. ``recreate=True`` 면 **명시적으로** 삭제 후 재생성(파괴적·옵트인).
+    """인덱스가 없으면 생성하고, 있으면 **코드에 새로 생긴 필드만 보강**한다.
+
+    🔴 **왜 보강하나**(096): 매핑에 필드를 더해도 기존 색인은 그대로다. 그 상태로 문서를 다시 넣으면
+    검색 엔진이 값을 보고 **알아서** 타입을 정하는데(자동 매핑), 문자열은 형태소 분석 필드가 되어
+    **정렬이 거부된다**. 즉 "재색인했는데 정렬만 조용히 안 되는" 상태가 만들어진다. 그래서 코드의
+    매핑을 정본으로 삼고 빠진 필드를 먼저 넣는다. 값 자체는 재색인이 채운다.
+
+    ⚠️ 기존 필드의 **정의 변경은 하지 않는다** — 검색 엔진이 허용하지 않는다(그때는 ``recreate``).
 
     Args:
         client: OpenSearch 클라이언트.
@@ -584,7 +654,8 @@ def ensure_index(
         nori_user_words: 분해 방지 외래어 목록. ``None`` 이면 기본 목록.
 
     Returns:
-        ``'created'``(신규) · ``'recreated'``(삭제 후 재생성) · ``'exists'``(그대로 둠).
+        ``'created'``(신규) · ``'recreated'``(삭제 후 재생성) · ``'updated'``(빠진 필드 보강) ·
+        ``'exists'``(손댈 것 없음).
     """
     body = build_index_body(dim=dim, nori_user_words=nori_user_words)
     exists = client.indices.exists(index=index)
@@ -595,6 +666,12 @@ def ensure_index(
     if not exists:
         client.indices.create(index=index, body=body)
         return "created"
+    missing = _missing_properties(
+        _live_properties(client, index), body["mappings"]["properties"]
+    )
+    if missing:
+        client.indices.put_mapping(index=index, body={"properties": missing})
+        return "updated"
     return "exists"
 
 

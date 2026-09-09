@@ -50,13 +50,30 @@ PUBLIC_API: dict[str, tuple[str, ...]] = {
         "list_edges_for_review", "list_relation_kinds", "bulk_review", "revise_edge", "promote_relation_kind",
     ),
     "src.search.search_service": ("search_hybrid",),
-    "src.search.search_filters": ("SearchFilters", "parse_search_filters"),
+    "src.search.search_filters": ("SearchFilters", "parse_search_filters", "applied_date_bounds"),
     "src.search.search_tuning": ("SearchTuning",),
     "src.search.refine": ("refine_rows", "refine_tokens"),
     "src.search.facets": ("aggregate_facets",),
+    "src.search.file_search": (
+        "search_files", "build_rank_body", "build_facet_body", "build_facet_plan",
+        "ABOUT_BRANCH_DEFAULT",
+        "FACET_FIELDS", "FACET_SELF_FILTERS", "RANK_DEPTH_DEFAULT", "TOTAL_CAP_DEFAULT",
+        "FACET_SIZE_DEFAULT", "SEARCH_PIPELINE_DEFAULT", "WORD_OPERATOR_DEFAULT",
+        "SEMANTIC_MIN_COSINE_DEFAULT", "SEMANTIC_CAP_DEFAULT", "build_semantic_body",
+        "SORT_OPTIONS", "SORT_DEFAULT", "SORT_DEPTH_DEFAULT",
+    ),
     "src.search.tag_facets": ("aggregate_tag_facets", "normalize_tag_key"),
     "src.search.query_embed": ("embed_query_for_media_search",),
-    "src.search.opensearch_sync": ("get_client",),
+    # 096: 파이프라인 적재·재색인 경로가 쓰는 이름을 등재한다(코드 변경 0 · 계약면 명시).
+    # ``ensure_index`` 의 반환에 ``'updated'``(빠진 매핑 속성 보강)가 늘어난 것이 계약 변경이라,
+    # 이 표에 올려 두지 않으면 소비 레포가 무엇에 의존하는지 보이지 않는다.
+    # 096: 단어 절 정본 — 두 검색 화면이 같은 절을 쓴다(각자 만들면 같은 질의가 다른 파일을 찾는다).
+    "src.search.query_builder": ("build_word_should", "build_bm25_body", "build_knn_body"),
+    "src.search.opensearch_sync": (
+        "get_client", "ensure_index", "sync_all", "index_asset", "asset_to_doc",
+        "resolve_channel", "check_pgvector_version", "update_asset_mm_skill_labels",
+        "mm_skill_label_keys", "build_index_body",
+    ),
     "src.search.entity_search_os": ("search_entities_hybrid",),
     "src.mm_meta.entity_search": (
         "split_query", "match_entity_reason", "narrow_entities", "fuse_entity_results", "gate_semantic_hits",

@@ -7,6 +7,8 @@ import unicodedata
 from datetime import date, datetime
 from typing import Any
 
+from src.config.filename_util import display_file_name
+
 
 def derive_file_ext(fs_path: str) -> str | None:
     """경로에서 확장자를 뽑아 정규화한다(소문자·유니코드 NFKC).
@@ -79,16 +81,30 @@ def build_filter_index_fields(
     *,
     fs_path: str,
     created_at: Any = None,
+    updated_at: Any = None,
+    file_size: Any = None,
 ) -> dict[str, Any]:
-    """색인 문서에 병합할 필터 전용 필드를 만든다(순수).
+    """색인 문서에 병합할 필터·정렬 전용 필드를 만든다(순수).
+
+    **096 정렬**: 파일 검색 화면이 표에 찍는 값(표시용 파일명·크기·수정일)으로 줄을 세울 수 있어야
+    한다. 색인에 없으면 정렬 자체가 불가능하다 — 검색 엔진은 색인된 필드로만 줄을 세운다.
+
+    🔴 **표시명은 화면에 보이는 그 문자열**이다(``display_file_name``) — 이미 있는 ``file_name`` 은
+    잡음을 정제한 **검색용** 값이라 화면 값과 다르다(실측: 1,526건 전부 다르고, 그 필드로 줄을 세우면
+    화면의 84.5%가 제자리에 오지 않는다). 두 값을 섞으면 "이름순으로 눌렀는데 이름순이 아닌 표"가 된다.
+
+    ⚠️ **수정일은 날짜까지만** 담는다(생성일과 같은 규칙). 화면 표도 날짜까지만 보이므로 **눈에 보이는
+    만큼만** 정렬 기준이 되고, 같은 날짜끼리의 순서는 호출부의 동률 기준(자산 id)이 정한다.
 
     Args:
-        fs_path: 자산 경로(확장자·출처를 여기서 파생한다).
-        created_at: 생성 시각. ``None`` 이면 ``filter_date`` 를 아예 넣지 않는다.
+        fs_path: 자산 경로(확장자·출처·표시명을 여기서 파생한다).
+        created_at: 생성 시각. ``None`` 이면 ``filter_date.created_at`` 을 넣지 않는다.
+        updated_at: 수정 시각. ``None`` 이면 ``filter_date.updated_at`` 을 넣지 않는다.
+        file_size: 파일 크기(바이트). ``None`` 이면 ``file_size`` 를 넣지 않는다.
 
     Returns:
-        ``{"filter_kw": {...}, "filter_date": {...}}`` 부분 dict. **값이 없는 키는 넣지 않는다** —
-        빈 문자열로 채우면 색인에 쓸모없는 항목이 생기기 때문이다.
+        ``{"filter_kw": {...}, "filter_date": {...}, "file_name_sort": …, "file_size": …}`` 부분
+        dict. **값이 없는 키는 넣지 않는다** — 빈 문자열·0 으로 채우면 "모른다"와 "0바이트"가 같아진다.
     """
     out: dict[str, Any] = {}
     filter_kw: dict[str, str] = {}
@@ -98,9 +114,20 @@ def build_filter_index_fields(
     filter_kw["source_dataset"] = derive_source_dataset(fs_path)
     if filter_kw:
         out["filter_kw"] = filter_kw
+    dates: dict[str, str] = {}
     created = _coerce_filter_date(created_at)
     if created:
-        out["filter_date"] = {"created_at": created}
+        dates["created_at"] = created
+    updated = _coerce_filter_date(updated_at)
+    if updated:
+        dates["updated_at"] = updated
+    if dates:
+        out["filter_date"] = dates
+    shown = display_file_name(fs_path)
+    if shown:
+        out["file_name_sort"] = shown
+    if isinstance(file_size, (int, float)) and not isinstance(file_size, bool):
+        out["file_size"] = int(file_size)
     return out
 
 

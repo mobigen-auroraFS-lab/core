@@ -451,9 +451,10 @@ def promote_relation_kind(conn: Connection[Any], *, kind_code: str, reviewer: st
     """
     _ = reviewer  # 향후 relation_kind.reviewed_by 컬럼 추가 시 여기에 저장
     with conn.cursor() as cur:
+        # 값은 SQL 텍스트에 심지 않고 **바인딩**한다 — 지금은 닫힌 어휘라 안전하지만, 이 모양을
+        # 사용자 입력에 복붙하면 그때 주입 통로가 된다(리뷰 2026-09-09).
         cur.execute(
-            f"UPDATE relation_kind SET status='{RelationKindStatus.ACTIVE}'"
-            f" WHERE kind_code=%s AND status='{RelationKindStatus.INACTIVE}'",
-            (kind_code,),
+            "UPDATE relation_kind SET status=%s WHERE kind_code=%s AND status=%s",
+            (str(RelationKindStatus.ACTIVE), kind_code, str(RelationKindStatus.INACTIVE)),
         )
         return cur.rowcount == 1
