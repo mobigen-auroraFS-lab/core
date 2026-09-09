@@ -34,7 +34,13 @@ class TestReview(unittest.TestCase):
         from src.relations.review import promote_relation_kind
         conn, cur = self._conn()
         self.assertTrue(promote_relation_kind(conn, kind_code="gaming_hardware", reviewer="bc"))
-        self.assertIn("status='inactive'", cur.execute.call_args[0][0].replace(" ", ""))
+        sql, params = cur.execute.call_args[0]
+        # 값은 SQL 텍스트가 아니라 **바인딩**으로 간다(리뷰 2026-09-09) — 텍스트에 값이 없고,
+        # 파라미터에 「비활성 → 활성」이 담겨 있어야 한다.
+        self.assertNotIn("'inactive'", sql)
+        self.assertNotIn("'active'", sql)
+        self.assertEqual(sql.count("%s"), 3)
+        self.assertEqual(params, ("active", "gaming_hardware", "inactive"))
 
 
 # 069 T406: TestListProposedEdges(구 CLI --list 큐 조회 봉인)를 제거했다 — 유일 소비였던

@@ -756,13 +756,17 @@ def search_files(
         (모듈 docstring 참조 — 같은 축의 다른 선택은 세는 데서 빼기 때문이다).
 
     Raises:
-        ValueError: 빈 질의 · 범위 밖 페이지 · 잘못된 축·상한·정렬 · 관련도 정렬인데 임베딩 없음.
+        ValueError: 빈 질의 · 빈 임베딩 · 범위 밖 페이지 · 잘못된 축·상한·정렬.
         RuntimeError: 묶음 집계 질의 중 하나가 실패했을 때.
         OpenSearch 미도달 예외는 감싸지 않고 그대로 올린다 — 결과가 백엔드 가용성에 따라 달라지면 안 된다.
     """
     q = (query or "").strip()
     if not q:
         raise ValueError("파일 검색은 검색어가 필요하다(조건만으로 훑는 경로는 따로 둔다)")
+    # 뜻 갈래가 집합 판정에 쓰이므로 정렬과 무관하게 임베딩이 있어야 한다. 빈 벡터를 그대로 보내면
+    # 검색 엔진이 차원 불일치의 날 오류를 내고, 호출부는 그것을 "엔진 연결 실패"로 오독한다.
+    if not query_vector:
+        raise ValueError("파일 검색은 질의 임베딩이 필요하다(정렬 방식과 무관 — 집합 판정에 쓰인다)")
     if sort not in SORT_OPTIONS:
         raise ValueError(f"알 수 없는 정렬: {sort!r} (허용: {sorted(SORT_OPTIONS)})")
     if size < 1 or from_ < 0:

@@ -310,6 +310,13 @@ class TestSearchFiles(unittest.TestCase):
             search_files(_FakeClient([]), "assets", query="김치", query_vector=[0.0],
                          from_=RANK_DEPTH_DEFAULT, size=10)
 
+    def test_empty_vector_is_rejected(self) -> None:
+        # 리뷰(2026-09-09)가 잡은 거짓 설명 — docstring 은 예외를 약속했는데 검사가 없었다.
+        # 빈 벡터를 엔진에 보내면 차원 불일치의 날 오류가 503 으로 둔갑한다.
+        for bad in ([], ()):
+            with self.assertRaises(ValueError):
+                search_files(_FakeClient([]), "assets", query="김치", query_vector=bad)
+
     def test_empty_query_is_rejected(self) -> None:
         for bad in ("", "   "):
             with self.assertRaises(ValueError):
