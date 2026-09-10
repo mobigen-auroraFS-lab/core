@@ -449,10 +449,12 @@ class TestPromptTypeDefinitions(unittest.TestCase):
         sent = client.chat.completions.create.call_args.kwargs["messages"][0]["content"]
         self.assertNotIn("타입 정의", sent)
 
-    def test_확정_프리셋을_실으면_왕조명_지시가_문안에_있다(self) -> None:
-        # 🔴 표기 부작용 방지 문구가 실제로 LLM 까지 간다는 확인(값 봉인은 rules 테스트).
+    def test_확정_프리셋을_실으면_시대_왕조_경계가_문안에_있다(self) -> None:
+        # 🔴 경계 문구가 실제로 LLM 까지 간다는 확인(값 봉인은 type_vocab 테스트).
+        #    v3 까지는 "왕조명 그대로"(표기 통일 지시)를 확인했다 — v4 는 왕조를 아예 받지 않으므로
+        #    확인 대상이 제외 문구로 바뀐다(2026-09-11).
         prompt = build_entity_prompt("더미 요약", ["가키워드"], type_defs=ENTITY_TYPE_DEFS)
-        self.assertIn("왕조명 그대로", prompt)
+        self.assertIn("시대·왕조", prompt)
         self.assertIn("국립중앙박물관", prompt)
 
 
