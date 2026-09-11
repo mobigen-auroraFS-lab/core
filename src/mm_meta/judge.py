@@ -72,7 +72,13 @@ from src.mm_meta.rules import (
 #    올리는 것이 곧 **재판정 방아쇠**다 — 배치는 스탬프의 ``pv=`` 가 현행 값과 다른 자산을 다시
 #    판정 대상으로 고르므로(구현 확정 3), 올리지 않으면 옛 문안으로 만든 판정이 "최신"으로 남아
 #    영영 갱신되지 않는다. 실제 재판정(전량·LLM)은 사람이 실행한다.
-PROMPT_VERSION = "mm_meta.v2"
+PROMPT_VERSION = "mm_meta.v3"
+# v3(2026-09-11): 뜻 있는 **파일 이름**을 참고로 싣는다(``build_entity_prompt(name_hint=)``).
+#   🔴 파일 이름이 없는(또는 뜻이 없어 걸러진) 자산은 **문안이 v2 와 한 글자도 다르지 않다.**
+#      그래도 판을 하나로 올리는 이유: 재선별 술어가 ``pv`` 를 **동일성**으로 비교해서, 자산마다
+#      다른 판을 찍으면 술어가 찾는 판과 스탬프가 엇갈려 같은 자산을 매 배치 다시 집는다
+#      (무한 재판정 · ``fetch_binding_targets`` docstring 의 경고). 한 번의 헛 재판정이
+#      영구 루프보다 싸다.
 
 # 정의문 **없이** 나간 문안의 판(v1 · 하위호환 경로). 왜 남겨 두나: ``type_defs`` 를 주지 않은 호출은
 # 문안이 v1 그대로인데 스탬프만 v2 로 찍히면 "정의문이 실린 판정"과 구분할 수 없게 된다. 배치가
@@ -251,6 +257,7 @@ def build_entity_prompt(
     *,
     summary_max_chars: int | None = None,
     type_defs: Sequence[EntityTypeDef] | None = None,
+    name_hint: str | None = None,
 ) -> str:
     """자산 하나의 개체 판정 프롬프트를 조립한다(순수 · 같은 입력 → 같은 문안).
 
@@ -263,6 +270,15 @@ def build_entity_prompt(
             흘려 넣는다(그 키가 사실이 되는 유일한 통로다). ⚠️ 기본값을 벗어난 상한으로 만든
             판정은 사전 검증의 기준선(합격선 수치)과 비교할 수 없다 — 바꾸려면 ``PROMPT_VERSION``
             도 함께 올려 "다른 문안"임을 스탬프에 남긴다.
+        name_hint: 자산의 **파일 이름**(확장자 제외). ``None``(기본)이면 관련 줄이 아예 붙지 않아
+            문안이 v2 와 같아진다. 값을 줄지는 호출부가 정한다 — 뜻 없는 이름
+            (``1612816.jpg``·``IMG_4821.jpg``)은 ``config.filename_util.meaningful_file_name``
+            이 먼저 걸러 ``None`` 으로 오므로, 여기서 다시 판단하지 않는다.
+            왜 싣나(2026-09-11 실측): 판정 재료(요약·키워드)에 이름이 없어 묶이지 못한 자산이
+            많은데, 파일 이름에는 이름이 있다 — 유튜브 축 소리 86%·자막 80%·사진 77%·영상 73%,
+            문화유산 해설문 100%. 다만 파일 이름은 **주제가 아니라 맥락**이라(제작사·채널·날짜가
+            섞인다) 후보로 넣지 않고 **참고**로만 싣는다: 주제는 키워드가 정하고 이름은 그 키워드가
+            누구를 가리키는지 좁힌다.
         type_defs: 타입 **정의문** 목록(``rules.EntityTypeDef``). ``None``(기본)이면 **현행 문안
             그대로** — 타입 이름만 나열한다(하위호환 · 지금 이 함수를 부르는 배치가 인자를 주지
             않으므로 기본값이 문안을 바꾸면 그쪽 판정이 예고 없이 달라진다). 값을 주면 타입 어휘 줄
@@ -280,8 +296,17 @@ def build_entity_prompt(
     summary_text = (summary or "").strip()[:_resolve_summary_limit(summary_max_chars)]
     keywords_json = json.dumps(_clean_keywords(keywords), ensure_ascii=False)
     type_names = tuple(d.name for d in (type_defs or ())) or ENTITY_TYPE_ORDER
+    hint = (name_hint or "").strip()
+    # 파일 이름 줄과 그 주의 줄은 **이름이 있을 때만** 붙는다 — 없으면 문안이 v2 와 동일해
+    # "뜻 없는 이름이 판정을 흔들지 않는다"가 문안 수준에서 보장된다.
+    hint_lines = [f'파일 이름: "{hint}"'] if hint else []
+    hint_rules = [
+        "  파일 이름은 **참고**다 — 요약·키워드가 뒷받침하지 않으면 이름만으로 개체를 정하지 않는다."
+        " 이름에 든 제작사·채널·프로그램·날짜·연번은 개체가 아니다.",
+    ] if hint else []
     return "\n".join([
         f'자산 요약: "{summary_text}"',
+        *hint_lines,
         f"키워드 목록: {keywords_json}",
         "각 키워드에 대해 요약 문맥을 참고해 판정하라.",
         # ⓐ 지시 대상 규칙 — 무대·소재지·소속·주체 수식은 그 개체를 뽑는다(검증 §6-③ 무손실 회귀).
@@ -294,6 +319,7 @@ def build_entity_prompt(
         " 개체가 아니다 → null.",
         # ⓒ 동음이의 — 자산별 판정(문맥 포함)의 존재 이유.
         '  동음이의어는 요약 문맥으로 가른다(요약이 곤충 이야기인데 "파리"를 도시로 판정하지 말 것).',
+        *hint_rules,
         # 타입 어휘 줄 + (정의문을 줬으면) "이 뜻으로만 판정한다" 블록.
         *_type_lines(type_defs),
         # 출력 계약은 검증 스크립트 문안 그대로다(말줄임도 ASCII 세 점 — 기준선 보존).
@@ -415,6 +441,7 @@ def judge_asset_entities(
     client: Any | None = None,
     summary_max_chars: int | None = None,
     type_defs: Sequence[EntityTypeDef] | None = None,
+    name_hint: str | None = None,
 ) -> EntityJudgement:
     """자산 하나의 개체를 판정한다(LLM 단일 seam 경유 · 자산당 호출 1회).
 
@@ -459,7 +486,7 @@ def judge_asset_entities(
     # (``src.mm_classify.judge``·``src.relations.llm_propose`` 와 같은 관례).
     from src.llm.client import complete_json
 
-    prompt = build_entity_prompt(summary, cleaned, summary_max_chars=limit, type_defs=type_defs)
+    prompt = build_entity_prompt(summary, cleaned, summary_max_chars=limit, type_defs=type_defs, name_hint=name_hint)
     # 🔴 프롬프트에 실은 어휘를 **그대로** 필터에도 넘긴다 — 두 곳이 갈리면 늘린 타입이 조용히
     #    탈락한다(spec 087 T002).
     return interpret_response(

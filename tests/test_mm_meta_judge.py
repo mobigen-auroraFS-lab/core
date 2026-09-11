@@ -458,6 +458,41 @@ class TestPromptTypeDefinitions(unittest.TestCase):
         self.assertIn("국립중앙박물관", prompt)
 
 
+class TestNameHintInPrompt(unittest.TestCase):
+    """파일 이름 참고 줄 — 실릴 때와 안 실릴 때(2026-09-11).
+
+    🔴 핵심 계약은 **안 실릴 때 문안이 이전과 같다**는 것이다. 뜻 없는 이름
+    (``1612816.jpg``)은 호출부가 ``None`` 으로 걸러 넘기므로, 그런 자산의 판정은 글자 하나
+    달라지지 않는다(사용자 요구: 의미 없는 이름이 판정에 영향을 주지 않을 것).
+    """
+
+    def test_이름을_주면_참고_줄과_주의_줄이_붙는다(self) -> None:
+        prompt = build_entity_prompt("더미 요약", ["가키워드"], name_hint="배우 윤석화 인터뷰")
+        self.assertIn('파일 이름: "배우 윤석화 인터뷰"', prompt)
+        self.assertIn("파일 이름은 **참고**다", prompt)
+        self.assertIn("제작사·채널·프로그램·날짜·연번은 개체가 아니다", prompt)
+
+    def test_이름이_없으면_문안이_예전과_같다(self) -> None:
+        base = build_entity_prompt("더미 요약", ["가키워드"])
+        for empty in (None, "", "   "):
+            with self.subTest(empty=empty):
+                self.assertEqual(build_entity_prompt("더미 요약", ["가키워드"], name_hint=empty), base)
+        self.assertNotIn("파일 이름", base)
+
+    def test_이름_줄은_요약_바로_뒤다(self) -> None:
+        # 순서에 뜻이 있다 — 정체(요약·이름)가 먼저, 판정 대상(키워드)이 그 뒤다.
+        lines = build_entity_prompt("더미 요약", ["가키워드"], name_hint="서울 숭례문").splitlines()
+        self.assertTrue(lines[0].startswith("자산 요약:"))
+        self.assertTrue(lines[1].startswith("파일 이름:"))
+        self.assertTrue(lines[2].startswith("키워드 목록:"))
+
+    def test_판정_경로가_이름을_문안까지_흘려보낸다(self) -> None:
+        client = _client_returning('{"판정": {}}')
+        judge_asset_entities("더미 요약", ["가키워드"], client=client, name_hint="서울 숭례문")
+        sent = client.chat.completions.create.call_args.kwargs["messages"][0]["content"]
+        self.assertIn('파일 이름: "서울 숭례문"', sent)
+
+
 class TestPromptVersionBump(unittest.TestCase):
     """🔴 문안이 바뀌면 판정이 낡는다 — ``PROMPT_VERSION`` 상승이 **재판정 방아쇠**다(spec 구현확정 3).
 
@@ -466,8 +501,9 @@ class TestPromptVersionBump(unittest.TestCase):
     다시 판정되지 않는다.
     """
 
-    def test_현행_문안_판은_v2다(self) -> None:
-        self.assertEqual(PROMPT_VERSION, "mm_meta.v2")
+    def test_현행_문안_판은_v3다(self) -> None:
+        # v3(2026-09-11): 뜻 있는 파일 이름을 참고로 싣는 문안. 값을 바꾸면 전량 재판정이 걸린다.
+        self.assertEqual(PROMPT_VERSION, "mm_meta.v3")
 
     def test_옛_판_상수가_남아있다(self) -> None:
         # 정의문 없이 나간 문안의 판 — 하위호환 경로가 자기 판을 정직하게 찍을 수 있어야 한다.

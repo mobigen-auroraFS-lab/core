@@ -62,3 +62,54 @@ def display_file_name(fs_path: str | None) -> str:
     if not fs_path:
         return ""
     return strip_asset_id_prefix(os.path.basename(fs_path))
+
+
+# ── 판정 재료용 "뜻 있는 파일 이름" 게이트 ──────────────────────────────────────
+# 기기·앱이 붙이는 상투 접두. 이걸 떼고 나면 숫자·날짜만 남는 이름들이라 통째로 버린다.
+_DEVICE_PREFIX = re.compile(
+    r"^(?:img|dsc|dscn|dcim|pic|photo|image|vid|video|mov|movie|screen ?shot|capture|"
+    r"kakaotalk|download|untitled|new ?file|캡처|사진|스크린샷|제목\s*없음|무제|새\s*파일)"
+    r"[ _\-]*",
+    re.IGNORECASE,
+)
+# 뜻이 있다고 볼 최소선: 한글 2자 **또는** 라틴 3자 연속.
+#   왜 라틴은 3자인가 — 2자로 두면 ``Screenshot 2024-03-15 at 14.22.31`` 의 ``at`` 같은 찌꺼기가
+#   통과한다(실측 표본에서 나온 실패 사례). 한글은 2자로도 뜻을 갖는 말이 흔해 2자로 둔다.
+_HANGUL_RUN = re.compile(r"[가-힣]{2,}")
+_LATIN_RUN = re.compile(r"[A-Za-z]{3,}")
+
+
+def meaningful_file_name(fs_path: str | None) -> str | None:
+    """판정 재료로 쓸 만한 **뜻 있는 파일 이름**. 쓸 만하지 않으면 ``None``(순수).
+
+    무엇에 쓰나: 개체 판정 프롬프트에 파일 이름을 참고로 실을지 말지를 **코드가 먼저** 정한다.
+    LLM 에게 "이 이름이 뜻이 있나"를 묻지 않는 이유는, 뜻 없는 이름이 판정을 흔드는 것 자체를
+    막고 싶기 때문이다(사용자 요구 2026-09-11: *"파일명과 상위 폴더명이 의미가 없는 경우 이게
+    실제 판정에 큰영향을 주지 않도록"*). 게이트가 순수 함수라 단위 테스트로 봉인된다.
+
+    판정 절차: 표시용 파일명(자산 id 접두 제거) → 확장자 제거 → 기기·앱 상투 접두 1회 제거 →
+    남은 글자에 **한글 2자 이상 이어진 곳** 또는 **라틴 3자 이상 이어진 곳**이 있으면 통과.
+
+    실측으로 걸러지는 것: ``1612816.jpg``·``2021042017434700.JPG``(출처 일련번호) ·
+    ``IMG_4821.jpg`` · ``Screenshot 2024-03-15 at 14.22.31.png`` · ``KakaoTalk_20240315_1234.jpg``.
+    통과하는 것: ``서울 숭례문.txt`` · ``[집중인터뷰] 배우 윤석화와 함께.mp4``.
+
+    ⚠️ **접두 제거는 판정용이고, 돌려주는 값은 자르지 않은 이름(확장자만 뺀 것)이다** — LLM 에는
+    맥락이 많을수록 좋고, 접두 제거는 "실을지 말지"를 정하는 데만 쓴다.
+
+    Args:
+        fs_path: 자산의 파일 경로(또는 파일명). 비어 있으면 ``None`` 을 돌려준다.
+
+    Returns:
+        확장자를 뗀 파일 이름. 뜻이 없다고 판정되면 ``None``.
+    """
+    name = display_file_name(fs_path)
+    if not name:
+        return None
+    stem = os.path.splitext(name)[0].strip()
+    if not stem:
+        return None
+    probe = _DEVICE_PREFIX.sub("", stem, count=1)
+    if _HANGUL_RUN.search(probe) or _LATIN_RUN.search(probe):
+        return stem
+    return None
