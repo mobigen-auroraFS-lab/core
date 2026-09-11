@@ -73,7 +73,9 @@ from src.mm_meta.rules import (
 #    판정 대상으로 고르므로(구현 확정 3), 올리지 않으면 옛 문안으로 만든 판정이 "최신"으로 남아
 #    영영 갱신되지 않는다. 실제 재판정(전량·LLM)은 사람이 실행한다.
 PROMPT_VERSION = "mm_meta.v3"
-# v3(2026-09-11): 뜻 있는 **파일 이름**을 참고로 싣는다(``build_entity_prompt(name_hint=)``).
+# v3(2026-09-11): 뜻 있는 **파일 이름**을 참고로 싣고(``name_hint=``), 그 이름에서 뽑은
+#   **판정 대상 후보**도 함께 싣는다(``name_candidates=``). 참고만으로는 값이 없다는 것이
+#   실측이다 — 판정이 키워드 단위라 이름이 키워드에 없으면 붙을 자리가 없다(파일럿 19건 중 1건).
 #   🔴 파일 이름이 없는(또는 뜻이 없어 걸러진) 자산은 **문안이 v2 와 한 글자도 다르지 않다.**
 #      그래도 판을 하나로 올리는 이유: 재선별 술어가 ``pv`` 를 **동일성**으로 비교해서, 자산마다
 #      다른 판을 찍으면 술어가 찾는 판과 스탬프가 엇갈려 같은 자산을 매 배치 다시 집는다
@@ -251,6 +253,35 @@ def _type_lines(type_defs: Sequence[EntityTypeDef] | None) -> list[str]:
     return lines
 
 
+def merge_name_candidates(
+    keywords: Sequence[Any] | None,
+    name_candidates: Sequence[str] | None,
+) -> tuple[str, ...]:
+    """판정 대상 목록 = **내용 키워드 + 파일 이름 후보**(중복 제거 · 순서 유지 · 순수).
+
+    🔴 **프롬프트와 응답 필터가 같은 목록을 써야 한다.** 응답 해석은 "보낸 목록에 있는 키만" 받아
+    들이는데(``interpret_response``), 프롬프트에는 후보를 실으면서 필터에는 안 넘기면 LLM 이 후보에
+    제대로 답해도 **전부 버려진다** — 2026-09-11 실측에서 `심수봉`·`남자는 배 여자는 항구` 가
+    목록에 있는데도 개체 0건이었고, 원인이 이것이었다. 그래서 병합을 한 함수로 못 박고 양쪽이 부른다.
+
+    Args:
+        keywords: 자산 내용에서 뽑은 키워드(``_clean_keywords`` 규칙으로 다듬는다).
+        name_candidates: 파일 이름에서 떼어 낸 후보. ``None``·빈 값이면 내용 키워드만 돌려준다.
+
+    Returns:
+        판정 대상 문자열 튜플. 내용 키워드가 앞, 파일 이름 후보가 뒤다(앞쪽이 더 믿을 만한 재료).
+    """
+    cleaned = tuple(_clean_keywords(keywords))
+    seen = {k.strip() for k in cleaned}
+    extra = []
+    for raw in name_candidates or ():
+        cand = str(raw).strip()
+        if cand and cand not in seen:
+            seen.add(cand)
+            extra.append(cand)
+    return (*cleaned, *extra)
+
+
 def build_entity_prompt(
     summary: str | None,
     keywords: Sequence[Any] | None,
@@ -258,6 +289,7 @@ def build_entity_prompt(
     summary_max_chars: int | None = None,
     type_defs: Sequence[EntityTypeDef] | None = None,
     name_hint: str | None = None,
+    name_candidates: Sequence[str] | None = None,
 ) -> str:
     """자산 하나의 개체 판정 프롬프트를 조립한다(순수 · 같은 입력 → 같은 문안).
 
@@ -279,6 +311,12 @@ def build_entity_prompt(
             문화유산 해설문 100%. 다만 파일 이름은 **주제가 아니라 맥락**이라(제작사·채널·날짜가
             섞인다) 후보로 넣지 않고 **참고**로만 싣는다: 주제는 키워드가 정하고 이름은 그 키워드가
             누구를 가리키는지 좁힌다.
+        name_candidates: 파일 이름에서 뽑은 **판정 대상 후보**
+            (``config.filename_util.file_name_candidates``). 비었으면 줄이 붙지 않는다.
+            🔴 ``name_hint`` 만으로는 값이 없다는 것이 실측이다(A안 파일럿 2026-09-11: 19건 중 1건)
+            — 판정이 키워드 단위라 이름이 키워드에 없으면 붙을 자리가 없기 때문이다. 후보를 주면
+            그 자리에서 답할 수 있다. 잡음(제목 문구·회차·채널명)은 아래 규칙 ⓑ 와 타입 정의문이
+            떨군다 — 코드가 미리 거르지 않는다.
         type_defs: 타입 **정의문** 목록(``rules.EntityTypeDef``). ``None``(기본)이면 **현행 문안
             그대로** — 타입 이름만 나열한다(하위호환 · 지금 이 함수를 부르는 배치가 인자를 주지
             않으므로 기본값이 문안을 바꾸면 그쪽 판정이 예고 없이 달라진다). 값을 주면 타입 어휘 줄
@@ -294,16 +332,32 @@ def build_entity_prompt(
     """
     # 요약은 앞뒤 공백을 정리한 뒤 자른다(공백만으로 250자 창이 밀리지 않게).
     summary_text = (summary or "").strip()[:_resolve_summary_limit(summary_max_chars)]
-    keywords_json = json.dumps(_clean_keywords(keywords), ensure_ascii=False)
+
     type_names = tuple(d.name for d in (type_defs or ())) or ENTITY_TYPE_ORDER
     hint = (name_hint or "").strip()
     # 파일 이름 줄과 그 주의 줄은 **이름이 있을 때만** 붙는다 — 없으면 문안이 v2 와 동일해
     # "뜻 없는 이름이 판정을 흔들지 않는다"가 문안 수준에서 보장된다.
     hint_lines = [f'파일 이름: "{hint}"'] if hint else []
+    # 🔴 후보는 **키워드 목록에 합친다**(2026-09-11 실측). 별도 줄(`파일 이름 후보: [...]`)로 두고
+    #   "이것도 판정하라"고 덧붙였더니 LLM 이 맨 위 지시("각 키워드에 대해")와 출력 계약만 보고
+    #   후보를 통째로 건너뛰었다 — `심수봉`·`남자는 배 여자는 항구` 가 후보에 있는데도 개체 0건.
+    #   목록에 합치면 새 지시가 필요 없다: 기존 규칙이 그대로 적용된다.
+    cleaned_keywords = tuple(_clean_keywords(keywords))
+    merged = merge_name_candidates(keywords, name_candidates)
+    cands = list(merged[len(cleaned_keywords):])
+    # ⚠️ 문구 주의: "요약이 뒷받침해야 한다"고 쓰면 **후보 판정과 부딪힌다**(2026-09-11).
+    #   파일 이름에 든 이름은 요약에 없는 것이 보통이고(그래서 후보로 뽑는 것이다), 뒷받침을
+    #   요구하면 후보가 전부 null 이 되어 B 안이 A 안으로 되돌아간다. 대신 **무엇이 개체가
+    #   아닌지**를 못 박는다 — 그 경계는 이미 타입 정의문과 같은 방향이다.
     hint_rules = [
-        "  파일 이름은 **참고**다 — 요약·키워드가 뒷받침하지 않으면 이름만으로 개체를 정하지 않는다."
-        " 이름에 든 제작사·채널·프로그램·날짜·연번은 개체가 아니다.",
+        "  파일 이름은 자산의 제목·출처 표기다. 거기 든 제작사·채널·플랫폼·프로그램 회차·날짜·"
+        "연번은 개체가 아니다 → null.",
     ] if hint else []
+    cand_rules = [
+        "  키워드 목록 뒤쪽에는 **파일 이름에서 떼어 낸 말**이 섞여 있다 — 같은 규칙으로 판정한다"
+        "(특정 고유 개체를 가리키면 그 개체, 제목·홍보 문구면 null).",
+    ] if cands else []
+    keywords_json = json.dumps(list(merged), ensure_ascii=False)
     return "\n".join([
         f'자산 요약: "{summary_text}"',
         *hint_lines,
@@ -320,6 +374,7 @@ def build_entity_prompt(
         # ⓒ 동음이의 — 자산별 판정(문맥 포함)의 존재 이유.
         '  동음이의어는 요약 문맥으로 가른다(요약이 곤충 이야기인데 "파리"를 도시로 판정하지 말 것).',
         *hint_rules,
+        *cand_rules,
         # 타입 어휘 줄 + (정의문을 줬으면) "이 뜻으로만 판정한다" 블록.
         *_type_lines(type_defs),
         # 출력 계약은 검증 스크립트 문안 그대로다(말줄임도 ASCII 세 점 — 기준선 보존).
@@ -442,6 +497,7 @@ def judge_asset_entities(
     summary_max_chars: int | None = None,
     type_defs: Sequence[EntityTypeDef] | None = None,
     name_hint: str | None = None,
+    name_candidates: Sequence[str] | None = None,
 ) -> EntityJudgement:
     """자산 하나의 개체를 판정한다(LLM 단일 seam 경유 · 자산당 호출 1회).
 
@@ -486,11 +542,14 @@ def judge_asset_entities(
     # (``src.mm_classify.judge``·``src.relations.llm_propose`` 와 같은 관례).
     from src.llm.client import complete_json
 
-    prompt = build_entity_prompt(summary, cleaned, summary_max_chars=limit, type_defs=type_defs, name_hint=name_hint)
+    prompt = build_entity_prompt(summary, cleaned, summary_max_chars=limit, type_defs=type_defs,
+                                 name_hint=name_hint, name_candidates=name_candidates)
     # 🔴 프롬프트에 실은 어휘를 **그대로** 필터에도 넘긴다 — 두 곳이 갈리면 늘린 타입이 조용히
-    #    탈락한다(spec 087 T002).
+    #    탈락한다(spec 087 T002). **판정 대상 목록도 같다**(2026-09-11): 프롬프트에는 파일 이름
+    #    후보를 싣고 필터에는 내용 키워드만 넘겼더니, LLM 이 후보에 옳게 답해도 전부 버려졌다.
+    judged_keywords = merge_name_candidates(keywords, name_candidates)
     return interpret_response(
-        cleaned, complete_json(prompt, client=client), type_defs=type_defs
+        judged_keywords, complete_json(prompt, client=client), type_defs=type_defs
     )
 
 
@@ -502,6 +561,7 @@ __all__ = [
     "EntityJudgement",
     "JudgeFailure",
     "build_entity_prompt",
+    "merge_name_candidates",
     "interpret_response",
     "judge_asset_entities",
     "prompt_version_for",

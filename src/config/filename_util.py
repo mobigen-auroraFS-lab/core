@@ -113,3 +113,65 @@ def meaningful_file_name(fs_path: str | None) -> str | None:
     if _HANGUL_RUN.search(probe) or _LATIN_RUN.search(probe):
         return stem
     return None
+
+
+# 파일 이름 안에서 **이름이 사는 자리** — 실측 표본에서 뽑은 세 자리다(2026-09-11).
+#   ① 괄호·따옴표 안: `[극한직업]` · `《골드랜드》` · `'마녀2'` · `⟪자백의 대가⟫`
+#   ② 해시태그: `#전도연 #김고은`
+#   ③ 구분자로 나뉜 토막: `안나 메이킹 ｜ 정은채의 이중생활 ｜ …`
+# 이 셋을 후보로 뽑아 **판정 대상에 더한다**. 왜 필요한가: 판정 계약이 키워드 단위라 개체는
+# 키워드에서만 나오는데, `[극한직업] 왜 안 웃기지？.jpg` 의 키워드는 `농담·당황·냉담` 이라
+# 이름을 문맥으로만 줘서는 붙일 자리가 없다(A안 파일럿 실측: 19건 중 1건).
+_BRACKETED = re.compile(
+    r"[\[\(（｛{《〈⟪「｢'\"“”‘’]([^\[\]\(\)（）｛｝{}《》〈〉⟪⟫「」｢｣'\"“”‘’]{1,40})"
+    r"[\]\)）｝}》〉⟫」｣'\"“”‘’]"
+)
+_HASHTAG = re.compile(r"#([^\s#\[\]()（）｜|]{1,30})")
+# ｜(전각 세로선)·ㅣ(한글 이) 는 제목에서 세로선 대용으로 흔히 쓰인다 — 실측 파일명에 둘 다 있다.
+# 하이픈을 그냥 넣으면 ``Sim Su-bong``·``K-Pop`` 이 쪼개진다 — **공백에 둘러싸인 하이픈**만 자른다.
+_SPLIT = re.compile(r"(?:[｜|/,·・•∙‧ㅣ:：;~〜]+|\s[-–—]\s)")
+_CANDIDATE_MAX = 6          # 후보 상한 — 잡음과 프롬프트 길이를 함께 묶는다
+
+
+def file_name_candidates(stem: str | None, *, limit: int = _CANDIDATE_MAX) -> tuple[str, ...]:
+    """파일 이름에서 **판정 대상 후보**를 뽑는다(순수·결정적).
+
+    왜 후보로 뽑나: 개체 판정은 키워드 단위라 이름이 키워드에 없으면 붙을 자리가 없다. 파일 이름을
+    참고 문맥으로만 주면 실측에서 19건 중 1건만 붙었다(A안 실패 · 2026-09-11). 이름이 사는 자리
+    (괄호·해시태그·구분자 토막)를 떼어 **판정 대상에 더하면** LLM 이 그 자리에서 개체를 답할 수 있다.
+
+    잡음은 어떻게 다루나: 여기서는 거르지 않는다 — 제목 문구(`왜 안 웃기지？`)·회차(`Ep1`)·
+    채널명은 **판정 단계**가 null 로 떨군다(프롬프트 규칙 ⓑ 막연한 범주 · 타입 정의문의 방송사·
+    플랫폼 제외). 코드가 뜻을 판단하려 들면 규칙만 늘고 도메인마다 어긋난다.
+
+    Args:
+        stem: 확장자를 뗀 파일 이름(``meaningful_file_name`` 결과). 비면 빈 튜플.
+        limit: 후보 상한. 프롬프트 길이와 잡음을 함께 묶는다.
+
+    Returns:
+        후보 문자열 튜플. **순서에 뜻이 있다** — 괄호·따옴표 → 해시태그 → 구분자 토막
+        (앞쪽이 이름일 확률이 높은 자리다). 같은 뜻의 중복은 첫 등장만 남긴다.
+    """
+    text = (stem or "").strip()
+    if not text:
+        return ()
+    picked: list[str] = []
+    spans = [m.group(1) for m in _BRACKETED.finditer(text)]
+    tags = [m.group(1) for m in _HASHTAG.finditer(text)]
+    rest = _HASHTAG.sub(" ", _BRACKETED.sub(" ", text))
+    chunks = _SPLIT.split(rest)
+    seen: set[str] = set()
+    for raw in [*spans, *tags, *chunks]:
+        cand = re.sub(r"\s+", " ", raw).strip().strip("#.·,")   # 괄호를 떼며 생긴 빈칸을 접는다
+        if not cand or len(cand) > 40:
+            continue
+        if not (_HANGUL_RUN.search(cand) or _LATIN_RUN.search(cand)):
+            continue
+        key = re.sub(r"\s+", "", cand).casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        picked.append(cand)
+        if len(picked) >= limit:
+            break
+    return tuple(picked)
