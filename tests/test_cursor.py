@@ -92,3 +92,51 @@ class 정렬_규약(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class 훑기_질의(unittest.TestCase):
+    """``build_browse_body``·``browse_scope_clause`` — OS 없이 본문만 본다."""
+
+    def test_검색어가_없으면_조건에_맞는_전부다(self):
+        """🔴 `_scope_clause` 는 빈 질의에서 0건을 낸다(should 하나 + minimum_should_match 1).
+
+        검색이라면 그것이 옳지만 **첫 화면은 훑기**라 전부가 맞다(실측: 고치기 전 0건).
+        """
+        from src.search.file_search import browse_scope_clause
+        clause = browse_scope_clause("")["bool"]
+        self.assertEqual(clause["must"], [{"match_all": {}}])
+        self.assertNotIn("minimum_should_match", clause)
+
+    def test_검색어가_있으면_검색과_같은_집합을_쓴다(self):
+        """집합이 갈리면 "적힌 숫자 = 누르면 나오는 수"가 깨진다(096 원칙)."""
+        from src.search.file_search import _scope_clause, browse_scope_clause
+        self.assertEqual(browse_scope_clause("김치"), _scope_clause("김치"))
+
+    def test_첫_쪽에는_search_after_가_없다(self):
+        from src.search.file_search import build_browse_body
+        self.assertNotIn("search_after", build_browse_body(sort="created_desc"))
+
+    def test_이어_읽기는_search_after_를_싣는다(self):
+        from src.search.file_search import build_browse_body
+        body = build_browse_body(sort="created_desc", after=["2026-09-11", "018f0000"])
+        self.assertEqual(body["search_after"], ["2026-09-11", "018f0000"])
+
+    def test_관련도_정렬은_커서로_넘길_수_없다(self):
+        """하이브리드 점수는 상위 rank_depth 개만 계산돼 이어받을 기준값이 없다(097 §2-5)."""
+        from src.search.file_search import build_browse_body
+        with self.assertRaises(ValueError) as ctx:
+            build_browse_body(sort="relevance")
+        self.assertIn("이름순", str(ctx.exception))   # 막다른 길이 아니라 갈림길로 안내한다
+
+    def test_모르는_정렬과_size_범위를_막는다(self):
+        from src.search.file_search import build_browse_body
+        with self.assertRaises(ValueError):
+            build_browse_body(sort="없는정렬")
+        with self.assertRaises(ValueError):
+            build_browse_body(sort="created_desc", size=0)
+
+    def test_정렬_키는_언제나_asset_id_로_끝난다(self):
+        from src.search.file_search import build_browse_body
+        for name in ("created_desc", "name_asc", "size_desc"):
+            with self.subTest(sort=name):
+                self.assertIn("asset_id", build_browse_body(sort=name)["sort"][-1])

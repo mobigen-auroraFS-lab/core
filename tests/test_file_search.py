@@ -208,8 +208,19 @@ class TestDeterminism(unittest.TestCase):
         self.assertNotIn("aggs", body["aggs"]["topic"])
 
     def test_total_cap_is_bound(self) -> None:
-        self.assertEqual(build_facet_body("김치", VEC)["track_total_hits"], TOTAL_CAP_DEFAULT)
+        """기본은 **정확히 세고**(097), 낮춰 주면 그 값을 상한으로 쓴다.
+
+        🔴 종전에는 기본이 상한 10,000 이었다 — 색인이 1만을 넘으면 총계가 「10,000」에서 멈춰
+        **틀린 수를 조용히 보였다**. 097 실측에서 정확히 세는 쪽이 오히려 빨라(1ms vs 2ms ·
+        16,864건) 기본을 바꿨다. 손잡이는 남긴다: 10만·100만 건에서 비용이 보이면 낮춘다.
+        """
+        self.assertIs(build_facet_body("김치", VEC)["track_total_hits"], True)
         self.assertEqual(build_facet_body("김치", VEC, total_cap=5)["track_total_hits"], 5)
+        # 기본값보다 낮추면 그 값이 그대로 상한이 된다(되살림 경로가 살아 있는지).
+        self.assertEqual(
+            build_facet_body("김치", VEC, total_cap=TOTAL_CAP_DEFAULT - 1)["track_total_hits"],
+            TOTAL_CAP_DEFAULT - 1,
+        )
 
     def test_bad_axis_or_range_is_rejected(self) -> None:
         with self.assertRaises(ValueError):

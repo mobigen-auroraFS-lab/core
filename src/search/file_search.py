@@ -132,6 +132,7 @@ from typing import Any
 from src.config.filename_util import display_file_name
 from src.domain.numeric import safe_float
 from src.domain.text_norm import normalize_text_key
+from src.search.cursor import decode_cursor, encode_cursor
 from src.search.query_builder import build_word_should
 from src.search.search_filters import SearchFilters, filters_to_opensearch_bool
 
@@ -249,6 +250,9 @@ __all__ = [
     "SORT_DEFAULT",
     "SORT_DEPTH_DEFAULT",
     "STABLE_SORTS",
+    "browse_files",
+    "build_browse_body",
+    "browse_scope_clause",
     "SORT_OPTIONS",
     "TOTAL_CAP_DEFAULT",
     "WORD_OPERATOR_DEFAULT",
@@ -381,6 +385,39 @@ def _scope_clause(
         "minimum_should_match": 1,
         "filter": list(filters),
     }}
+
+
+def browse_scope_clause(
+    query: str,
+    semantic_ids: Sequence[str] = (),
+    *,
+    filters: Sequence[dict[str, Any]] = (),
+    operator: str = WORD_OPERATOR_DEFAULT,
+    about_branch: bool = ABOUT_BRANCH_DEFAULT,
+) -> dict[str, Any]:
+    """훑기용 집합 정의 — 검색어가 없으면 **조건에 맞는 전부**를 집합으로 삼는다.
+
+    Args:
+        query: 검색어. 공백뿐이면 빈 것으로 보고 "전부" 경로를 탄다.
+        semantic_ids: 뜻으로 걸린 자산 id 들.
+        filters: 선필터 조건 절.
+        operator: 단어 매칭 연산자.
+        about_branch: 개체(about) 갈래를 쓸지.
+
+    Returns:
+        ``bool`` 절. 검색어가 없으면 ``must: match_all`` + ``filter``(조건)만 둔다.
+
+    설계 배경: `specs/097-large-result-traversal/spec.md`
+    """
+    # 🔴 검색어가 있으면 `_scope_clause` 에 **그대로 위임**한다 — 집합 정의가 갈리면
+    #   "적힌 숫자 = 누르면 나오는 수"가 깨진다(096 원칙 · 두 함수가 다른 집합을 세면 안 된다).
+    if query.strip():
+        return _scope_clause(query, semantic_ids, filters=filters,
+                             operator=operator, about_branch=about_branch)
+    # 저쪽은 `should`(단어∪뜻∪개체) + `minimum_should_match: 1` 이라 **검색어가 비면 아무것도
+    #   걸리지 않는다**(빈 단어 절 하나만 남는다 · 실측 0건). 검색이라면 그것이 옳다 — 찾을 말이
+    #   없으면 결과도 없다. 그러나 첫 화면은 검색이 아니라 훑기라 "조건에 맞는 전부"가 맞다.
+    return {"bool": {"must": [{"match_all": {}}], "filter": list(filters)}}
 
 
 _ROW_SOURCE: tuple[str, ...] = (
@@ -516,10 +553,13 @@ def build_facet_body(
 
     return {
         "size": 0,
-        "track_total_hits": int(total_cap),
-        "query": _scope_clause(query, semantic_ids,
-                               filters=filters_to_opensearch_bool(filters),
-                               operator=operator, about_branch=about_branch),
+        # 🔴 정확히 센다(097 §2-4) — 실측에서 상한을 두는 쪽이 오히려 느렸다(2ms vs 1ms · 16,864건).
+        #   `total_cap` 은 손잡이로 남긴다: 10만·100만 건에서 비용이 보이면 되살린다.
+        "track_total_hits": True if total_cap >= TOTAL_CAP_DEFAULT else int(total_cap),
+        # 🔴 훑기(빈 질의)와 검색이 **같은 집합**을 세야 "적힌 숫자 = 누르면 나오는 수"가 성립한다.
+        "query": browse_scope_clause(query, semantic_ids,
+                                     filters=filters_to_opensearch_bool(filters),
+                                     operator=operator, about_branch=about_branch),
         "aggs": aggs,
     }
 
@@ -842,6 +882,172 @@ def search_files(
         # 축 순서는 요청 순서를 따른다(화면이 칩 묶음을 그 순서로 그린다).
         "facets": {axis: facets.get(axis, []) for axis in axes},
         "from": int(from_),
+        "size": int(size),
+        "sort": sort,
+    }
+
+
+def build_browse_body(
+    *,
+    query: str = "",
+    semantic_ids: Sequence[str] = (),
+    filters: SearchFilters | None = None,
+    sort: str = "created_desc",
+    after: Sequence[Any] | None = None,
+    size: int = 50,
+    operator: str = WORD_OPERATOR_DEFAULT,
+    about_branch: bool = ABOUT_BRANCH_DEFAULT,
+) -> dict[str, Any]:
+    """**커서로 이어 읽는** 한 쪽의 검색 본문을 만든다(순수 · 097).
+
+    ``search_files`` 의 ``build_rank_body`` 와 무엇이 다른가: ``from`` 을 쓰지 않고 ``search_after``
+    를 쓴다. ``from`` 은 "앞에서부터 N 개를 꺼내 버린다"라서 색인이 1만에서 거부하지만, ``search_after``
+    는 **직전 쪽 마지막 문서의 정렬값 다음부터**라 앞을 세지 않는다(실측 16,864건 완주 0.8초).
+
+    Args:
+        query: 검색어. **빈 값도 받는다** — 조건만으로 훑는 첫 화면이 이 경로다(``search_files`` 는
+            빈 질의를 거부한다 · 계약이 다르므로 함수를 나눴다).
+        semantic_ids: 뜻으로 걸린 자산 id. 빈 질의면 비어 있다(벡터 검색을 돌릴 질의가 없다).
+        filters: 주제·태그·기간·확장자 선필터. ``None`` 이면 조건 없음.
+        sort: 정렬 이름. 🔴 ``relevance`` 는 받지 않는다 — 하이브리드 점수는 상위 ``rank_depth`` 개만
+            계산돼 **이어받을 기준값이 없다**(097 §2-5).
+        after: 직전 쪽 마지막 hit 의 ``sort`` 배열. ``None``·빈 값이면 첫 쪽.
+        size: 이 쪽의 행 수.
+        operator: 단어 매칭 연산자.
+        about_branch: 개체(about) 갈래를 쓸지.
+
+    Returns:
+        OpenSearch 검색 본문. 🔴 ``track_total_hits`` 를 넣지 않는다 — 개수는 집계 질의가 센다
+        (096 "적힌 숫자 = 누르면 나오는 수" 원칙 · 여기서 또 세면 같은 일을 두 번 한다).
+
+    Raises:
+        ValueError: 모르는 정렬이거나 ``relevance`` 일 때, ``size`` 가 1 미만일 때.
+    """
+    if sort not in SORT_OPTIONS:
+        raise ValueError(f"알 수 없는 정렬: {sort!r} (허용: {sorted(SORT_OPTIONS)})")
+    order = SORT_OPTIONS[sort]
+    if order is None:
+        raise ValueError(
+            f"정렬 {sort!r} 은 커서로 넘길 수 없다 — 점수가 상위 일부만 계산돼 이어받을 기준값이 없다. "
+            f"이름순·최신순으로 바꾸면 끝까지 넘길 수 있다"
+        )
+    if size < 1:
+        raise ValueError(f"size 범위 오류: {size!r} (>=1)")
+
+    body: dict[str, Any] = {
+        "size": int(size),
+        "track_total_hits": False,
+        "_source": list(_ROW_SOURCE),
+        "sort": [dict(s) for s in order],
+        "query": browse_scope_clause(
+            query, semantic_ids,
+            filters=filters_to_opensearch_bool(filters),
+            operator=operator, about_branch=about_branch,
+        ),
+    }
+    if after:
+        body["search_after"] = list(after)
+    return body
+
+
+def browse_files(
+    client: Any,
+    index: str,
+    *,
+    query: str = "",
+    query_vector: Sequence[float] | None = None,
+    filters: SearchFilters | None = None,
+    sort: str = "created_desc",
+    cursor: str | None = None,
+    size: int = 50,
+    facet_size: int = FACET_SIZE_DEFAULT,
+    axes: Sequence[str] = tuple(FACET_FIELDS),
+    min_cosine: float = SEMANTIC_MIN_COSINE_DEFAULT,
+    semantic_cap: int = SEMANTIC_CAP_DEFAULT,
+    operator: str = WORD_OPERATOR_DEFAULT,
+    about_branch: bool = ABOUT_BRANCH_DEFAULT,
+) -> dict[str, Any]:
+    """조건으로 좁힌 파일을 **커서로 이어 읽는다** — 1만 건 벽이 없다.
+
+    개수·칩은 ``search_files`` 와 같은 집계 질의를 쓴다(096 "적힌 숫자 = 누르면 나오는 수").
+
+    Args:
+        client: OpenSearch 클라이언트.
+        index: 색인 이름.
+        query: 검색어. 빈 값이면 조건에 맞는 전부다(첫 화면이 이 경로다).
+        query_vector: 질의 임베딩. 빈 질의면 필요 없다(``None`` 가능).
+        filters: 선필터. ``None`` 이면 조건 없음.
+        sort: 정렬 이름. ``relevance`` 는 커서 불가(``ValueError``).
+        cursor: 직전 응답의 ``next_cursor``. ``None`` 이면 첫 쪽.
+        size: 이 쪽의 행 수.
+        facet_size: 축별 칩 개수 상한.
+        axes: 계산할 칩 축.
+        min_cosine: 뜻 검색 코사인 하한.
+        semantic_cap: 뜻으로 걸 id 상한.
+        operator: 단어 매칭 연산자.
+        about_branch: 개체(about) 갈래를 쓸지.
+
+    Returns:
+        ``rows``·``total``·``total_capped``·``facets``·``sort``·``size`` 에 더해
+        ``next_cursor``(마지막 쪽이면 ``None`` — 더 없다는 뜻).
+
+    Raises:
+        ValueError: 모르는 정렬·``relevance``·``size`` 범위 오류.
+        CursorError: 커서가 깨졌거나 요청 정렬과 어긋날 때(호출부가 400 으로 바꾼다).
+    """
+    # 🔴 `search_files`(offset)를 고치지 않고 나란히 둔 이유: 두 함수의 **계약이 다르다.** 저쪽은
+    #   "검색어가 있는 검색"이고 그 뜻이 docstring 에 봉인돼 있다. 관련도 정렬에서만 커서를 못 준다는
+    #   예외까지 한 함수에 섞으면 읽는 사람이 어느 쪽 규칙인지 알 수 없다. 092 가
+    #   `find_similar_entities` 를 남기고 새 함수를 만든 것과 같은 판단 — 되돌림 경로를 남긴다.
+    after = decode_cursor(cursor, expect_sort=sort) if cursor else None
+
+    # ① 뜻으로 걸린 자산을 **한 번만** 구해 id 로 굳힌다(조건마다 다시 하면 집합이 갈린다 · 096).
+    #    질의가 비면 벡터 검색을 돌릴 것이 없다 — 집합은 조건만으로 정해진다.
+    semantic_ids: list[str] = []
+    if query.strip() and query_vector is not None:
+        sem = client.search(index=index, body=build_semantic_body(
+            query_vector, min_cosine=min_cosine, cap=semantic_cap))
+        semantic_ids = [
+            str((h.get("_source") or {}).get("asset_id") or "")
+            for h in ((sem.get("hits") or {}).get("hits") or [])
+        ]
+        semantic_ids = [a for a in semantic_ids if a]
+
+    # ② 개수·칩 — search_files 와 같은 계획을 쓴다(축마다 자기 조건을 뺀 채 센다 · 087 함정).
+    plan = build_facet_plan(
+        query=query, semantic_ids=semantic_ids, filters=filters,
+        facet_size=facet_size, axes=axes, operator=operator, about_branch=about_branch,
+    )
+    responses = _run_facets(client, index, plan)
+    total_info: dict[str, Any] = {}
+    facets: dict[str, list[dict[str, Any]]] = {}
+    for entry, resp in zip(plan, responses, strict=False):
+        if entry.get("total"):
+            total_info = dict((resp.get("hits") or {}).get("total") or {})
+        aggs = resp.get("aggregations") or {}
+        for axis in entry["axes"]:
+            facets[axis] = _facet_items(axis, aggs.get(axis))
+    total = int(total_info.get("value") or 0)
+
+    # ③ 이 쪽의 행 — 커서로 이어 읽는다.
+    page = client.search(index=index, body=build_browse_body(
+        query=query, semantic_ids=semantic_ids, filters=filters, sort=sort,
+        after=after, size=size, operator=operator, about_branch=about_branch,
+    ))
+    hits = list((page.get("hits") or {}).get("hits") or [])
+    # 🔴 다음 커서는 **이번 쪽이 꽉 찼을 때만** 준다. 덜 찼으면 마지막 쪽이므로 None 을 주어
+    #    화면이 "더 없음"을 알 수 있게 한다(빈 쪽을 한 번 더 받으러 가지 않는다).
+    next_cursor = (
+        encode_cursor(sort, list(hits[-1].get("sort") or []))
+        if hits and len(hits) == int(size) and hits[-1].get("sort")
+        else None
+    )
+    return {
+        "rows": [_row(h) for h in hits],
+        "total": total,
+        "total_capped": str(total_info.get("relation") or "eq") != "eq",
+        "facets": {axis: facets.get(axis, []) for axis in axes},
+        "next_cursor": next_cursor,
         "size": int(size),
         "sort": sort,
     }
