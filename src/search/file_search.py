@@ -208,6 +208,19 @@ _SELF_FILTER_FIELDS: frozenset[str] = frozenset(
 #      화면의 84.5%가 제자리에 오지 않는다(실측) — 정렬한 열이 정렬돼 보이지 않는 표가 된다.
 #   ⚠️ 날짜는 색인 값이 **날짜까지**라 같은 날끼리는 자산 id 순이다. 화면 표도 날짜까지만 보이므로
 #      눈에 보이는 만큼만 기준이 되는 셈이다(보이지 않는 시각으로 순서가 갈리지 않는다).
+# 🔴 커서 순회에서 **정렬 키가 변하면 자리가 어긋난다**(097 §2-8) — 지나간 자리로 점프하면 누락,
+#   안 본 자리로 가면 중복이다. 값이 불변인 정렬만 "안정"으로 본다.
+#   ⚠️ 주석이 아니라 **코드가 아는 사실**로 둔다: 주석에만 적으면 다음 사람이 내보내기에
+#   `updated_desc` 를 쓰고 **조용히 빠진 데이터셋**을 만든다. 정확해야 하는 순회(내보내기·정합성)는
+#   이 집합으로 거른다.
+STABLE_SORTS: frozenset[str] = frozenset({
+    "name_asc", "name_desc",        # 표시 이름 — 사실상 불변
+    "created_asc", "created_desc",  # 등록 시각 — 한 번 정해지면 불변
+    "size_asc", "size_desc",        # 크기 — 사실상 불변
+})
+# `updated_*` 는 순회 중 값이 바뀐다(불안정) · `relevance` 는 점수 자체가 상위 rank_depth 개만
+#   계산돼 이어받을 기준값이 없다(커서 불가).
+
 SORT_OPTIONS: dict[str, tuple[dict[str, Any], ...] | None] = {
     "relevance": None,
     "name_asc": ({"file_name_sort": "asc"}, {"asset_id": "asc"}),
@@ -235,6 +248,7 @@ __all__ = [
     "SEMANTIC_MIN_COSINE_DEFAULT",
     "SORT_DEFAULT",
     "SORT_DEPTH_DEFAULT",
+    "STABLE_SORTS",
     "SORT_OPTIONS",
     "TOTAL_CAP_DEFAULT",
     "WORD_OPERATOR_DEFAULT",
