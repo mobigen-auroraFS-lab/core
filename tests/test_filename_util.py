@@ -11,6 +11,7 @@ import unittest
 from src.config.filename_util import (
     basename_of,
     display_file_name,
+    meaningful_file_name,
     strip_asset_id_prefix,
 )
 
@@ -89,3 +90,38 @@ class DisplayFileNameTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MeaningfulFileNameTest(unittest.TestCase):
+    """판정 재료용 파일 이름 게이트 — 뜻 없는 이름은 아예 싣지 않는다(2026-09-11).
+
+    사용자 요구: *"파일명과 상위 폴더명이 의미가 없는 경우 이게 실제 판정에 큰영향을 주지 않도록"*.
+    LLM 에게 묻지 않고 **코드가 먼저** 정하므로 여기서 봉인한다.
+    """
+
+    def test_숫자뿐인_출처_일련번호는_싣지_않는다(self) -> None:
+        # 국보 사진 1,083장이 전부 이 꼴이다(국가유산청 이미지 API 가 붙인 번호).
+        for name in ("1612816.jpg", "2021042017434700.JPG", "2584288.jpg"):
+            with self.subTest(name=name):
+                self.assertIsNone(meaningful_file_name(name))
+
+    def test_기기_앱_상투_이름도_싣지_않는다(self) -> None:
+        for name in ("IMG_4821.jpg", "DSC00123.JPG", "KakaoTalk_20240315_123456.jpg",
+                     "Screenshot 2024-03-15 at 14.22.31.png"):
+            with self.subTest(name=name):
+                self.assertIsNone(meaningful_file_name(name))
+
+    def test_뜻_있는_이름은_확장자만_떼어_돌려준다(self) -> None:
+        self.assertEqual(meaningful_file_name("서울 숭례문.txt"), "서울 숭례문")
+        self.assertEqual(meaningful_file_name("/d/2007 NIGHT of FGI 윤석화 인터뷰.jpg"),
+                         "2007 NIGHT of FGI 윤석화 인터뷰")
+
+    def test_자산id_접두는_벗기고_본다(self) -> None:
+        # 보관 경로는 `<asset_id>__<원본명>` 이라 접두를 남기면 판정 재료가 지저분해진다.
+        got = meaningful_file_name("/a/018f0000-0000-7000-8000-0000000000a1__아내 얘기.mp3")
+        self.assertEqual(got, "아내 얘기")
+
+    def test_빈_값은_None(self) -> None:
+        for bad in (None, "", "   ", "/a/b/"):
+            with self.subTest(bad=bad):
+                self.assertIsNone(meaningful_file_name(bad))

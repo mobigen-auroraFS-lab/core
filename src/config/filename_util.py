@@ -62,3 +62,116 @@ def display_file_name(fs_path: str | None) -> str:
     if not fs_path:
         return ""
     return strip_asset_id_prefix(os.path.basename(fs_path))
+
+
+# ── 판정 재료용 "뜻 있는 파일 이름" 게이트 ──────────────────────────────────────
+# 기기·앱이 붙이는 상투 접두. 이걸 떼고 나면 숫자·날짜만 남는 이름들이라 통째로 버린다.
+_DEVICE_PREFIX = re.compile(
+    r"^(?:img|dsc|dscn|dcim|pic|photo|image|vid|video|mov|movie|screen ?shot|capture|"
+    r"kakaotalk|download|untitled|new ?file|캡처|사진|스크린샷|제목\s*없음|무제|새\s*파일)"
+    r"[ _\-]*",
+    re.IGNORECASE,
+)
+# 뜻이 있다고 볼 최소선: 한글 2자 **또는** 라틴 3자 연속.
+#   왜 라틴은 3자인가 — 2자로 두면 ``Screenshot 2024-03-15 at 14.22.31`` 의 ``at`` 같은 찌꺼기가
+#   통과한다(실측 표본에서 나온 실패 사례). 한글은 2자로도 뜻을 갖는 말이 흔해 2자로 둔다.
+_HANGUL_RUN = re.compile(r"[가-힣]{2,}")
+_LATIN_RUN = re.compile(r"[A-Za-z]{3,}")
+
+
+def meaningful_file_name(fs_path: str | None) -> str | None:
+    """판정 재료로 쓸 만한 **뜻 있는 파일 이름**. 쓸 만하지 않으면 ``None``(순수).
+
+    무엇에 쓰나: 개체 판정 프롬프트에 파일 이름을 참고로 실을지 말지를 **코드가 먼저** 정한다.
+    LLM 에게 "이 이름이 뜻이 있나"를 묻지 않는 이유는, 뜻 없는 이름이 판정을 흔드는 것 자체를
+    막고 싶기 때문이다(사용자 요구 2026-09-11: *"파일명과 상위 폴더명이 의미가 없는 경우 이게
+    실제 판정에 큰영향을 주지 않도록"*). 게이트가 순수 함수라 단위 테스트로 봉인된다.
+
+    판정 절차: 표시용 파일명(자산 id 접두 제거) → 확장자 제거 → 기기·앱 상투 접두 1회 제거 →
+    남은 글자에 **한글 2자 이상 이어진 곳** 또는 **라틴 3자 이상 이어진 곳**이 있으면 통과.
+
+    실측으로 걸러지는 것: ``1612816.jpg``·``2021042017434700.JPG``(출처 일련번호) ·
+    ``IMG_4821.jpg`` · ``Screenshot 2024-03-15 at 14.22.31.png`` · ``KakaoTalk_20240315_1234.jpg``.
+    통과하는 것: ``서울 숭례문.txt`` · ``[집중인터뷰] 배우 윤석화와 함께.mp4``.
+
+    ⚠️ **접두 제거는 판정용이고, 돌려주는 값은 자르지 않은 이름(확장자만 뺀 것)이다** — LLM 에는
+    맥락이 많을수록 좋고, 접두 제거는 "실을지 말지"를 정하는 데만 쓴다.
+
+    Args:
+        fs_path: 자산의 파일 경로(또는 파일명). 비어 있으면 ``None`` 을 돌려준다.
+
+    Returns:
+        확장자를 뗀 파일 이름. 뜻이 없다고 판정되면 ``None``.
+    """
+    name = display_file_name(fs_path)
+    if not name:
+        return None
+    stem = os.path.splitext(name)[0].strip()
+    if not stem:
+        return None
+    probe = _DEVICE_PREFIX.sub("", stem, count=1)
+    if _HANGUL_RUN.search(probe) or _LATIN_RUN.search(probe):
+        return stem
+    return None
+
+
+# 파일 이름 안에서 **이름이 사는 자리** — 실측 표본에서 뽑은 세 자리다(2026-09-11).
+#   ① 괄호·따옴표 안: `[극한직업]` · `《골드랜드》` · `'마녀2'` · `⟪자백의 대가⟫`
+#   ② 해시태그: `#전도연 #김고은`
+#   ③ 구분자로 나뉜 토막: `안나 메이킹 ｜ 정은채의 이중생활 ｜ …`
+# 이 셋을 후보로 뽑아 **판정 대상에 더한다**. 왜 필요한가: 판정 계약이 키워드 단위라 개체는
+# 키워드에서만 나오는데, `[극한직업] 왜 안 웃기지？.jpg` 의 키워드는 `농담·당황·냉담` 이라
+# 이름을 문맥으로만 줘서는 붙일 자리가 없다(A안 파일럿 실측: 19건 중 1건).
+_BRACKETED = re.compile(
+    r"[\[\(（｛{《〈⟪「｢'\"“”‘’]([^\[\]\(\)（）｛｝{}《》〈〉⟪⟫「」｢｣'\"“”‘’]{1,40})"
+    r"[\]\)）｝}》〉⟫」｣'\"“”‘’]"
+)
+_HASHTAG = re.compile(r"#([^\s#\[\]()（）｜|]{1,30})")
+# ｜(전각 세로선)·ㅣ(한글 이) 는 제목에서 세로선 대용으로 흔히 쓰인다 — 실측 파일명에 둘 다 있다.
+# 하이픈을 그냥 넣으면 ``Sim Su-bong``·``K-Pop`` 이 쪼개진다 — **공백에 둘러싸인 하이픈**만 자른다.
+_SPLIT = re.compile(r"(?:[｜|/,·・•∙‧ㅣ:：;~〜]+|\s[-–—]\s)")
+_CANDIDATE_MAX = 6          # 후보 상한 — 잡음과 프롬프트 길이를 함께 묶는다
+
+
+def file_name_candidates(stem: str | None, *, limit: int = _CANDIDATE_MAX) -> tuple[str, ...]:
+    """파일 이름에서 **판정 대상 후보**를 뽑는다(순수·결정적).
+
+    왜 후보로 뽑나: 개체 판정은 키워드 단위라 이름이 키워드에 없으면 붙을 자리가 없다. 파일 이름을
+    참고 문맥으로만 주면 실측에서 19건 중 1건만 붙었다(A안 실패 · 2026-09-11). 이름이 사는 자리
+    (괄호·해시태그·구분자 토막)를 떼어 **판정 대상에 더하면** LLM 이 그 자리에서 개체를 답할 수 있다.
+
+    잡음은 어떻게 다루나: 여기서는 거르지 않는다 — 제목 문구(`왜 안 웃기지？`)·회차(`Ep1`)·
+    채널명은 **판정 단계**가 null 로 떨군다(프롬프트 규칙 ⓑ 막연한 범주 · 타입 정의문의 방송사·
+    플랫폼 제외). 코드가 뜻을 판단하려 들면 규칙만 늘고 도메인마다 어긋난다.
+
+    Args:
+        stem: 확장자를 뗀 파일 이름(``meaningful_file_name`` 결과). 비면 빈 튜플.
+        limit: 후보 상한. 프롬프트 길이와 잡음을 함께 묶는다.
+
+    Returns:
+        후보 문자열 튜플. **순서에 뜻이 있다** — 괄호·따옴표 → 해시태그 → 구분자 토막
+        (앞쪽이 이름일 확률이 높은 자리다). 같은 뜻의 중복은 첫 등장만 남긴다.
+    """
+    text = (stem or "").strip()
+    if not text:
+        return ()
+    picked: list[str] = []
+    spans = [m.group(1) for m in _BRACKETED.finditer(text)]
+    tags = [m.group(1) for m in _HASHTAG.finditer(text)]
+    rest = _HASHTAG.sub(" ", _BRACKETED.sub(" ", text))
+    chunks = _SPLIT.split(rest)
+    seen: set[str] = set()
+    for raw in [*spans, *tags, *chunks]:
+        cand = re.sub(r"\s+", " ", raw).strip().strip("#.·,")   # 괄호를 떼며 생긴 빈칸을 접는다
+        if not cand or len(cand) > 40:
+            continue
+        if not (_HANGUL_RUN.search(cand) or _LATIN_RUN.search(cand)):
+            continue
+        key = re.sub(r"\s+", "", cand).casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        picked.append(cand)
+        if len(picked) >= limit:
+            break
+    return tuple(picked)

@@ -37,6 +37,7 @@ from src.mm_meta.judge import (
     build_entity_prompt,
     interpret_response,
     judge_asset_entities,
+    merge_name_candidates,
     prompt_version_for,
 )
 from src.mm_meta.rules import ENTITY_TYPE_DEFS, ENTITY_TYPE_ORDER, EntityTypeDef, apply_rules
@@ -449,11 +450,85 @@ class TestPromptTypeDefinitions(unittest.TestCase):
         sent = client.chat.completions.create.call_args.kwargs["messages"][0]["content"]
         self.assertNotIn("타입 정의", sent)
 
-    def test_확정_프리셋을_실으면_왕조명_지시가_문안에_있다(self) -> None:
-        # 🔴 표기 부작용 방지 문구가 실제로 LLM 까지 간다는 확인(값 봉인은 rules 테스트).
+    def test_확정_프리셋을_실으면_시대_왕조_경계가_문안에_있다(self) -> None:
+        # 🔴 경계 문구가 실제로 LLM 까지 간다는 확인(값 봉인은 type_vocab 테스트).
+        #    v3 까지는 "왕조명 그대로"(표기 통일 지시)를 확인했다 — v4 는 왕조를 아예 받지 않으므로
+        #    확인 대상이 제외 문구로 바뀐다(2026-09-11).
         prompt = build_entity_prompt("더미 요약", ["가키워드"], type_defs=ENTITY_TYPE_DEFS)
-        self.assertIn("왕조명 그대로", prompt)
+        self.assertIn("시대·왕조", prompt)
         self.assertIn("국립중앙박물관", prompt)
+
+
+class TestNameHintInPrompt(unittest.TestCase):
+    """파일 이름 참고 줄 — 실릴 때와 안 실릴 때(2026-09-11).
+
+    🔴 핵심 계약은 **안 실릴 때 문안이 이전과 같다**는 것이다. 뜻 없는 이름
+    (``1612816.jpg``)은 호출부가 ``None`` 으로 걸러 넘기므로, 그런 자산의 판정은 글자 하나
+    달라지지 않는다(사용자 요구: 의미 없는 이름이 판정에 영향을 주지 않을 것).
+    """
+
+    def test_이름을_주면_참고_줄과_주의_줄이_붙는다(self) -> None:
+        prompt = build_entity_prompt("더미 요약", ["가키워드"], name_hint="배우 윤석화 인터뷰")
+        self.assertIn('파일 이름: "배우 윤석화 인터뷰"', prompt)
+        self.assertIn("파일 이름은 자산의 제목·출처 표기다", prompt)
+        self.assertIn("제작사·채널·플랫폼·프로그램 회차·날짜·연번은 개체가 아니다", prompt)
+
+    def test_이름이_없으면_문안이_예전과_같다(self) -> None:
+        base = build_entity_prompt("더미 요약", ["가키워드"])
+        for empty in (None, "", "   "):
+            with self.subTest(empty=empty):
+                self.assertEqual(build_entity_prompt("더미 요약", ["가키워드"], name_hint=empty), base)
+        self.assertNotIn("파일 이름", base)
+
+    def test_이름_줄은_요약_바로_뒤다(self) -> None:
+        # 순서에 뜻이 있다 — 정체(요약·이름)가 먼저, 판정 대상(키워드)이 그 뒤다.
+        lines = build_entity_prompt("더미 요약", ["가키워드"], name_hint="서울 숭례문").splitlines()
+        self.assertTrue(lines[0].startswith("자산 요약:"))
+        self.assertTrue(lines[1].startswith("파일 이름:"))
+        self.assertTrue(lines[2].startswith("키워드 목록:"))
+
+    def test_후보를_주면_판정_대상에_들어간다(self) -> None:
+        # 🔴 B 안의 핵심 — 이름을 문맥으로만 주면 붙을 자리가 없다(A안 파일럿 19건 중 1건 ·
+        #    B안 같은 표본 18건). 후보는 키워드 목록에 합쳐 들어간다.
+        prompt = build_entity_prompt("더미 요약", ["농담"], name_hint="[극한직업] 왜 안 웃기지",
+                                     name_candidates=("극한직업", "왜 안 웃기지"))
+        self.assertIn('키워드 목록: ["농담", "극한직업", "왜 안 웃기지"]', prompt)
+        self.assertIn("파일 이름에서 떼어 낸 말", prompt)
+
+    def test_후보는_키워드_목록에_합쳐진다(self) -> None:
+        # 🔴 별도 줄로 두면 LLM 이 맨 위 지시("각 키워드에 대해")만 보고 건너뛴다(2026-09-11 실측:
+        #    `심수봉` 이 후보에 있는데도 개체 0건). 목록에 합치면 새 지시 없이 기존 규칙이 걸린다.
+        prompt = build_entity_prompt("요약", ["음악"], name_candidates=("심수봉", "음악"))
+        self.assertIn('키워드 목록: ["음악", "심수봉"]', prompt)   # 중복은 접히고 뒤에 붙는다
+
+    def test_후보에_답해도_버려지지_않는다(self) -> None:
+        # 🔴 실제로 겪은 결함의 봉인 — 프롬프트에는 후보를 싣고 응답 필터에는 내용 키워드만
+        #    넘겼더니, LLM 이 후보에 옳게 답해도 **전부 버려졌다**. 두 목록은 같아야 한다.
+        client = _client_returning('{"판정": {"심수봉": {"entity": "심수봉", "type": "인물"}}}')
+        judgement = judge_asset_entities("요약", ["음악"], client=client,
+                                         name_candidates=("심수봉",))
+        self.assertTrue(judgement.ok)
+        self.assertEqual([(e.keyword, e.name, e.entity_type) for e in judgement.entities],
+                         [("심수봉", "심수봉", "인물")])
+
+    def test_병합은_순서를_지키고_중복을_접는다(self) -> None:
+        self.assertEqual(merge_name_candidates(["음악", "박수"], ("심수봉", "음악", " ")),
+                         ("음악", "박수", "심수봉"))
+        self.assertEqual(merge_name_candidates(["음악"], None), ("음악",))
+        self.assertEqual(merge_name_candidates(None, ("심수봉",)), ("심수봉",))
+
+    def test_후보가_없으면_후보_줄이_안_붙는다(self) -> None:
+        # 뜻 없는 이름은 후보도 0개라, 그 자산의 문안에는 후보 줄이 아예 없다.
+        for empty in (None, (), ("", "  ")):
+            with self.subTest(empty=empty):
+                prompt = build_entity_prompt("더미 요약", ["가"], name_candidates=empty)
+                self.assertNotIn("파일 이름 후보", prompt)
+
+    def test_판정_경로가_이름을_문안까지_흘려보낸다(self) -> None:
+        client = _client_returning('{"판정": {}}')
+        judge_asset_entities("더미 요약", ["가키워드"], client=client, name_hint="서울 숭례문")
+        sent = client.chat.completions.create.call_args.kwargs["messages"][0]["content"]
+        self.assertIn('파일 이름: "서울 숭례문"', sent)
 
 
 class TestPromptVersionBump(unittest.TestCase):
@@ -464,8 +539,9 @@ class TestPromptVersionBump(unittest.TestCase):
     다시 판정되지 않는다.
     """
 
-    def test_현행_문안_판은_v2다(self) -> None:
-        self.assertEqual(PROMPT_VERSION, "mm_meta.v2")
+    def test_현행_문안_판은_v3다(self) -> None:
+        # v3(2026-09-11): 뜻 있는 파일 이름을 참고로 싣는 문안. 값을 바꾸면 전량 재판정이 걸린다.
+        self.assertEqual(PROMPT_VERSION, "mm_meta.v3")
 
     def test_옛_판_상수가_남아있다(self) -> None:
         # 정의문 없이 나간 문안의 판 — 하위호환 경로가 자기 판을 정직하게 찍을 수 있어야 한다.

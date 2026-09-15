@@ -7,8 +7,9 @@
 
     ① **정의문 문안은 측정으로 확정된 값**이다(2026-08-25 파일럿 · 경계 개체 18자산 재판정에서
        흔들림 6종이 전부 해소됐다: 조선=사건·국립중앙박물관=장소·전주시청=장소 …). 그래서 문구를
-       테스트가 봉인한다 — 특히 사건의 "왕조명 그대로" 예시는 **표기 부작용 방지용**이라 지우면
-       '조선'이 '조선시대'로 나와 묶음이 갈라진다(v1 실측).
+       테스트가 봉인한다. ⚠️ **2026-09-11 개정**: `조선=사건` 은 더 이상 목표가 아니다 — 시대·왕조는
+       어느 타입도 받지 않는다(문화유산 적재 실측: 상위 묶음이 시기 구분에 밀렸다). 옛 봉인
+       ("왕조명 그대로" 예시)은 표기 갈림 방지용이었고, 받지 않으면 갈릴 개체가 없어 풀었다.
 
     ② **등록 행이 정본이되, 어휘는 코드와 일치해야 한다**. 저장 유니크 키가 ``(entity_type,
        entity_uid)`` 라 5종 밖 이름이 한 번 들어오면 그 오타가 데이터로 굳는다 → 로더가 fail-fast.
@@ -331,20 +332,39 @@ class TestEntityTypeDefs(unittest.TestCase):
                 self.assertTrue(d.definition.strip())
                 self.assertTrue(d.exclusion.strip())
 
-    def test_사건_정의문의_왕조명_예시는_지우지_않는다(self) -> None:
-        # 🔴 표기 부작용 방지용이다 — v1(예시 없음)에서 '조선'이 '조선시대'로 바뀌어 나왔고
-        #    (정의문의 "왕조·시대" 문구를 LLM 이 표기로 따라감) 그러면 묶음이 갈라진다.
+    def test_사건_정의문은_시대_왕조를_받지_않는다(self) -> None:
+        # 🔴 v3 까지는 반대였다 — 정의문이 "대회·왕조·명절"(예시 `조선`)이라 **지시**해서 LLM 이
+        #    왕조를 개체로 만들었고, 문화유산 2,040건 적재에서 상위 묶음이 `조선`(68)·
+        #    `통일신라`(65)·`고려`(50)로 채워졌다(2026-09-11 실측). 판정이 틀린 게 아니라 묶음으로
+        #    쓸모가 없다 — 시기 구분은 주제·태그(083)의 축이다.
+        #    옛 봉인(표기 갈림 조선/조선시대 방지)은 exclusion 이 두 표기를 함께 막아 대체한다.
         event = next(d for d in ENTITY_TYPE_DEFS if d.name == "사건")
-        self.assertIn("왕조", event.definition)
-        self.assertIn("조선", event.definition)
-        self.assertIn("그대로", event.definition)
+        self.assertNotIn("왕조", event.definition)
+        self.assertIn("시대·왕조", event.exclusion)
+        self.assertIn("조선", event.exclusion)
+        self.assertIn("통일신라", event.exclusion)
+
+    def test_조직_정의문은_유통_조직을_받지_않는다(self) -> None:
+        # 실측(2026-09-11): `넷플릭스` 19건·`KBS` 9건이 서로 무관한 작품 자산을 한 이름에 모아
+        # 개체 검색을 가렸다(「자백의 대가」 검색 1위가 `넷플릭스`). 방송사는 조직이 맞지만
+        # 그 자산은 거기서 **유통된** 것이라 소속이 아니다.
+        org = next(d for d in ENTITY_TYPE_DEFS if d.name == "조직")
+        self.assertIn("방송사", org.exclusion)
+        self.assertIn("유통", org.exclusion)
+
+    def test_작품_정의문은_유형_일반명을_받지_않는다(self) -> None:
+        # 실측(2026-09-11): `금동보살입상` 이라는 국보는 없다 — 정식 이름이 다른 15점이 한 개체로
+        # 접혀 "다른 유물이 같은 것"이라 주장하는 데이터가 됐다.
+        work = next(d for d in ENTITY_TYPE_DEFS if d.name == "작품")
+        self.assertIn("금동보살입상", work.exclusion)
+        self.assertIn("정식 이름", work.exclusion)
 
     def test_흔들림을_해소한_경계_문구가_남아있다(self) -> None:
         # 파일럿에서 갈렸던 6종(국립중앙박물관·전주시청·조선·통일신라 …)을 통일시킨 문구들이다.
         by_name = {d.name: d for d in ENTITY_TYPE_DEFS}
         self.assertIn("국립중앙박물관", by_name["장소"].definition)  # 시설은 장소
         self.assertIn("조직", by_name["장소"].exclusion)  # 그 안의 단체는 조직
-        self.assertIn("사건", by_name["조직"].exclusion)  # 왕조·시대는 사건
+        self.assertIn("시대·왕조", by_name["조직"].exclusion)  # 왕조·시대는 어느 타입도 아니다
         self.assertIn("장소", by_name["조직"].exclusion)  # 건물 자체는 장소
 
     def test_불변_객체다(self) -> None:
