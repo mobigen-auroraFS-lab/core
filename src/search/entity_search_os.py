@@ -24,7 +24,7 @@ BM25 노이즈는 "그 글자가 실제로 있어서" 걸린 것이라 화면에
 | 함수 | 무엇을 돌려주나 | 쓰는 장치 | 누가 순서를 정하나 |
 |---|---|---|---|
 | ``search_entities_hybrid`` | **가장 맞는 5개**(순위) | BM25 + kNN + 게이트 + min-max 융합 | 융합 점수 |
-| ``match_entity_keys`` | **맞는 것 전부**(집합) | BM25 낱말 매칭 **∪** 게이트 통과한 kNN 창 | DB 목록(구성 자산 수 내림차순) |
+| ``match_entity_keys`` | **맞는 것 전부**(집합) + **어느 갈래로 걸렸는지** | BM25 낱말 매칭 **∪** 게이트 통과한 kNN 창 | DB 목록(구성 자산 수 내림차순) |
 
 099 는 "결과 내 재검색"을 **결과 집합 전체**에 적용하기로 했다(spec §3-1). 그러려면 기반이 상위 5가
 아니라 집합이어야 한다. 그리고 개체도 낱말 단위로 맞추기로 하면서 ``q`` 와 재검색이 **같은 일**
@@ -47,6 +47,12 @@ BM25 노이즈는 "그 글자가 실제로 있어서" 걸린 것이라 화면에
 ``SEMANTIC_MIN_COSINE_DEFAULT``(0.60)를 개체에 쓰면 개체 전 구간(≤0.64)이 잘린다. 그래서 개체는
 **상대 게이트**(``gate_signal`` + ``passes_cutoff(eps=0.15, floor=0)``)를 그대로 쓴다 —
 🔴 **새 임계를 만들지 않는다**(재보정할 개체 골든이 없어서, 새 숫자는 근거 없는 숫자가 된다).
+
+🔴 **집합만 주지 않고 「어느 갈래로 걸렸는지」를 함께 준다**(2026-09-17 사용자 결정) —
+``EntityMatchSet``. 뜻(kNN)으로 걸린 결과는 **화면 어디에도 검색어가 보이지 않기** 때문이다:
+`왕실 무덤` 으로 찾으면 `영릉` 이 나오는데 그 카드에는 "왕실 무덤" 이라는 글자가 한 자도 없다 →
+근거가 없으면 사용자는 "검색이 고장났나"로 읽는다. 판정은 **이미 두 갈래로 따로 계산**되고
+마지막에 합쳐질 뿐이라, 버리지 않고 함께 돌려주기만 하면 된다 — **추가 질의는 0회**다.
 
 설계 배경: `specs/092-entity-search-opensearch`(spec §2 · plan §설계 결정) ·
 `specs/099-refine-requery-entity-cursor`(spec §3-2·§3-2a · tasks T018·T019)
@@ -281,6 +287,33 @@ class EntitySemanticMatch(NamedTuple):
     sample_size: int
 
 
+class EntityMatchSet(NamedTuple):
+    """집합 판정 결과 — 결과 집합과 **어느 갈래로 걸렸는지**를 함께 돌려준다.
+
+    ``EntitySemanticMatch`` 와 **같은 결**이다(NamedTuple · 키는 ``frozenset`` · 판정 사실을 값으로).
+    호출부가 결과만 쓰려면 ``keys`` 하나만 보면 되고, 화면에 "왜 이게 나왔나"를 보이려면 갈래 둘을
+    본다 — 도서관 비유로 ``text_keys`` 는 "제목에 그 글자가 있어서" 뽑힌 책이고 ``semantic_keys``
+    는 "뜻이 가까워서" 사서가 집어 온 책이다. 뒤엣것은 카드에 검색어가 한 자도 없으므로 근거를
+    보여 주지 않으면 사용자가 검색을 의심하게 된다.
+
+    🔴 **``keys`` 는 파생값**(= ``text_keys | semantic_keys``)이다. 갈래를 따로 돌려줘도 결과
+    집합 자체는 종전과 **완전히 같다** — 이 동봉은 판정 규칙을 하나도 바꾸지 않는다.
+
+    Attributes:
+        keys: 결과 집합 = 두 갈래의 합집합. 매칭이 없으면 빈 집합(= 0건이며 "필터 없음"이 아니다).
+        text_keys: ① 낱말(BM25) 갈래로 걸린 키들 — 그 글자가 **실제로 적혀 있는** 개체다.
+        semantic_keys: ② 의미(kNN) 갈래로 걸린 키들. 게이트에 막혔거나 벡터를 주지 않았으면
+            **빈 집합**이다(일부만 버리지 않는다 · 090 후속 게이트 계약).
+        semantic_gate_passed: ② 가 게이트를 통과했는지. ``False`` 이면 ``semantic_keys`` 가 빈
+            집합이며, "막혔다"·"후보가 없다"·"껐다"의 구분은 경고 로그가 말한다.
+    """
+
+    keys: frozenset[tuple[str, str]]
+    text_keys: frozenset[tuple[str, str]]
+    semantic_keys: frozenset[tuple[str, str]]
+    semantic_gate_passed: bool
+
+
 def semantic_entity_keys(
     client: Any,
     index: str,
@@ -346,7 +379,7 @@ def match_entity_keys(
     max_hits: int = ENTITY_MATCH_MAX_HITS_DEFAULT,
     candidate_size: int = DEFAULT_CANDIDATE_SIZE,
     gate_eps: float = ENTITY_SEMANTIC_GATE_EPS_DEFAULT,
-) -> set[tuple[str, str]]:
+) -> EntityMatchSet:
     """질의에 **맞는 개체 전부**의 키 집합을 구한다(순위 없음 · 099 G4 · FR-003).
 
     ``search_entities_hybrid`` 가 "가장 맞는 5개"라면 이 함수는 "맞는 것 전부"다. 화면은 이 집합을
@@ -390,12 +423,18 @@ def match_entity_keys(
             반대로 전체를 돌려주면 "검색했는데 전부 나오는" 조용한 오류가 된다.
 
     Returns:
-        ``{(entity_type, entity_uid), …}``. 매칭이 없으면 **빈 집합**(= 0건). 같은 입력이면 같은
-        집합이다(헌법 3조 — 집합이라 순서 자체가 없다).
+        ``EntityMatchSet`` — 결과 집합(``keys``)과 **어느 갈래로 걸렸는지**(``text_keys`` ·
+        ``semantic_keys`` · ``semantic_gate_passed``). 매칭이 없으면 ``keys`` 가 **빈 집합**
+        (= 0건). 같은 입력이면 같은 값이다(헌법 3조 — 집합이라 순서 자체가 없다).
+
+        🔴 갈래를 함께 주는 이유: 뜻으로 걸린 결과는 **화면에 검색어가 보이지 않는다**(`왕실 무덤`
+        → `영릉`). 근거를 못 보이면 사용자는 검색을 의심한다. 이미 따로 계산된 값이라 **질의는
+        늘지 않는다**(낱말 1회 + 의미 1회 · 종전과 같다).
 
     로그로 드러나는 것 셋(조용한 실패 방지): ① 낱말 갈래가 상한에서 잘림 · ② 의미 갈래가 게이트에
-    막힘(격차·임계 동봉) · ③ 의미 갈래가 아예 꺼짐(벡터 미제공 또는 후보 0건). 값으로 읽고 싶으면
-    ``semantic_entity_keys`` 를 직접 불러 ``gate_passed`` 를 본다.
+    막힘(격차·임계 동봉) · ③ 의미 갈래가 아예 꺼짐(벡터 미제공 또는 후보 0건). ②③ 은 반환값
+    (``semantic_gate_passed``·빈 ``semantic_keys``)으로도 읽을 수 있고, 진단 수치(top·baseline)가
+    필요하면 ``semantic_entity_keys`` 를 직접 부른다.
     """
     clause = entity_match_clause(query)
     if clause is None:
@@ -415,27 +454,31 @@ def match_entity_keys(
     if total > len(rows):
         _LOG.warning("개체 집합 판정이 상한에서 잘렸다 — 매칭 %d건 중 %d건만 받았다(max_hits=%d)",
                      total, len(rows), int(max_hits))
-    keys = {(etype, uid) for _doc_id, etype, uid, _score in rows if uid}
+    text_keys = frozenset((etype, uid) for _doc_id, etype, uid, _score in rows if uid)
 
     if query_vector is None:
         # 의미 갈래를 끈 채로 도는 상태는 **이례적**이다 — `발효`→김치 류를 못 찾게 되므로 남긴다.
         _LOG.warning("개체 집합 판정에서 의미(kNN) 갈래가 꺼졌다 — 질의 벡터가 없다(낱말 매칭 %d건만)",
-                     len(keys))
-        return keys
+                     len(text_keys))
+        return EntityMatchSet(keys=text_keys, text_keys=text_keys,
+                              semantic_keys=frozenset(), semantic_gate_passed=False)
 
     semantic = semantic_entity_keys(client, index, query_vector=query_vector,
                                     candidate_size=candidate_size, gate_eps=gate_eps)
     if semantic.sample_size == 0:
         _LOG.warning("개체 의미(kNN) 갈래의 후보가 0건이다 — 색인이 비었거나 벡터 필드가 없다"
-                     "(낱말 매칭 %d건만)", len(keys))
+                     "(낱말 매칭 %d건만)", len(text_keys))
     elif not semantic.gate_passed:
         # 게이트 차단은 "정답이 없다"는 판정이라 **정상 동작**이지만, 조용하면 "왜 못 찾지"를
         # 추적할 수 없다. 격차와 임계를 함께 남겨 사후에 판정을 재현할 수 있게 한다.
         _LOG.warning("개체 의미(kNN) 갈래가 게이트에 막혔다 — top=%.4f baseline=%.4f "
                      "격차=%.4f < eps=%.2f(후보 %d건) · 낱말 매칭 %d건만 남긴다",
                      semantic.top, semantic.baseline, semantic.top - semantic.baseline,
-                     gate_eps, semantic.sample_size, len(keys))
-    return keys | set(semantic.keys)
+                     gate_eps, semantic.sample_size, len(text_keys))
+    # 🔴 ``keys`` 는 **파생값**이다 — 갈래를 따로 싣는다고 결과 집합이 달라지지 않는다.
+    return EntityMatchSet(keys=text_keys | semantic.keys, text_keys=text_keys,
+                          semantic_keys=semantic.keys,
+                          semantic_gate_passed=semantic.gate_passed)
 
 
 def _total_hits(total: Any, fallback: int) -> int:
@@ -456,6 +499,6 @@ def _total_hits(total: Any, fallback: int) -> int:
         return int(fallback)
 
 
-__all__ = ["DEFAULT_CANDIDATE_SIZE", "DEFAULT_FUSION_WEIGHTS", "EntitySemanticMatch",
-           "entity_match_clause", "match_entity_keys", "search_entities_hybrid",
-           "semantic_entity_keys"]
+__all__ = ["DEFAULT_CANDIDATE_SIZE", "DEFAULT_FUSION_WEIGHTS", "EntityMatchSet",
+           "EntitySemanticMatch", "entity_match_clause", "match_entity_keys",
+           "search_entities_hybrid", "semantic_entity_keys"]

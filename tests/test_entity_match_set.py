@@ -157,17 +157,21 @@ class TestMatchEntityKeys(unittest.TestCase):
     def test_매칭_개체의_키_집합을_돌려준다(self) -> None:
         c = _FakeClient([_hit("작품", "훈민정음"), _hit("장소", "제주도")])
         got = entity_search_os.match_entity_keys(c, "mm_entities", query="한글", query_vector=None)
-        self.assertEqual(got, {("작품", "훈민정음"), ("장소", "제주도")})
-        self.assertIsInstance(got, set)
+        self.assertEqual(got.keys, {("작품", "훈민정음"), ("장소", "제주도")})
+        # 순위 목록이 아니라 **집합**임을 계속 못 박는다(넓힌 반환에서도 결과 자리는 집합이다).
+        self.assertIsInstance(got.keys, frozenset)
 
     def test_같은_개체가_여러_번_와도_한_번이다(self) -> None:
         c = _FakeClient([_hit("작품", "훈민정음"), _hit("작품", "훈민정음")])
-        self.assertEqual(len(entity_search_os.match_entity_keys(c, "mm_entities", query="한글", query_vector=None)), 1)
+        self.assertEqual(
+            len(entity_search_os.match_entity_keys(
+                c, "mm_entities", query="한글", query_vector=None).keys), 1)
 
     def test_결과가_없으면_빈_집합(self) -> None:
         """🔴 빈 집합은 **0건**이다 — "필터 없음"이 아니다(호출부가 섞으면 검색했는데 전체가 나온다)."""
         self.assertEqual(
-            entity_search_os.match_entity_keys(_FakeClient([]), "mm_entities", query="없는말", query_vector=None), set())
+            entity_search_os.match_entity_keys(
+                _FakeClient([]), "mm_entities", query="없는말", query_vector=None).keys, set())
 
     def test_빈_질의는_거부한다(self) -> None:
         """빈 질의에 빈 집합을 돌려주면 "0건"과 "안 물어봤다"가 같은 값이 된다 — 교집합에서 전부 사라진다."""
@@ -196,8 +200,9 @@ class TestMatchEntityKeys(unittest.TestCase):
     def test_source_가_없어도_문서_id_로_되살린다(self) -> None:
         """색인 문서 모양이 바뀌어도 검색이 죽지 않게 — 문서 id 규약(``타입/표기``)이 정본이다."""
         c = _FakeClient([{"_id": "작품/훈민정음", "_score": 1.0}])
-        self.assertEqual(entity_search_os.match_entity_keys(c, "mm_entities", query="한글", query_vector=None),
-                         {("작품", "훈민정음")})
+        self.assertEqual(
+            entity_search_os.match_entity_keys(
+                c, "mm_entities", query="한글", query_vector=None).keys, {("작품", "훈민정음")})
 
     def test_상한에_걸리면_경고를_남긴다(self) -> None:
         """조용히 잘리면 "검색했는데 있어야 할 게 없는" 오류가 관측되지 않는다."""
@@ -209,16 +214,20 @@ class TestMatchEntityKeys(unittest.TestCase):
     def test_두_번_불러도_같은_집합(self) -> None:
         """헌법 3조 — 같은 입력이면 같은 결과."""
         hits = [_hit("작품", "훈민정음"), _hit("장소", "제주도")]
-        first = entity_search_os.match_entity_keys(_FakeClient(hits), "mm_entities", query="한글", query_vector=None)
-        second = entity_search_os.match_entity_keys(_FakeClient(hits), "mm_entities", query="한글", query_vector=None)
+        first = entity_search_os.match_entity_keys(
+            _FakeClient(hits), "mm_entities", query="한글", query_vector=None).keys
+        second = entity_search_os.match_entity_keys(
+            _FakeClient(hits), "mm_entities", query="한글", query_vector=None).keys
         self.assertEqual(first, second)
 
     def test_질의와_좁히기가_같은_함수를_쓴다(self) -> None:
         """🔴 spec §3-2a — ``q`` 와 refine 은 둘 다 「낱말을 던져 매칭 개체 집합을 얻기」다.
         같은 함수라 한쪽만 고쳐지는 사고가 원리상 없다."""
         hits = [_hit("작품", "훈민정음")]
-        as_query = entity_search_os.match_entity_keys(_FakeClient(hits), "mm_entities", query="한글", query_vector=None)
-        as_refine = entity_search_os.match_entity_keys(_FakeClient(hits), "mm_entities", query="한글", query_vector=None)
+        as_query = entity_search_os.match_entity_keys(
+            _FakeClient(hits), "mm_entities", query="한글", query_vector=None).keys
+        as_refine = entity_search_os.match_entity_keys(
+            _FakeClient(hits), "mm_entities", query="한글", query_vector=None).keys
         self.assertEqual(as_query, as_refine)
 
 
@@ -234,8 +243,8 @@ class TestSemanticBranch(unittest.TestCase):
         """🔴 되살린 이유: 낱말만 쓰면 `발효`→김치처럼 **글자가 없는 매칭**을 통째로 잃는다."""
         c = _FakeClient([_hit("작품", "훈민정음")], knn_hits=_KNN_PASS)
         got = entity_search_os.match_entity_keys(c, "mm_entities", query="발효", query_vector=_VEC)
-        self.assertEqual(got, {("작품", "훈민정음"), ("음식", "김치"), ("음식", "된장"),
-                               ("장소", "제주도")})
+        self.assertEqual(got.keys, {("작품", "훈민정음"), ("음식", "김치"), ("음식", "된장"),
+                                    ("장소", "제주도")})
 
     def test_질의는_두_번이고_두_번째가_kNN이다(self) -> None:
         """갈래가 둘이라 엔진 왕복도 둘이다. 순서는 낱말 → 의미(낱말 본문이 ``bodies[0]``)."""
@@ -250,7 +259,7 @@ class TestSemanticBranch(unittest.TestCase):
         """🔴 게이트는 ② 갈래에만 건다 — ① 낱말 결과를 막으면 재현율이 무너진다(092 실측 90%→50%)."""
         c = _FakeClient([_hit("작품", "훈민정음")], knn_hits=_KNN_BLOCK)
         got = entity_search_os.match_entity_keys(c, "mm_entities", query="한글", query_vector=_VEC)
-        self.assertEqual(got, {("작품", "훈민정음")})
+        self.assertEqual(got.keys, {("작품", "훈민정음")})
 
     def test_게이트_차단을_로그로_알린다(self) -> None:
         """조용히 사라지면 "왜 못 찾지"를 추적할 수 없다 — 격차·임계를 함께 남긴다."""
@@ -281,7 +290,7 @@ class TestSemanticBranch(unittest.TestCase):
         c = _FakeClient([_hit("작품", "훈민정음")], knn_hits=[])
         with self.assertLogs("src.search.entity_search_os", level="WARNING") as log:
             got = entity_search_os.match_entity_keys(c, "mm_entities", query="한글", query_vector=_VEC)
-        self.assertEqual(got, {("작품", "훈민정음")})
+        self.assertEqual(got.keys, {("작품", "훈민정음")})
         self.assertIn("후보가 0건", " ".join(log.output))
 
     def test_벡터가_없으면_낱말_갈래만_쓰고_그_사실을_알린다(self) -> None:
@@ -290,7 +299,7 @@ class TestSemanticBranch(unittest.TestCase):
         c = _FakeClient([_hit("작품", "훈민정음")], knn_hits=_KNN_PASS)
         with self.assertLogs("src.search.entity_search_os", level="WARNING") as log:
             got = entity_search_os.match_entity_keys(c, "mm_entities", query="한글", query_vector=None)
-        self.assertEqual(got, {("작품", "훈민정음")})
+        self.assertEqual(got.keys, {("작품", "훈민정음")})
         self.assertEqual(len(c.bodies), 1)
         self.assertIn("벡터", " ".join(log.output))
 
@@ -347,15 +356,15 @@ class TestSemanticBranch(unittest.TestCase):
         """합집합이므로 같은 개체가 양쪽에 있어도 하나다(순위가 없으니 가중도 없다)."""
         c = _FakeClient([_hit("음식", "김치")], knn_hits=_KNN_PASS)
         got = entity_search_os.match_entity_keys(c, "mm_entities", query="김치", query_vector=_VEC)
-        self.assertEqual(len([k for k in got if k == ("음식", "김치")]), 1)
-        self.assertEqual(len(got), 4)
+        self.assertEqual(len([k for k in got.keys if k == ("음식", "김치")]), 1)
+        self.assertEqual(len(got.keys), 4)
 
     def test_두_갈래를_써도_두_번_부르면_같은_집합(self) -> None:
         """헌법 3조 — 같은 입력이면 같은 결과(집합이라 순서 자체가 없다)."""
-        def run() -> set[tuple[str, str]]:
+        def run() -> frozenset[tuple[str, str]]:
             return entity_search_os.match_entity_keys(
                 _FakeClient([_hit("작품", "훈민정음")], knn_hits=_KNN_PASS),
-                "mm_entities", query="한글", query_vector=_VEC)
+                "mm_entities", query="한글", query_vector=_VEC).keys
         self.assertEqual(run(), run())
 
     def test_순위_경로는_그대로다(self) -> None:
@@ -399,3 +408,80 @@ class Test낱말안의_형태소는_AND다(unittest.TestCase):
         self.assertEqual(len(clause["bool"]["filter"]), 2, "낱말 2개 → 절 2개(낱말 AND)")
         for per_word in clause["bool"]["filter"]:
             self.assertEqual(per_word["bool"]["minimum_should_match"], 1, "필드는 OR 유지")
+
+
+class Test걸린_이유를_값으로_돌려준다(unittest.TestCase):
+    """⑤ 집합 판정이 **어느 갈래로 들어왔는지**를 함께 돌려준다(099 후속 · 2026-09-17 사용자 결정).
+
+    왜 필요한가: 뜻(kNN)으로 걸린 결과는 **화면 어디에도 검색어가 보이지 않는다** — `왕실 무덤` 으로
+    찾으면 `영릉` 이 나오는데 그 카드에는 "왕실 무덤" 이라는 글자가 한 자도 없다. 근거를 함께 주지
+    않으면 사용자는 "검색이 고장났나"로 읽는다. 089·090·092 가 공들여 만든 설명 가능성이고,
+    집합 판정으로 갈아타며(G5) 잃었던 것을 되살린다.
+
+    🔴 **추가 질의는 없다.** 판정은 이미 낱말·의미 **두 갈래로 따로 계산**되고 마지막에 합쳐질
+    뿐이라, 버리지 않고 함께 돌려주기만 하면 된다. 이 파일이 "엔진 왕복이 늘지 않았다"를 함께 봉인한다.
+    """
+
+    def test_낱말_갈래와_의미_갈래를_따로_돌려준다(self) -> None:
+        c = _FakeClient([_hit("작품", "훈민정음")], knn_hits=_KNN_PASS)
+        got = entity_search_os.match_entity_keys(c, "mm_entities", query="발효", query_vector=_VEC)
+        self.assertEqual(got.text_keys, frozenset({("작품", "훈민정음")}))
+        self.assertEqual(got.semantic_keys,
+                         frozenset({("음식", "김치"), ("음식", "된장"), ("장소", "제주도"),
+                                    ("작품", "훈민정음")}))
+        self.assertTrue(got.semantic_gate_passed)
+
+    def test_합집합은_두_갈래를_합친_것과_같다(self) -> None:
+        """🔴 합집합이 **파생값**임을 못 박는다 — 갈래를 따로 돌려줘도 결과 집합은 종전과 같다."""
+        c = _FakeClient([_hit("작품", "훈민정음")], knn_hits=_KNN_PASS)
+        got = entity_search_os.match_entity_keys(c, "mm_entities", query="발효", query_vector=_VEC)
+        self.assertEqual(got.keys, got.text_keys | got.semantic_keys)
+
+    def test_글자로만_걸린_것과_뜻으로만_걸린_것이_갈린다(self) -> None:
+        """이 구분이 화면 문구의 재료다 — `김치` 는 글자가 없이(뜻으로) 걸렸으니 근거를 보여야 한다."""
+        c = _FakeClient([_hit("작품", "훈민정음")], knn_hits=_KNN_PASS)
+        got = entity_search_os.match_entity_keys(c, "mm_entities", query="발효", query_vector=_VEC)
+        self.assertIn(("음식", "김치"), got.semantic_keys)
+        self.assertNotIn(("음식", "김치"), got.text_keys)
+        self.assertIn(("작품", "훈민정음"), got.text_keys)
+
+    def test_두_갈래에_겹친_개체는_양쪽_모두에_있다(self) -> None:
+        """겹침을 한쪽으로 몰지 않는다 — 합집합에서 한 번인 것과 갈래 표시는 다른 이야기다."""
+        c = _FakeClient([_hit("음식", "김치")], knn_hits=_KNN_PASS)
+        got = entity_search_os.match_entity_keys(c, "mm_entities", query="김치", query_vector=_VEC)
+        self.assertIn(("음식", "김치"), got.text_keys)
+        self.assertIn(("음식", "김치"), got.semantic_keys)
+        self.assertEqual(len(got.keys), 4, "합집합은 여전히 한 번씩이다")
+
+    def test_게이트가_막으면_의미_갈래는_비고_그_사실이_값으로_남는다(self) -> None:
+        """로그만 두면 화면이 근거를 보일 수 없다 — ``EntitySemanticMatch`` 를 만든 그 이유다."""
+        c = _FakeClient([_hit("작품", "훈민정음")], knn_hits=_KNN_BLOCK)
+        got = entity_search_os.match_entity_keys(c, "mm_entities", query="한글", query_vector=_VEC)
+        self.assertFalse(got.semantic_gate_passed)
+        self.assertEqual(got.semantic_keys, frozenset())
+        self.assertEqual(got.text_keys, frozenset({("작품", "훈민정음")}))
+        self.assertEqual(got.keys, got.text_keys, "① 낱말 갈래는 게이트와 무관하게 남는다")
+
+    def test_벡터가_없으면_의미_갈래가_통째로_비어_있다(self) -> None:
+        c = _FakeClient([_hit("작품", "훈민정음")], knn_hits=_KNN_PASS)
+        with self.assertLogs("src.search.entity_search_os", level="WARNING"):
+            got = entity_search_os.match_entity_keys(
+                c, "mm_entities", query="한글", query_vector=None)
+        self.assertFalse(got.semantic_gate_passed)
+        self.assertEqual(got.semantic_keys, frozenset())
+        self.assertEqual(got.keys, got.text_keys)
+
+    def test_갈래를_돌려줘도_엔진_왕복은_그대로다(self) -> None:
+        """🔴 근거를 실으려고 **질의를 더 던지지 않는다** — 이미 계산된 것을 버리지 않을 뿐이다."""
+        c = _FakeClient([_hit("작품", "훈민정음")], knn_hits=_KNN_PASS)
+        entity_search_os.match_entity_keys(c, "mm_entities", query="한글", query_vector=_VEC)
+        self.assertEqual(len(c.bodies), 2, "낱말 1회 + 의미 1회 — 종전과 같다")
+
+    def test_반환_모양이_EntitySemanticMatch_와_결이_같다(self) -> None:
+        """둘 다 NamedTuple 이고 키 집합은 ``frozenset`` 이다 — 호출부가 실수로 고치지 못하게."""
+        c = _FakeClient([_hit("작품", "훈민정음")], knn_hits=_KNN_PASS)
+        got = entity_search_os.match_entity_keys(c, "mm_entities", query="한글", query_vector=_VEC)
+        self.assertIsInstance(got, entity_search_os.EntityMatchSet)
+        self.assertIsInstance(got, tuple)
+        for field in (got.keys, got.text_keys, got.semantic_keys):
+            self.assertIsInstance(field, frozenset)

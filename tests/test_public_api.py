@@ -87,9 +87,12 @@ PUBLIC_API: dict[str, tuple[str, ...]] = {
     # 집합도 **뜻으로 찾는다**(2026-09-17 결정): 낱말 매칭 ∪ 게이트를 통과한 kNN 창.
     # ``semantic_entity_keys``·``EntitySemanticMatch`` 를 올리는 이유는 게이트 차단 사실을
     # **값으로** 읽는 경로이기 때문이다(로그만 두면 화면이 근거를 보일 수 없다).
+    # ``EntityMatchSet`` 은 ``match_entity_keys`` 의 **반환 모양**이다 — 결과 집합과 「어느 갈래로
+    # 걸렸는지」를 함께 싣는다(2026-09-17 결정). 뜻(kNN)으로 걸린 결과는 화면에 검색어가 보이지
+    # 않아(`왕실 무덤`→`영릉`) 근거를 못 보이면 사용자가 검색을 의심한다.
     "src.search.entity_search_os": (
         "search_entities_hybrid", "match_entity_keys", "entity_match_clause",
-        "semantic_entity_keys", "EntitySemanticMatch",
+        "semantic_entity_keys", "EntitySemanticMatch", "EntityMatchSet",
     ),
     "src.mm_meta.entity_search": (
         "split_query", "match_entity_reason", "narrow_entities", "fuse_entity_results", "gate_semantic_hits",
