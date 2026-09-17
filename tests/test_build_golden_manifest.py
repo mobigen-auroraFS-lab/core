@@ -226,7 +226,9 @@ class TestResolveQueries(unittest.TestCase):
         self.assertEqual(report["dropped"], [{"id": "M0001", "query": "없다"}])
 
     def test_토픽_태그는_파일명_토픽키로_채운다(self) -> None:
-        # 정합 가드(golden_guard.uncovered_topics)가 코퍼스 토픽과 대조하는 태그.
+        # 추적용 태그. ⚠️ 099 T031 이후 **정합 가드는 이 태그를 쓰지 않는다** —
+        # 가드 기준이 자산 id 커버리지(golden_guard.uncovered_assets)로 바뀌었다.
+        # 태그 자체는 옛 골든 도구 호환·사람 눈 확인용으로 계속 채운다(계약 유지).
         entries = [{"id": "M0001", "query": "탑", "kinds": ["국보"], "keys": ["k1"],
                     "files": ["youtube_사막_3bTA2c2n2QI.jpg", "탑.txt"]}]
         queries, _ = resolve_queries(entries, {"youtube_사막_3bTA2c2n2QI.jpg": ["id-b"], "탑.txt": ["id-a"]})
