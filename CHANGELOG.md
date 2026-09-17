@@ -13,11 +13,21 @@
 
 ## [Unreleased] — 2026-09-17 (099 G4 개체 검색을 **집합 판정**으로 · 개체 화이트리스트 필터)
 
+> 🔴 **2026-09-17 결정 뒤집기**: 이 블록의 초안은 집합 판정에서 **의미(kNN)를 빼고** 낱말 매칭만 쓰기로
+> 했었다. 사용자 결정으로 **의미 검색을 되살렸다** — 낱말만 쓰면 `발효`→김치 같은 어휘 불일치를 통째로
+> 잃는데, 그것이 바로 spec `090-entity-semantic-search` 가 통째로 풀려던 문제였기 때문이다. 아래
+> `match_entity_keys` 항목은 **되살린 뒤의 계약**이다(미배포 블록이라 그 자리에서 고쳤다).
+
 ### 추가 (MINOR — 기존 호출 무변경)
-- `search.entity_search_os.match_entity_keys(client, index, *, query, max_hits=10000) -> set[(entity_type, entity_uid)]` — 낱말에 **맞는 개체 전부**의 키 집합. 순위가 아니라 **집합**이며, 순서·쪽 나누기·카드 재료는 DB 목록(`list_entities`)이 맡는다. 🔴 **찾아오기(`q`)와 결과 내 재검색이 이 함수 하나를 쓴다**(spec 099 §3-2a) — 둘 다 「낱말을 던져 매칭 개체 집합을 얻기」라서다. 호출부가 교집합(`A ∩ B`)으로 합친다.
-  - 🔴 **임계가 0개다**: 점수 컷·kNN 게이트·상위 N 절단을 쓰지 않는다. 셋 다 순위를 매기는 장치인데 집합 판정에는 순위가 없다. 부수 효과로 "후보 깊이를 늘리면 min-max 정규화 모수와 게이트 배경이 함께 움직인다"는 결합이 이 경로에는 **원천적으로 없다**.
+- `search.entity_search_os.match_entity_keys(client, index, *, query, query_vector, max_hits=10000, candidate_size=20, gate_eps=0.15) -> set[(entity_type, entity_uid)]` — 질의에 **맞는 개체 전부**의 키 집합. 순위가 아니라 **집합**이며, 순서·쪽 나누기·카드 재료는 DB 목록(`list_entities`)이 맡는다. 🔴 **찾아오기(`q`)와 결과 내 재검색이 이 함수 하나를 쓴다**(spec 099 §3-2a) — 둘 다 「질의를 던져 매칭 개체 집합을 얻기」라서다. 호출부가 교집합(`A ∩ B`)으로 합친다.
+  - 🔴 **집합 = ① BM25 낱말 매칭 전부 ∪ ② (kNN 게이트 통과 시) kNN 창 안 전부**(순수 합집합 · 순위 없음). 낱말만 쓰면 **글자가 없는 매칭**을 통째로 잃는다 — `발효`→김치 0건 · `도자기`→고려청자 0건. 089 이후 남은 검색 실패 30건이 그 어휘 불일치였다(spec `090-entity-semantic-search` 가 통째로 그것을 위한 것).
+  - ② 는 **새 임계를 만들지 않는다** — 순위 경로가 쓰는 게이트(`gate_signal` + `passes_cutoff(eps=0.15, floor=0)`)를 같은 기본값으로 그대로 쓴다. 절대 코사인 하한은 두지 않는다(실측: 무의미 질의 1등 0.442 vs 유관 질의 1등 0.456 — 붙어 있어 절대값으로 못 가른다. 자산의 `SEMANTIC_MIN_COSINE_DEFAULT=0.60` 은 개체에 쓰면 전 구간이 잘린다).
+  - 🔴 **② 의 kNN 창은 `candidate_size`(20) 고정** — `max_hits` 를 창으로 쓰지 않는다. 창을 키우면 게이트 배경(하위 절반 평균)이 내려가 게이트가 **반드시 더 관대해진다**(099 T020 단조성 증명). eps 0.15 의 보정 전제를 지키는 장치다.
+  - 🔴 `query_vector` 는 **기본값 없는 필수 키워드**다(깜빡하면 `TypeError`). `None` 은 "의미 갈래를 끈다"는 명시적 선택이며, 그때도 경고 로그를 남긴다 — 의미 재현이 조용히 사라지지 않게.
   - ⚠️ **빈 질의는 `ValueError`** — 빈 집합(=0건)과 "묻지 않았다"(=필터 없음)를 같은 값으로 만들면 교집합에서 결과가 통째로 사라진다.
-  - 매칭이 상한(`max_hits`)에 닿으면 **경고 로그**를 남긴다(조용히 잘린 집합 방지). 현 노출 개체 822건 기준 기본 상한은 12배다.
+  - 로그로 드러나는 것 셋: 낱말 갈래가 상한(`max_hits`)에서 잘림 · 의미 갈래가 **게이트에 막힘**(top·baseline·격차·eps 동봉) · 의미 갈래가 꺼짐(벡터 미제공/후보 0건).
+- `search.entity_search_os.semantic_entity_keys(client, index, *, query_vector, candidate_size=20, gate_eps=0.15) -> EntitySemanticMatch` — ② 갈래 단독 진입점. 게이트 차단 사실을 **값으로** 읽는 경로다(로그만 두면 화면이 근거를 보일 수 없다).
+  - `EntitySemanticMatch(keys, gate_passed, top, baseline, sample_size)` — `gate_passed=False` 이면 `keys` 는 빈 집합(일부만 버리지 않고 통째로 버린다 · 090 후속 게이트 계약). `sample_size=0` 은 "막혔다"가 아니라 "후보가 없었다"를 뜻한다.
 - `search.entity_search_os.entity_match_clause(query) -> dict | None` — 위 판정의 순수 부품(엔진 없이 단위 검증 가능). **낱말끼리 AND · 한 낱말 안에서 필드끼리 OR**(091 §2-4 규율 = 파일 경로 `file_search.refine_clause` 와 같은 규칙). 빈 값이면 `None`. ⚠️ `multi_match`+`operator=and` 를 쓰지 않는다 — 그것은 **한 필드 안에** 모든 낱말이 있기를 요구해 `전통음식`(키워드) + `배추`(구성 자산 요약) 같은 흔한 경우가 통째로 탈락한다.
 - 상수 `src.config.search_constants.ENTITY_MATCH_FIELDS_DEFAULT`(= `name`·`keywords`·`description`·`member` · 색인 텍스트 필드 전량) · `ENTITY_MATCH_MAX_HITS_DEFAULT`(= 10,000). 공개 API 표에는 올리지 않는다(소비 레포가 직접 쓰지 않음 · 근거는 상수 주석).
 - `relations.graph_query.list_entities(…, uid_allow=None)` · `count_entities(…, uid_allow=None)` — 개체 **화이트리스트 필터**. 집합 판정 결과를 목록·총계에 얹는 자리다. 🔴 **`None` 과 빈 집합은 다른 값이다**: `None` = 필터 없음(**종전과 완전히 같은 결과**) · `set()` = **0건**(매칭 없음). 판정을 파이썬이 아니라 **SQL 에서** 가른다(배열이 `NULL` 이면 조건이 열리고, 빈 배열이면 `unnest` 가 0행이라 `EXISTS` 가 거짓). 섞으면 "검색했는데 전체가 나오는" 조용한 오류가 된다.

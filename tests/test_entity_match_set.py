@@ -2,12 +2,18 @@
 
 무엇을 봉인하나
 
-① **경계 기준은 「BM25 낱말 매칭 여부」 하나다**(T018 결정 · 2026-09-17).
-   임계(BM25 점수 컷)·kNN 게이트·상위 N 절단을 **쓰지 않는다**. 셋 다 "순위를 매기기 위한"
-   장치인데 집합 판정에는 순위가 없기 때문이다 — 정렬은 DB(구성 자산 수 내림차순)가 한다.
-   🔴 임계를 고르지 않는 것이 이 결정의 핵심 이득이다: 개체 검색을 잴 골든이 현재 **없어서**
-   (092 의 82개 개체 질의셋은 코퍼스 전면 교체로 사망) 보정이 필요한 값을 새로 들이면
-   근거 없이 고른 숫자가 된다.
+① **집합은 두 갈래의 합집합이다**(2026-09-17 사용자 결정 — T018 의 「낱말만」을 **뒤집었다**)::
+
+       집합 = ① BM25 낱말 매칭 전부  ∪  ② (kNN 게이트 통과 시) kNN 창 안 전부
+
+   왜 되살렸나: 낱말만 쓰면 **글자가 없는 매칭**을 통째로 잃는다 — `발효`→김치 0건,
+   `도자기`→고려청자 0건. 089 이후 남은 실패 30건이 정확히 그 어휘 불일치였고,
+   `090-entity-semantic-search` 스펙 하나가 통째로 그것을 풀려고 있었다. 의미(kNN)를 빼는 것은
+   그 스펙을 되돌리는 일이다.
+   🔴 ② 는 **새 임계를 만들지 않는다** — 순위 경로가 쓰는 그 게이트(``gate_signal`` +
+   ``passes_cutoff(eps=0.15, floor=0)``)를 **그대로** 쓴다. 절대 코사인 하한 하나로는 가를 수
+   없기 때문이다(실측: 무의미 질의 `존재하지않는낱말xyz` 1등 0.442 vs 유관 `불교 건축` 0.456 —
+   붙어 있다). 자산의 ``SEMANTIC_MIN_COSINE_DEFAULT=0.60`` 을 개체에 쓰면 전 구간이 잘린다.
 ② **낱말끼리 AND · 한 낱말 안에서 필드끼리 OR** — 091 §2-4 규율이자 G3 파일 경로
    (``file_search.refine_clause``)와 **같은 규칙**이다. 화면마다 다른 규칙을 기억할 이유가 없다
    (spec 099 §3-4 사용자 결정).
@@ -15,6 +21,9 @@
    모든 낱말이 있기를 요구한다(`전통음식`은 키워드에, `배추`는 요약에 있는 흔한 경우가 전부 탈락).
 ③ **순위 경로(``search_entities_hybrid``)의 기본값은 그대로다** — 되돌림 경로이므로 손대지 않는다
    (plan 099 §1-④). 이 파일이 그 불변을 함께 지킨다.
+④ **kNN 창은 ``candidate_size``(20)로 고정한다** — 창을 키우면 게이트 배경(하위 절반 평균)이
+   내려가 게이트가 **반드시 더 관대해진다**(T020 단조성 증명). 창을 고정해야 2026-09-01 보정
+   전제가 유지된다. 이 파일이 "상한(``max_hits``)을 키워도 창은 그대로"를 봉인한다.
 """
 
 from __future__ import annotations
@@ -26,6 +35,10 @@ from typing import Any
 from src.config import search_constants
 from src.search import entity_search_os
 from src.search.entity_index import ENTITY_TEXT_FIELDS
+from src.search.file_search import SEMANTIC_MIN_COSINE_DEFAULT
+
+# 합집합 시험용 질의 벡터(값은 아무거나 — 가짜 클라이언트는 벡터를 보지 않고 미리 정한 hit 을 준다).
+_VEC = [0.1, 0.2, 0.3]
 
 
 class TestMatchBoundaryDecision(unittest.TestCase):
@@ -60,21 +73,44 @@ class TestMatchBoundaryDecision(unittest.TestCase):
 
 
 class _FakeClient:
-    """search 호출 본문을 기억하고 미리 정한 hit 을 준다(실 OS 불필요)."""
+    """search 호출 본문을 기억하고 미리 정한 hit 을 준다(실 OS 불필요).
 
-    def __init__(self, hits: list[dict[str, Any]] | None = None, total: int | None = None) -> None:
+    본문에 ``knn`` 이 있으면 **의미 갈래**, 없으면 **낱말 갈래**로 갈라 답한다 — 한 클라이언트가
+    두 갈래를 흉내 내야 합집합을 볼 수 있다.
+    """
+
+    def __init__(self, hits: list[dict[str, Any]] | None = None, total: int | None = None,
+                 knn_hits: list[dict[str, Any]] | None = None) -> None:
         self._hits = hits or []
         self._total = len(self._hits) if total is None else total
+        self._knn_hits = knn_hits or []
         self.bodies: list[dict[str, Any]] = []
 
     def search(self, index: str, body: dict[str, Any]) -> dict[str, Any]:  # noqa: D102
         self.bodies.append(body)
+        if "knn" in json.dumps(body, ensure_ascii=False):
+            return {"hits": {"total": {"value": len(self._knn_hits), "relation": "eq"},
+                             "hits": self._knn_hits}}
         return {"hits": {"total": {"value": self._total, "relation": "eq"}, "hits": self._hits}}
 
 
 def _hit(etype: str, uid: str) -> dict[str, Any]:
     return {"_id": f"{etype}/{uid}", "_score": 1.0,
             "_source": {"entity_type": etype, "entity_uid": uid}}
+
+
+def _knn_hit(etype: str, uid: str, cosine: float) -> dict[str, Any]:
+    """코사인을 lucene knn ``_score``(=(1+cos)/2)로 되돌린 hit 을 만든다(환산식 대칭)."""
+    return {"_id": f"{etype}/{uid}", "_score": (1.0 + cosine) / 2.0,
+            "_source": {"entity_type": etype, "entity_uid": uid}}
+
+
+# 게이트 통과 표본: 1등이 무리에서 튀어나온 모양(top 0.60 · 배경 0.37 · 격차 0.23 ≥ 0.15).
+_KNN_PASS = [_knn_hit("음식", "김치", 0.60), _knn_hit("음식", "된장", 0.40),
+             _knn_hit("장소", "제주도", 0.38), _knn_hit("작품", "훈민정음", 0.36)]
+# 게이트 차단 표본: 전원이 비슷하게 어중간(top 0.50 · 배경 0.455 · 격차 0.045 < 0.15).
+_KNN_BLOCK = [_knn_hit("음식", "김치", 0.50), _knn_hit("음식", "된장", 0.48),
+              _knn_hit("장소", "제주도", 0.46), _knn_hit("작품", "훈민정음", 0.45)]
 
 
 class TestEntityMatchClause(unittest.TestCase):
@@ -120,35 +156,38 @@ class TestMatchEntityKeys(unittest.TestCase):
 
     def test_매칭_개체의_키_집합을_돌려준다(self) -> None:
         c = _FakeClient([_hit("작품", "훈민정음"), _hit("장소", "제주도")])
-        got = entity_search_os.match_entity_keys(c, "mm_entities", query="한글")
+        got = entity_search_os.match_entity_keys(c, "mm_entities", query="한글", query_vector=None)
         self.assertEqual(got, {("작품", "훈민정음"), ("장소", "제주도")})
         self.assertIsInstance(got, set)
 
     def test_같은_개체가_여러_번_와도_한_번이다(self) -> None:
         c = _FakeClient([_hit("작품", "훈민정음"), _hit("작품", "훈민정음")])
-        self.assertEqual(len(entity_search_os.match_entity_keys(c, "mm_entities", query="한글")), 1)
+        self.assertEqual(len(entity_search_os.match_entity_keys(c, "mm_entities", query="한글", query_vector=None)), 1)
 
     def test_결과가_없으면_빈_집합(self) -> None:
         """🔴 빈 집합은 **0건**이다 — "필터 없음"이 아니다(호출부가 섞으면 검색했는데 전체가 나온다)."""
         self.assertEqual(
-            entity_search_os.match_entity_keys(_FakeClient([]), "mm_entities", query="없는말"), set())
+            entity_search_os.match_entity_keys(_FakeClient([]), "mm_entities", query="없는말", query_vector=None), set())
 
     def test_빈_질의는_거부한다(self) -> None:
         """빈 질의에 빈 집합을 돌려주면 "0건"과 "안 물어봤다"가 같은 값이 된다 — 교집합에서 전부 사라진다."""
         for blank in (None, "", "   "):
             with self.assertRaises(ValueError):
-                entity_search_os.match_entity_keys(_FakeClient([]), "mm_entities", query=blank)
+                entity_search_os.match_entity_keys(_FakeClient([]), "mm_entities", query=blank, query_vector=None)
 
-    def test_kNN_도_게이트도_정규화도_없다(self) -> None:
-        """🔴 T018 결정 — 순위 장치를 쓰지 않는다. 질의는 **한 번**이고 본문에 벡터가 없다."""
+    def test_낱말_갈래에는_순위_장치가_없다(self) -> None:
+        """① 갈래는 "맞았나"만 본다 — 점수 컷·정규화·상위 N 절단이 없고 본문에 벡터도 없다.
+
+        의미(kNN)는 **별도 질의**(② 갈래)로 나가므로 낱말 본문에는 여전히 ``knn`` 이 없다.
+        """
         c = _FakeClient([_hit("작품", "훈민정음")])
-        entity_search_os.match_entity_keys(c, "mm_entities", query="한글")
+        entity_search_os.match_entity_keys(c, "mm_entities", query="한글", query_vector=None)
         self.assertEqual(len(c.bodies), 1)
         self.assertNotIn("knn", json.dumps(c.bodies[0], ensure_ascii=False))
 
     def test_본문은_상한까지_받고_키만_읽는다(self) -> None:
         c = _FakeClient([])
-        entity_search_os.match_entity_keys(c, "mm_entities", query="한글")
+        entity_search_os.match_entity_keys(c, "mm_entities", query="한글", query_vector=None)
         body = c.bodies[0]
         self.assertEqual(body["size"], search_constants.ENTITY_MATCH_MAX_HITS_DEFAULT)
         self.assertEqual(body["_source"], ["entity_type", "entity_uid"])
@@ -157,31 +196,206 @@ class TestMatchEntityKeys(unittest.TestCase):
     def test_source_가_없어도_문서_id_로_되살린다(self) -> None:
         """색인 문서 모양이 바뀌어도 검색이 죽지 않게 — 문서 id 규약(``타입/표기``)이 정본이다."""
         c = _FakeClient([{"_id": "작품/훈민정음", "_score": 1.0}])
-        self.assertEqual(entity_search_os.match_entity_keys(c, "mm_entities", query="한글"),
+        self.assertEqual(entity_search_os.match_entity_keys(c, "mm_entities", query="한글", query_vector=None),
                          {("작품", "훈민정음")})
 
     def test_상한에_걸리면_경고를_남긴다(self) -> None:
         """조용히 잘리면 "검색했는데 있어야 할 게 없는" 오류가 관측되지 않는다."""
         c = _FakeClient([_hit("작품", "훈민정음")], total=99_999)
         with self.assertLogs("src.search.entity_search_os", level="WARNING") as log:
-            entity_search_os.match_entity_keys(c, "mm_entities", query="한글", max_hits=1)
+            entity_search_os.match_entity_keys(c, "mm_entities", query="한글", query_vector=None, max_hits=1)
         self.assertIn("99999", " ".join(log.output))
 
     def test_두_번_불러도_같은_집합(self) -> None:
         """헌법 3조 — 같은 입력이면 같은 결과."""
         hits = [_hit("작품", "훈민정음"), _hit("장소", "제주도")]
-        first = entity_search_os.match_entity_keys(_FakeClient(hits), "mm_entities", query="한글")
-        second = entity_search_os.match_entity_keys(_FakeClient(hits), "mm_entities", query="한글")
+        first = entity_search_os.match_entity_keys(_FakeClient(hits), "mm_entities", query="한글", query_vector=None)
+        second = entity_search_os.match_entity_keys(_FakeClient(hits), "mm_entities", query="한글", query_vector=None)
         self.assertEqual(first, second)
 
     def test_질의와_좁히기가_같은_함수를_쓴다(self) -> None:
         """🔴 spec §3-2a — ``q`` 와 refine 은 둘 다 「낱말을 던져 매칭 개체 집합을 얻기」다.
         같은 함수라 한쪽만 고쳐지는 사고가 원리상 없다."""
         hits = [_hit("작품", "훈민정음")]
-        as_query = entity_search_os.match_entity_keys(_FakeClient(hits), "mm_entities", query="한글")
-        as_refine = entity_search_os.match_entity_keys(_FakeClient(hits), "mm_entities", query="한글")
+        as_query = entity_search_os.match_entity_keys(_FakeClient(hits), "mm_entities", query="한글", query_vector=None)
+        as_refine = entity_search_os.match_entity_keys(_FakeClient(hits), "mm_entities", query="한글", query_vector=None)
         self.assertEqual(as_query, as_refine)
+
+
+class TestSemanticBranch(unittest.TestCase):
+    """④ 의미(kNN) 갈래 — 2026-09-17 사용자 결정으로 **되살렸다**(T018 뒤집기).
+
+    비유: 낱말 갈래는 "그 글자가 적혀 있나"를 보는 색인 카드이고, 의미 갈래는 "뜻이 가까운가"를
+    보는 사서다. 사서가 아무 근거 없이 아무 책이나 집어 오는 것을 막는 장치가 **게이트**다 —
+    "1등이 나머지 무리보다 튀어나왔나"를 묻고, 아니면 사서의 추천을 **통째로** 버린다.
+    """
+
+    def test_집합은_낱말과_의미의_합집합이다(self) -> None:
+        """🔴 되살린 이유: 낱말만 쓰면 `발효`→김치처럼 **글자가 없는 매칭**을 통째로 잃는다."""
+        c = _FakeClient([_hit("작품", "훈민정음")], knn_hits=_KNN_PASS)
+        got = entity_search_os.match_entity_keys(c, "mm_entities", query="발효", query_vector=_VEC)
+        self.assertEqual(got, {("작품", "훈민정음"), ("음식", "김치"), ("음식", "된장"),
+                               ("장소", "제주도")})
+
+    def test_질의는_두_번이고_두_번째가_kNN이다(self) -> None:
+        """갈래가 둘이라 엔진 왕복도 둘이다. 순서는 낱말 → 의미(낱말 본문이 ``bodies[0]``)."""
+        c = _FakeClient([_hit("작품", "훈민정음")], knn_hits=_KNN_PASS)
+        entity_search_os.match_entity_keys(c, "mm_entities", query="한글", query_vector=_VEC)
+        self.assertEqual(len(c.bodies), 2)
+        self.assertNotIn("knn", json.dumps(c.bodies[0], ensure_ascii=False))
+        self.assertIn("knn", json.dumps(c.bodies[1], ensure_ascii=False))
+        self.assertEqual(c.bodies[1]["query"]["knn"]["vec"]["vector"], _VEC)
+
+    def test_게이트가_막으면_의미는_빠지고_낱말은_그대로_남는다(self) -> None:
+        """🔴 게이트는 ② 갈래에만 건다 — ① 낱말 결과를 막으면 재현율이 무너진다(092 실측 90%→50%)."""
+        c = _FakeClient([_hit("작품", "훈민정음")], knn_hits=_KNN_BLOCK)
+        got = entity_search_os.match_entity_keys(c, "mm_entities", query="한글", query_vector=_VEC)
+        self.assertEqual(got, {("작품", "훈민정음")})
+
+    def test_게이트_차단을_로그로_알린다(self) -> None:
+        """조용히 사라지면 "왜 못 찾지"를 추적할 수 없다 — 격차·임계를 함께 남긴다."""
+        c = _FakeClient([_hit("작품", "훈민정음")], knn_hits=_KNN_BLOCK)
+        with self.assertLogs("src.search.entity_search_os", level="WARNING") as log:
+            entity_search_os.match_entity_keys(c, "mm_entities", query="한글", query_vector=_VEC)
+        line = " ".join(log.output)
+        self.assertIn("게이트", line)
+        self.assertIn("0.15", line)
+
+    def test_게이트_차단을_반환값으로도_읽을_수_있다(self) -> None:
+        """로그는 사후 추적용이다. 호출부가 화면에 근거를 싣고 싶으면 **값**이 필요하다."""
+        blocked = entity_search_os.semantic_entity_keys(
+            _FakeClient(knn_hits=_KNN_BLOCK), "mm_entities", query_vector=_VEC)
+        self.assertFalse(blocked.gate_passed)
+        self.assertEqual(blocked.keys, frozenset())
+        self.assertEqual(blocked.sample_size, 4)
+
+        passed = entity_search_os.semantic_entity_keys(
+            _FakeClient(knn_hits=_KNN_PASS), "mm_entities", query_vector=_VEC)
+        self.assertTrue(passed.gate_passed)
+        self.assertEqual(len(passed.keys), 4)
+        self.assertAlmostEqual(passed.top, 0.60, places=6)
+        self.assertAlmostEqual(passed.baseline, 0.37, places=6)
+
+    def test_의미_후보가_0건이면_차단과_다른_문구로_알린다(self) -> None:
+        """"게이트가 막았다"와 "애초에 후보가 없다"는 **다른 사건**이다 — 같은 문구면 오진한다."""
+        c = _FakeClient([_hit("작품", "훈민정음")], knn_hits=[])
+        with self.assertLogs("src.search.entity_search_os", level="WARNING") as log:
+            got = entity_search_os.match_entity_keys(c, "mm_entities", query="한글", query_vector=_VEC)
+        self.assertEqual(got, {("작품", "훈민정음")})
+        self.assertIn("후보가 0건", " ".join(log.output))
+
+    def test_벡터가_없으면_낱말_갈래만_쓰고_그_사실을_알린다(self) -> None:
+        """🔴 ``query_vector`` 는 **기본값이 없는 필수 인자**다 — 깜빡하면 TypeError 로 즉시 드러나고,
+        ``None`` 은 "의미를 일부러 껐다"는 **명시적 선택**이 된다(조용한 재현율 손실 차단)."""
+        c = _FakeClient([_hit("작품", "훈민정음")], knn_hits=_KNN_PASS)
+        with self.assertLogs("src.search.entity_search_os", level="WARNING") as log:
+            got = entity_search_os.match_entity_keys(c, "mm_entities", query="한글", query_vector=None)
+        self.assertEqual(got, {("작품", "훈민정음")})
+        self.assertEqual(len(c.bodies), 1)
+        self.assertIn("벡터", " ".join(log.output))
+
+    def test_kNN_창은_상한이_아니라_candidate_size_다(self) -> None:
+        """🔴 이번 설계의 핵심 고정점(T020): 창을 키우면 배경(하위 절반 평균)이 내려가 게이트가
+        **반드시 더 관대해진다**. 상한(10,000)을 창으로 쓰면 2026-09-01 보정 전제가 깨진다."""
+        c = _FakeClient([], knn_hits=_KNN_PASS)
+        entity_search_os.match_entity_keys(c, "mm_entities", query="한글", query_vector=_VEC,
+                                           max_hits=10_000)
+        knn_body = c.bodies[1]
+        self.assertEqual(knn_body["size"], entity_search_os.DEFAULT_CANDIDATE_SIZE)
+        self.assertEqual(knn_body["query"]["knn"]["vec"]["k"], entity_search_os.DEFAULT_CANDIDATE_SIZE)
+        self.assertEqual(c.bodies[0]["size"], 10_000)  # 낱말 갈래는 상한까지 — 여긴 순위가 없다
+
+    def test_창을_바꾸면_size_와_k_가_함께_움직인다(self) -> None:
+        """둘이 갈리면 표본(정규화·게이트 모수)과 받은 결과 수가 어긋난다."""
+        c = _FakeClient([], knn_hits=_KNN_PASS)
+        entity_search_os.match_entity_keys(c, "mm_entities", query="한글", query_vector=_VEC,
+                                           candidate_size=7)
+        self.assertEqual(c.bodies[1]["size"], 7)
+        self.assertEqual(c.bodies[1]["query"]["knn"]["vec"]["k"], 7)
+
+    def test_절대_코사인_하한을_두지_않는다(self) -> None:
+        """실측(2026-09-17): 무의미 질의 1등 0.442 vs 유관 질의 1등 0.456 — 절대값으로는 못 가른다.
+        자산의 ``SEMANTIC_MIN_COSINE_DEFAULT``(0.60)를 개체에 쓰면 전 구간(≤0.64)이 잘린다."""
+        low = [_knn_hit("음식", "김치", 0.25), _knn_hit("음식", "된장", 0.05),
+               _knn_hit("장소", "제주도", 0.05), _knn_hit("작품", "훈민정음", 0.05)]
+        got = entity_search_os.semantic_entity_keys(
+            _FakeClient(knn_hits=low), "mm_entities", query_vector=_VEC)
+        self.assertTrue(got.gate_passed)
+        self.assertLess(got.top, SEMANTIC_MIN_COSINE_DEFAULT)
+
+    def test_격차가_모자라면_절대값이_높아도_막힌다(self) -> None:
+        """게이트는 "1등이 무리에서 튀어나왔나"만 본다 — 반 전체가 60점인데 1등이 62점이면 뜻이 없다."""
+        flat = [_knn_hit("음식", "김치", 0.64), _knn_hit("음식", "된장", 0.62),
+                _knn_hit("장소", "제주도", 0.61), _knn_hit("작품", "훈민정음", 0.60)]
+        got = entity_search_os.semantic_entity_keys(
+            _FakeClient(knn_hits=flat), "mm_entities", query_vector=_VEC)
+        self.assertFalse(got.gate_passed)
+
+    def test_게이트_기본값은_순위_경로와_같은_0_15_다(self) -> None:
+        """🔴 새 임계를 만들지 않는다 — ``search_entities_hybrid`` 와 **같은 함수·같은 기본값**.
+        경계 격차 0.15 는 통과, 0.14 는 차단(``passes_cutoff`` 의 ``>=`` 규약)."""
+        self.assertEqual(search_constants.ENTITY_SEMANTIC_GATE_EPS_DEFAULT, 0.15)
+        edge = [_knn_hit("음식", "김치", 0.60), _knn_hit("음식", "된장", 0.45),
+                _knn_hit("장소", "제주도", 0.45), _knn_hit("작품", "훈민정음", 0.45)]
+        self.assertTrue(entity_search_os.semantic_entity_keys(
+            _FakeClient(knn_hits=edge), "mm_entities", query_vector=_VEC).gate_passed)
+        under = [_knn_hit("음식", "김치", 0.59), *edge[1:]]
+        self.assertFalse(entity_search_os.semantic_entity_keys(
+            _FakeClient(knn_hits=under), "mm_entities", query_vector=_VEC).gate_passed)
+
+    def test_두_갈래에_겹쳐도_한_번이다(self) -> None:
+        """합집합이므로 같은 개체가 양쪽에 있어도 하나다(순위가 없으니 가중도 없다)."""
+        c = _FakeClient([_hit("음식", "김치")], knn_hits=_KNN_PASS)
+        got = entity_search_os.match_entity_keys(c, "mm_entities", query="김치", query_vector=_VEC)
+        self.assertEqual(len([k for k in got if k == ("음식", "김치")]), 1)
+        self.assertEqual(len(got), 4)
+
+    def test_두_갈래를_써도_두_번_부르면_같은_집합(self) -> None:
+        """헌법 3조 — 같은 입력이면 같은 결과(집합이라 순서 자체가 없다)."""
+        def run() -> set[tuple[str, str]]:
+            return entity_search_os.match_entity_keys(
+                _FakeClient([_hit("작품", "훈민정음")], knn_hits=_KNN_PASS),
+                "mm_entities", query="한글", query_vector=_VEC)
+        self.assertEqual(run(), run())
+
+    def test_순위_경로는_그대로다(self) -> None:
+        """되돌림 경로 보존 — 집합 경로를 고쳐도 ``search_entities_hybrid`` 는 종전 그대로 동작한다."""
+        c = _FakeClient([_hit("작품", "훈민정음")], knn_hits=_KNN_PASS)
+        rows = entity_search_os.search_entities_hybrid(
+            c, "mm_entities", query="한글", query_vector=_VEC)
+        self.assertLessEqual(len(rows), search_constants.ENTITY_SEARCH_TOP_N_DEFAULT)
+        self.assertEqual(c.bodies[0]["size"], entity_search_os.DEFAULT_CANDIDATE_SIZE)
+        self.assertIn("multi_match", json.dumps(c.bodies[0], ensure_ascii=False))
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Test낱말안의_형태소는_AND다(unittest.TestCase):
+    """🔴 한 낱말이 형태소로 쪼개질 때 **그 조각들은 모두** 있어야 한다(실측 회귀).
+
+    2026-09-17 실 색인 실측: ``operator`` 를 주지 않으면 ``match`` 기본이 **OR** 라
+    ``존재하지않는낱말xyz`` 가 nori 로 ``['존재','하','지','않','는','낱','말','xyz']`` 로 쪼개지고
+    ``하``·``지``·``말`` 같은 흔한 조각 하나만 걸려도 통과한다 — **822개 중 818개(99.5%)가 매칭**됐다.
+    ``숭례문`` 도 92건(→ 고친 뒤 4건), ``석굴암`` 70건(→ 15건)으로 노이즈였다.
+
+    ⚠️ 이것은 필드 간 ``and`` 가 **아니다**(그건 모듈 docstring 이 금지한 것 — `전통음식`+`배추` 가
+    서로 다른 필드에 있으면 탈락한다). 낱말 **하나 안에서** 그 낱말의 형태소 조각들이 **한 필드 안에**
+    모두 있어야 한다는 뜻이며, 낱말끼리 AND · 필드끼리 OR 라는 계약은 그대로다.
+    """
+
+    def test_각_match_에_operator_and_가_붙는다(self) -> None:
+        clause = entity_search_os.entity_match_clause("숭례문")
+        assert clause is not None
+        for per_word in clause["bool"]["filter"]:
+            for m in per_word["bool"]["should"]:
+                (field, spec), = m["match"].items()
+                self.assertEqual(spec.get("operator"), "and", f"{field} 에 operator=and 가 없다")
+
+    def test_필드끼리는_여전히_OR_다(self) -> None:
+        clause = entity_search_os.entity_match_clause("전통음식 배추")
+        assert clause is not None
+        self.assertEqual(len(clause["bool"]["filter"]), 2, "낱말 2개 → 절 2개(낱말 AND)")
+        for per_word in clause["bool"]["filter"]:
+            self.assertEqual(per_word["bool"]["minimum_should_match"], 1, "필드는 OR 유지")

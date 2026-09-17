@@ -84,8 +84,12 @@ PUBLIC_API: dict[str, tuple[str, ...]] = {
     ),
     # 099 G4: 같은 인덱스를 보지만 **계약이 둘**이다 — 순위(``search_entities_hybrid``)와
     # 집합(``match_entity_keys``). 뒤엣것을 ``q``·결과 내 재검색이 함께 쓴다(spec 099 §3-2a).
+    # 집합도 **뜻으로 찾는다**(2026-09-17 결정): 낱말 매칭 ∪ 게이트를 통과한 kNN 창.
+    # ``semantic_entity_keys``·``EntitySemanticMatch`` 를 올리는 이유는 게이트 차단 사실을
+    # **값으로** 읽는 경로이기 때문이다(로그만 두면 화면이 근거를 보일 수 없다).
     "src.search.entity_search_os": (
         "search_entities_hybrid", "match_entity_keys", "entity_match_clause",
+        "semantic_entity_keys", "EntitySemanticMatch",
     ),
     "src.mm_meta.entity_search": (
         "split_query", "match_entity_reason", "narrow_entities", "fuse_entity_results", "gate_semantic_hits",

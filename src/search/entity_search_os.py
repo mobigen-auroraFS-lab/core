@@ -24,13 +24,29 @@ BM25 노이즈는 "그 글자가 실제로 있어서" 걸린 것이라 화면에
 | 함수 | 무엇을 돌려주나 | 쓰는 장치 | 누가 순서를 정하나 |
 |---|---|---|---|
 | ``search_entities_hybrid`` | **가장 맞는 5개**(순위) | BM25 + kNN + 게이트 + min-max 융합 | 융합 점수 |
-| ``match_entity_keys`` | **맞는 것 전부**(집합) | BM25 낱말 매칭 하나 | DB 목록(구성 자산 수 내림차순) |
+| ``match_entity_keys`` | **맞는 것 전부**(집합) | BM25 낱말 매칭 **∪** 게이트 통과한 kNN 창 | DB 목록(구성 자산 수 내림차순) |
 
 099 는 "결과 내 재검색"을 **결과 집합 전체**에 적용하기로 했다(spec §3-1). 그러려면 기반이 상위 5가
 아니라 집합이어야 한다. 그리고 개체도 낱말 단위로 맞추기로 하면서 ``q`` 와 재검색이 **같은 일**
 (낱말을 던져 매칭 개체 집합을 얻기)이 되어 함수 하나로 접혔다(spec §3-2a) — 한쪽만 고쳐지는 사고가
 원리상 없어진다. 순위 경로는 **되돌림 경로로 그대로 남긴다**(plan §1-④ · 097 이 ``search_files`` 를
 두고 ``browse_files`` 를 새로 만든 것과 같은 판단).
+
+🔴 **집합도 「뜻」으로 찾는다 — 두 갈래의 합집합**(2026-09-17 사용자 결정. T018 의 "낱말만"을 뒤집었다)::
+
+    집합 = ① BM25 낱말 매칭 전부  ∪  ② (kNN 게이트 통과 시) kNN 창(20) 안 전부
+
+낱말만 쓰면 **글자가 없는 매칭**을 통째로 잃는다 — `발효`→김치 0건, `도자기`→고려청자 0건.
+089 이후 남은 검색 실패 30건이 바로 그 어휘 불일치였고, `090-entity-semantic-search` 스펙 하나가
+통째로 그것을 풀려고 있었다. 도서관에 비유하면 ① 은 "제목에 그 글자가 있는 책"을 뽑는 색인 카드고,
+② 는 "뜻이 가까운 책"을 집어 오는 사서다. 사서가 아무 근거 없이 아무 책이나 들고 오지 않도록
+**게이트**("1등이 나머지 무리보다 튀어나왔나")를 통과할 때만 ② 를 더한다.
+
+⚠️ **절대 코사인 하한으로는 못 가른다**(2026-09-17 실 색인 실측). 무의미 질의 `존재하지않는낱말xyz`
+1등이 **0.442** 인데 유관 질의 `불교 건축` 1등이 **0.456** 이라 값이 붙어 있다. 자산 검색의
+``SEMANTIC_MIN_COSINE_DEFAULT``(0.60)를 개체에 쓰면 개체 전 구간(≤0.64)이 잘린다. 그래서 개체는
+**상대 게이트**(``gate_signal`` + ``passes_cutoff(eps=0.15, floor=0)``)를 그대로 쓴다 —
+🔴 **새 임계를 만들지 않는다**(재보정할 개체 골든이 없어서, 새 숫자는 근거 없는 숫자가 된다).
 
 설계 배경: `specs/092-entity-search-opensearch`(spec §2 · plan §설계 결정) ·
 `specs/099-refine-requery-entity-cursor`(spec §3-2·§3-2a · tasks T018·T019)
@@ -40,7 +56,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, NamedTuple
 
 from src.config.search_constants import (
     ENTITY_BM25_FIELDS_DEFAULT,
@@ -203,6 +219,10 @@ def entity_match_clause(query: str | None) -> dict[str, Any] | None:
     낱말은 구성 자산 요약에 있는 경우가 흔해서 **한 필드에 전부** 있기를 요구하면 거의 걸리지 않는다
     (091 §2-4). 반대로 낱말끼리 OR 로 하면 좁혀지지 않는다 — 그건 찾아오기 규칙이다.
 
+    ⚠️ **재검토 지점**: 낱말 결합자는 ``and`` 다. 092 순위 경로가 고른 ``or`` 였다면 집합이 더
+    넓어졌을 것이다(한 낱말만 맞은 개체까지 들어와 재현율↑·무관 결과↑ — 092 스윕 0.4→1.4건/질의).
+    지금은 어느 쪽이 나은지 **판정할 개체 골든이 없어** 현행을 유지한다. 골든이 생기면 여기를 다시 본다.
+
     ⚠️ 그래서 ``multi_match`` + ``operator=and`` 를 쓰지 않는다. ``multi_match`` 의 ``and`` 는
     "한 필드 안에 모든 낱말"이라 위의 흔한 경우가 통째로 탈락한다. 파일 검색의
     ``file_search.refine_clause`` 와 **같은 모양**인 이유이기도 하다 — 화면마다 다른 규칙을 사용자가
@@ -222,7 +242,15 @@ def entity_match_clause(query: str | None) -> dict[str, Any] | None:
         return None
     return {"bool": {"filter": [
         {"bool": {
-            "should": [{"match": {field: {"query": token}}}
+            # 🔴 ``operator=and`` 는 **한 낱말이 형태소로 쪼개졌을 때 그 조각들**에 건다.
+            #   없으면 ``match`` 기본이 OR 라 조각 하나만 걸려도 통과한다 — 2026-09-17 실 색인 실측:
+            #   ``존재하지않는낱말xyz`` → nori ``['존재','하','지','않','는','낱','말','xyz']`` →
+            #   ``하``·``지``·``말`` 같은 흔한 조각 때문에 **822개 중 818개(99.5%)** 가 매칭됐다
+            #   (``숭례문`` 92→4 · ``석굴암`` 70→15 도 같은 노이즈였다).
+            # ⚠️ 이것은 **필드 간** and 가 아니다(그건 위 docstring 이 금지한 것 — `전통음식`+`배추` 가
+            #   서로 다른 필드에 있으면 탈락한다). 낱말끼리 AND · 필드끼리 OR 라는 계약은 그대로이고,
+            #   여기서 조이는 것은 **낱말 하나 안의 형태소 조각**이다.
+            "should": [{"match": {field: {"query": token, "operator": "and"}}}
                        for field in ENTITY_MATCH_FIELDS_DEFAULT],
             "minimum_should_match": 1,
         }}
@@ -230,33 +258,131 @@ def entity_match_clause(query: str | None) -> dict[str, Any] | None:
     ]}}
 
 
+class EntitySemanticMatch(NamedTuple):
+    """의미(kNN) 갈래의 결과 — 키 집합과 **게이트 판정 사실**을 함께 돌려준다.
+
+    왜 사실까지 돌려주나: 게이트가 막으면 의미 갈래가 통째로 사라지는데, 그 일이 조용히 일어나면
+    호출부는 "왜 못 찾지"를 추적할 수 없다. 로그는 사후 추적용이고, 값은 화면이 근거를 보여 줄 때
+    쓴다(044 의 "질의 근거를 응답에 싣는다"와 같은 취지).
+
+    Attributes:
+        keys: 통과했을 때의 개체 키 ``(entity_type, entity_uid)`` 집합. 막혔으면 **빈 집합**이다.
+        gate_passed: 게이트를 통과했는지. 후보가 0건이어도 ``False`` 이므로 "막혔다"와 "후보가
+            없다"를 가르려면 ``sample_size`` 를 함께 본다.
+        top: 표본의 최고 코사인(진단용 · 표본이 없으면 0.0).
+        baseline: 배경 수준 = 표본 하위 절반 평균(진단용 · 표본이 2개 미만이면 0.0).
+        sample_size: 실제로 받은 kNN 후보 수(≤ 창 크기). 0이면 색인에 후보 자체가 없었다는 뜻.
+    """
+
+    keys: frozenset[tuple[str, str]]
+    gate_passed: bool
+    top: float
+    baseline: float
+    sample_size: int
+
+
+def semantic_entity_keys(
+    client: Any,
+    index: str,
+    *,
+    query_vector: Sequence[float],
+    candidate_size: int = DEFAULT_CANDIDATE_SIZE,
+    gate_eps: float = ENTITY_SEMANTIC_GATE_EPS_DEFAULT,
+) -> EntitySemanticMatch:
+    """**뜻이 가까운** 개체를 kNN 으로 고르고, 믿을 만할 때만 돌려준다(099 G4 · 2026-09-17).
+
+    집합 판정의 ② 갈래다. ① 낱말 갈래가 "그 글자가 적혀 있나"를 보는 색인 카드라면 이쪽은 "뜻이
+    가까운가"를 보는 사서다 — `발효` 라고 물으면 그 글자가 없는 **김치**를 데려온다. 089 이후 남은
+    검색 실패 30건이 이 어휘 불일치였다.
+
+    🔴 **게이트는 순위 경로가 쓰는 그 장치 그대로다**(``gate_signal`` + ``passes_cutoff``).
+    새 임계를 만들지 않는다 — 재보정할 개체 골든이 지금 없어서(092 질의셋은 코퍼스 전면 교체로
+    정답 0건) 새로 고른 숫자는 근거 없는 숫자가 된다. 절대 코사인 하한도 두지 않는다: 실측에서
+    무의미 질의 1등(0.442)과 유관 질의 1등(0.456)이 붙어 있어 절대값으로는 가를 수 없다.
+
+    🔴 **창(후보 깊이)은 ``candidate_size``(20)로 고정한다 — 이 고정이 설계의 핵심이다.**
+    창을 키우면 배경 수준(``baseline`` = 표본 하위 절반 평균)이 내려가고, 게이트가 보는 격차
+    ``top − baseline`` 이 커져 **반드시 더 관대해진다**(099 T020 단조성 증명: 풀 k→K(K≥2k) 이면
+    차단집합(K) ⊆ 차단집합(k)). 즉 창을 넓히면 "무관한데 통과"가 늘어난다. eps 0.15 는 2026-09-01
+    에 보정된 값이므로, 그 보정이 성립하려면 **창이 그때와 같은 모양**이어야 한다. 그래서 집합
+    상한(``max_hits`` = 10,000)을 이 창에 쓰지 않는다 — 상한은 ① 낱말 갈래의 폭주 방지선일 뿐이다.
+
+    Args:
+        client: OpenSearch 클라이언트.
+        index: 개체 인덱스 이름(자산 인덱스와 다르다).
+        query_vector: 질의 임베딩(저장 차원). 🔴 개체 벡터와 **같은 모델·같은 채널**이어야 한다 —
+            다른 모델로 만들면 유사도가 뜻을 잃는다(090 G4 에서 실제로 겪었다).
+        candidate_size: kNN 창 크기(=받을 후보 수 = ``k``). 🔴 **키우지 말 것**(위 단조성).
+        gate_eps: 게이트 임계((top − baseline) 하한). 기본은 090 후속 실측 확정치 0.15.
+
+    Returns:
+        ``EntitySemanticMatch``. 게이트를 못 넘거나 후보가 없으면 ``keys`` 가 빈 집합이다
+        (일부만 버리지 않는다 — 통째로 버리는 것이 090 후속 게이트의 계약이다).
+    """
+    body = {
+        # 🔴 size 와 k 를 **같은 값**으로 묶는다. 갈리면 게이트·정규화가 보는 표본과 실제로 받은
+        #    결과 수가 어긋나 판정 근거가 흔들린다.
+        "size": int(candidate_size),
+        "_source": ["entity_type", "entity_uid"],
+        "query": {"knn": {"vec": {"vector": list(query_vector), "k": int(candidate_size)}}},
+    }
+    hits = (client.search(index=index, body=body) or {}).get("hits", {}) or {}
+    rows = _rows(hits.get("hits", []) or [])
+    cosines = [knn_score_to_cosine(score) for _doc_id, _etype, _uid, score in rows]
+    top, baseline = gate_signal(cosines)
+    passed = bool(rows) and passes_cutoff(top, baseline, eps=gate_eps, floor=_GATE_NO_FLOOR)
+    keys = (frozenset((etype, uid) for _doc_id, etype, uid, _score in rows if uid)
+            if passed else frozenset())
+    return EntitySemanticMatch(keys=keys, gate_passed=passed, top=top, baseline=baseline,
+                               sample_size=len(rows))
+
+
 def match_entity_keys(
     client: Any,
     index: str,
     *,
     query: str | None,
+    query_vector: Sequence[float] | None,
     max_hits: int = ENTITY_MATCH_MAX_HITS_DEFAULT,
+    candidate_size: int = DEFAULT_CANDIDATE_SIZE,
+    gate_eps: float = ENTITY_SEMANTIC_GATE_EPS_DEFAULT,
 ) -> set[tuple[str, str]]:
-    """낱말에 **맞는 개체 전부**의 키 집합을 구한다(순위 없음 · 099 G4 · FR-003).
+    """질의에 **맞는 개체 전부**의 키 집합을 구한다(순위 없음 · 099 G4 · FR-003).
 
     ``search_entities_hybrid`` 가 "가장 맞는 5개"라면 이 함수는 "맞는 것 전부"다. 화면은 이 집합을
     ``graph_query.list_entities(uid_allow=…)`` 에 얹어 **구성 자산 수 내림차순**으로 정렬하고 커서로
     이어 읽는다 — 순서를 DB 가 정하므로 여기서 점수를 매길 이유가 없다(spec §3-2a).
 
-    🔴 **찾아오기(``q``)와 좁히기(재검색)가 이 함수 하나를 쓴다.** 둘 다 「낱말을 던져 매칭 개체
+    **집합 = ① 낱말 매칭 전부 ∪ ② (게이트 통과 시) kNN 창 안 전부**(2026-09-17 사용자 결정).
+    둘은 **순수 합집합**이다 — 순위를 매기지 않으므로 어느 갈래로 들어왔는지에 가중을 주지 않는다.
+    ① 은 "글자가 맞았나"만 보고(임계·정규화·절단 없음), ② 는 "뜻이 가까운가"를 본다. ② 를 빼면
+    `발효`→김치처럼 글자가 없는 매칭을 통째로 잃는다(090 스펙이 통째로 그것을 위한 것이다).
+
+    🔴 **찾아오기(``q``)와 좁히기(재검색)가 이 함수 하나를 쓴다.** 둘 다 「질의를 던져 매칭 개체
     집합을 얻기」라서다. 결과는 호출부가 교집합으로 합친다(``A ∩ B``) — refine 이 ``q`` 질의를
     바꾸지 않으므로 좁힌 결과는 언제나 좁히기 전 결과의 **부분집합**이다(spec §3-1 · FR-002).
 
-    🔴 **임계가 없다**(T018). 점수 컷·kNN 게이트·상위 N 절단을 쓰지 않는다 — 셋 다 순위를 매기는
-    장치이고, 집합 판정에는 순위가 없다. 덤으로 "후보 깊이를 늘리면 정규화 모수와 게이트 배경이
-    함께 움직인다"는 결합이 이 경로에서는 원천적으로 없다(T020).
+    🔴 **게이트는 ② 에만 건다.** ① 까지 막으면 단어 하나 재현율이 90% → 50% 로 무너진다(092 실측) —
+    "벡터 신호가 약하다"와 "글자가 맞았다"는 다른 이야기이기 때문이다(자산 검색의 lexical rescue
+    와 같은 취지). ② 가 막히면 **경고 로그**를 남긴다(아래 Returns 아래 문단).
+
+    ⚠️ **낱말 결합자는 ``and`` 다**(``entity_match_clause``). 092 순위 경로가 고른 ``or`` 였다면
+    집합이 **더 넓어졌을 것**이다 — 한 낱말만 맞은 개체까지 들어오므로 재현율은 오르고 무관 결과도
+    함께 는다(092 스윕: 무관 0.4 → 1.4건/질의). 지금은 어느 쪽이 나은지 **판정할 개체 골든이 없어**
+    현행(``and``)을 유지한다. 골든이 생기면 이 한 줄이 재검토 지점이다.
 
     Args:
         client: OpenSearch 클라이언트.
         index: 개체 인덱스 이름(자산 인덱스와 다르다).
         query: 낱말들(공백 구분). 형태소 분석은 엔진이 한다.
-        max_hits: 한 번에 받아올 매칭 개체 수 상한(**순위 절단이 아니라 폭주 방지선**).
-            상한에 닿으면 집합이 불완전해지므로 경고 로그를 남긴다.
+        query_vector: 질의 임베딩(개체 색인과 같은 모델·채널). 🔴 **기본값을 두지 않는다** —
+            깜빡 빠뜨리면 의미 재현이 조용히 사라지므로 호출부가 매번 명시하게 한다.
+            ``None`` 은 "의미 갈래를 일부러 끈다"는 **명시적 선택**이며, 그때도 경고 로그를 남긴다.
+        max_hits: ① 낱말 갈래에서 한 번에 받아올 매칭 개체 수 상한(**순위 절단이 아니라 폭주
+            방지선**). 상한에 닿으면 집합이 불완전해지므로 경고 로그를 남긴다.
+            🔴 이 값은 ② 의 창이 **아니다**(창을 넓히면 게이트가 관대해진다 · 위 함수 주석).
+        candidate_size: ② kNN 창 크기(기본 20 · 고정이 원칙).
+        gate_eps: ② 게이트 임계. 순위 경로와 **같은 기본값**(0.15)을 쓴다.
 
     Raises:
         ValueError: ``query`` 가 비었을 때. 🔴 빈 집합(=0건)과 "묻지 않았다"(=필터 없음)는 **다른
@@ -266,6 +392,10 @@ def match_entity_keys(
     Returns:
         ``{(entity_type, entity_uid), …}``. 매칭이 없으면 **빈 집합**(= 0건). 같은 입력이면 같은
         집합이다(헌법 3조 — 집합이라 순서 자체가 없다).
+
+    로그로 드러나는 것 셋(조용한 실패 방지): ① 낱말 갈래가 상한에서 잘림 · ② 의미 갈래가 게이트에
+    막힘(격차·임계 동봉) · ③ 의미 갈래가 아예 꺼짐(벡터 미제공 또는 후보 0건). 값으로 읽고 싶으면
+    ``semantic_entity_keys`` 를 직접 불러 ``gate_passed`` 를 본다.
     """
     clause = entity_match_clause(query)
     if clause is None:
@@ -285,7 +415,27 @@ def match_entity_keys(
     if total > len(rows):
         _LOG.warning("개체 집합 판정이 상한에서 잘렸다 — 매칭 %d건 중 %d건만 받았다(max_hits=%d)",
                      total, len(rows), int(max_hits))
-    return {(etype, uid) for _doc_id, etype, uid, _score in rows if uid}
+    keys = {(etype, uid) for _doc_id, etype, uid, _score in rows if uid}
+
+    if query_vector is None:
+        # 의미 갈래를 끈 채로 도는 상태는 **이례적**이다 — `발효`→김치 류를 못 찾게 되므로 남긴다.
+        _LOG.warning("개체 집합 판정에서 의미(kNN) 갈래가 꺼졌다 — 질의 벡터가 없다(낱말 매칭 %d건만)",
+                     len(keys))
+        return keys
+
+    semantic = semantic_entity_keys(client, index, query_vector=query_vector,
+                                    candidate_size=candidate_size, gate_eps=gate_eps)
+    if semantic.sample_size == 0:
+        _LOG.warning("개체 의미(kNN) 갈래의 후보가 0건이다 — 색인이 비었거나 벡터 필드가 없다"
+                     "(낱말 매칭 %d건만)", len(keys))
+    elif not semantic.gate_passed:
+        # 게이트 차단은 "정답이 없다"는 판정이라 **정상 동작**이지만, 조용하면 "왜 못 찾지"를
+        # 추적할 수 없다. 격차와 임계를 함께 남겨 사후에 판정을 재현할 수 있게 한다.
+        _LOG.warning("개체 의미(kNN) 갈래가 게이트에 막혔다 — top=%.4f baseline=%.4f "
+                     "격차=%.4f < eps=%.2f(후보 %d건) · 낱말 매칭 %d건만 남긴다",
+                     semantic.top, semantic.baseline, semantic.top - semantic.baseline,
+                     gate_eps, semantic.sample_size, len(keys))
+    return keys | set(semantic.keys)
 
 
 def _total_hits(total: Any, fallback: int) -> int:
@@ -306,5 +456,6 @@ def _total_hits(total: Any, fallback: int) -> int:
         return int(fallback)
 
 
-__all__ = ["DEFAULT_CANDIDATE_SIZE", "DEFAULT_FUSION_WEIGHTS", "entity_match_clause",
-           "match_entity_keys", "search_entities_hybrid"]
+__all__ = ["DEFAULT_CANDIDATE_SIZE", "DEFAULT_FUSION_WEIGHTS", "EntitySemanticMatch",
+           "entity_match_clause", "match_entity_keys", "search_entities_hybrid",
+           "semantic_entity_keys"]
