@@ -11,7 +11,8 @@
 
 결정성: 같은 코퍼스·설정에서 2회 동일(헌법 3조·rerank forward 결정적). 질의정규화 on 시에만 검색시점 LLM(gemma temp=0).
 
-실행: conda run -n AuroraFS python scripts/measure_search_golden.py [--query-norm {on,off}] [--skip-nomatch]
+실행: conda run -n AuroraFS python scripts/measure_search_golden.py [--query-norm {on,off}]
+            [--skip-nomatch] [--skip-rerank]
       (augment 측정엔 reranker 모델 로드 — RUN_OS_E2E 환경의 실OS·실모델 필요)
 """
 
@@ -72,6 +73,11 @@ def main() -> int:
     """
     parser = argparse.ArgumentParser(description="골든 58질의 검색 KPI 하니스(025·029)")
     parser.add_argument("--skip-nomatch", action="store_true", help="production no-match 측정 생략")
+    parser.add_argument(
+        "--skip-rerank", action="store_true",
+        help="augment(rerank) 조합 측정을 생략한다. 운영이 rerank off(os_rerank_enabled=False)면 "
+             "기준선에 쓰이지 않는 조합이라 리랭커 모델 로드와 질의당 수백 ms 를 통째로 아낀다.",
+    )
     parser.add_argument(
         "--query-norm", choices=["on", "off"], default="off",
         help="augment 위에 LLM 질의 명사구 정규화(gemma temp=0) 조합도 측정(검색시점 LLM·느림)",
@@ -233,7 +239,9 @@ def main() -> int:
     base027 = measure("027 gate-on", cutoff=True, rerank=False, qnorm=False, nomatch=nm)
     report(base027)
     # ③ augment(gate-on·rerank on) — SC-002 합격선: recall≥0.9396 ∧ 차단≥23/24 ∧ p@3≥0.8111.
-    report(measure("augment(rerank)", cutoff=True, rerank=True, qnorm=False, nomatch=nm), base027)
+    #    운영이 rerank off 인 동안에는 --skip-rerank 로 건너뛴다(기준선은 ②가 운영 경로다).
+    if not args.skip_rerank:
+        report(measure("augment(rerank)", cutoff=True, rerank=True, qnorm=False, nomatch=nm), base027)
     # ④ augment+질의정규화(검색시점 LLM gemma temp=0) — SC-003(--query-norm on 일 때만).
     if args.query_norm == "on":
         report(measure("augment+질의정규화", cutoff=True, rerank=True, qnorm=True, nomatch=nm), base027)
