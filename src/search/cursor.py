@@ -52,18 +52,28 @@ def encode_cursor(sort_name: str, sort_values: list[Any]) -> str:
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
-def decode_cursor(token: str, *, expect_sort: str) -> list[Any]:
-    """커서를 풀어 정렬값을 돌려준다 — **정렬이 다르면 거부**한다.
+def decode_cursor(token: str, *, expect_sort: str, expect_arity: int | None = None) -> list[Any]:
+    """커서를 풀어 정렬값을 돌려준다 — **정렬·개수·타입이 어긋나면 거부**한다.
+
+    🔴 개수·타입을 여기서 보는 이유(099 T005 · 코드리뷰 2026-09-16): 통과시키면 그 값이 그대로
+    ``search_after`` 로 흘러 검색 엔진이 400 을 내는데, 그 예외는 ``CursorError`` 가 아니라서
+    호출부가 400 으로 바꾸지 못하고 **HTTP 500** 이 된다. 사용자가 주소창의 커서 한 글자를 고친 것뿐인데
+    "서버 오류"가 뜨는 셈이다. 개체 목록(099)처럼 정렬 키 수가 다른 쓰임이 늘면 구버전 토큰으로도 같은
+    일이 나므로, 쓰기 전에 문 앞에서 막는다.
 
     Args:
         token: ``encode_cursor`` 가 만든 문자열.
         expect_sort: 이번 요청의 정렬 이름. 커서에 담긴 것과 다르면 ``CursorError``.
+        expect_arity: 이번 정렬이 쓰는 **정렬값 개수**(예: ``(수정일, asset_id)`` 면 2).
+            개수가 다르면 ``CursorError``. ``None``(기본)이면 개수를 따지지 않는다 —
+            종전 호출부를 깨지 않기 위한 하위호환이다. **타입(스칼라) 검사는 이 값과 무관하게 늘 돈다.**
 
     Returns:
         ``search_after`` 에 그대로 넣을 정렬값 목록.
 
     Raises:
-        CursorError: 토큰이 깨졌거나 · 모양이 다르거나 · 정렬이 어긋날 때.
+        CursorError: 토큰이 깨졌거나 · 모양이 다르거나 · 정렬이 어긋나거나 ·
+            정렬값 개수가 ``expect_arity`` 와 다르거나 · 원소가 스칼라가 아닐 때.
     """
     if not token:
         raise CursorError("커서가 비었다")
@@ -82,4 +92,12 @@ def decode_cursor(token: str, *, expect_sort: str) -> list[Any]:
     values = body["s"]
     if not isinstance(values, list) or not values:
         raise CursorError("커서에 정렬값이 없다")
+    if expect_arity is not None and len(values) != expect_arity:
+        # 구버전·위조 토큰. 개수가 맞지 않으면 엔진이 거부하거나 **엉뚱한 자리**에서 이어진다.
+        raise CursorError(
+            f"커서의 정렬값 개수({len(values)})가 요청({expect_arity})과 다르다 — 처음부터 다시 받아야 한다")
+    for v in values:
+        # 엔진의 ``search_after`` 가 받는 것은 스칼라뿐이다(bool 은 int 의 하위형이라 함께 통과).
+        if not isinstance(v, (str, int, float)) and v is not None:
+            raise CursorError(f"커서의 정렬값이 스칼라가 아니다: {type(v).__name__}")
     return values

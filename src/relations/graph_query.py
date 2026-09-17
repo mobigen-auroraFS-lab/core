@@ -438,7 +438,26 @@ _EXPOSED_ENTITIES_SQL = """
 """
 _TYPE_COND_SQL = "AND (%(etype)s::text IS NULL OR n.entity_type = %(etype)s)"
 
+# 이어읽기(keyset) 조건 — **동점 그룹을 갈라 잇는다**.
+# 정렬이 ``confirmed_count DESC, entity_uid ASC`` 라 튜플 비교(``(a,b) < (c,d)``)로는 못 쓴다(방향이 섞였다).
+# 🔴 동점 처리가 이 조건의 전부다: 구성 자산 수 3건짜리 개체가 수백 개인 것이 정상이라, 쪽 경계는
+#    거의 늘 동점 무더기 한가운데에 떨어진다. ``<`` 만 쓰면 그 무더기의 나머지를 **통째로 잃고**,
+#    ``<=`` 를 쓰면 **통째로 다시 읽는다**(중복). 둘 다 오류를 내지 않아 아무도 모른다.
+# NULL(커서 없음)이면 조건 전체가 참이 되어 첫 쪽이 된다 — 커서 유무로 SQL 을 갈라 두면 한쪽만
+# 고쳐져 첫 쪽과 다음 쪽의 정의가 어긋난다.
+_ENTITY_KEYSET_SQL = """
+      (%(after_count)s::bigint IS NULL
+       OR ent.confirmed_count < %(after_count)s::bigint
+       OR (ent.confirmed_count = %(after_count)s::bigint
+           AND ent.entity_uid > %(after_uid)s::text))
+"""
+
+# ⚠️ 본문을 CTE(``ent``)로 감싸는 이유: ``confirmed_count`` 는 ``HAVING COUNT(DISTINCT ge.src_node)``
+#    **집계**라 같은 질의의 ``WHERE`` 에서 비교할 수 없다(SQL 규칙 — "집계 함수는 WHERE 에 올 수 없다").
+#    한 겹 감싸면 바깥에서는 그냥 컬럼이라 이어읽기 조건을 걸 수 있다. PG12+ 는 한 번만 쓰이는
+#    비재귀 CTE 를 인라인하므로 최적화 장벽도 생기지 않는다.
 _LIST_ENTITIES_SQL = """
+WITH ent AS (
 SELECT n.entity_type, n.entity_uid, n.node_id,
        COALESCE(n.canonical->>'name', n.entity_uid) AS name,
        COALESCE(n.canonical->>'source', 'auto')     AS source,
@@ -493,8 +512,21 @@ SELECT n.entity_type, n.entity_uid, n.node_id,
  -- uq_node_entity(entity_type, entity_uid) 가 개체마다 node_id 1개를 보장한다.
  GROUP BY n.node_id, n.entity_type, n.entity_uid, n.canonical
 HAVING COUNT(DISTINCT ge.src_node) >= %(minsize)s
- ORDER BY confirmed_count DESC, n.entity_uid ASC
+)
+SELECT * FROM ent
+ WHERE {keyset}
+ ORDER BY ent.confirmed_count DESC, ent.entity_uid ASC
  LIMIT %(limit)s
+"""
+
+# 모수 총계(``scope_total`` — "좁히기를 지우면 N건") — **행을 조립하지 않는다**.
+# 목록 질의를 다시 돌려 ``len()`` 을 세면 배열 집계(ARRAY_AGG 5종)·전체 건수 서브쿼리까지 헛돌고,
+# 무엇보다 ``LIMIT`` 에 걸려 "돌려준 개수"가 나온다 — 그것은 모수가 아니다(화면에 200 이 찍히던 원인).
+# 노출 개체의 정의는 다른 세 집계 함수와 **같은 조각**(``_EXPOSED_ENTITIES_SQL``)을 쓴다. 정의가
+# 갈라지면 "822건 중 200건"의 822 와 목록이 서로 다른 모수를 말하게 된다.
+_COUNT_ENTITIES_SQL = """
+SELECT COUNT(*) AS n
+  FROM ({exposed}) t
 """
 
 _COUNT_BY_TYPE_SQL = """
@@ -584,6 +616,8 @@ def list_entities(
     limit: int,
     statuses: list[str] | None = None,
     form_skill_codes: list[str] | None = None,
+    after_count: int | None = None,
+    after_uid: str | None = None,
 ) -> list[dict[str, Any]]:
     """노출 개체(멀티모달 메타) **목록**을 구성 자산 수 내림차순으로 조회한다(읽기 전용 · 095 FR-1).
 
@@ -599,6 +633,14 @@ def list_entities(
         statuses: 소속 엣지 상태. ``None`` 이면 active+proposed(초기엔 전건 proposed 라 빼면 화면이 빈다).
         form_skill_codes: 형식 축(``forms``)으로 읽을 자산 라벨 스킬 코드들. ``None``·빈 목록이면 ``forms``
             는 빈 리스트다. 어느 스킬을 형식 축으로 보이나는 화면 정책이라 호출자가 준다(데모는 ``content_form`` 하나).
+        after_count: **이어읽기 책갈피** — 직전 쪽 마지막 개체의 ``confirmed_count``. 이 값보다 적은
+            개체(그리고 같은 값이면 ``after_uid`` 보다 뒤인 개체)부터 잇는다. ``None`` 이면 첫 쪽이다.
+        after_uid: 이어읽기 책갈피의 ``entity_uid``(동점 무더기를 가르는 유일 키). ``after_count`` 와
+            **둘 다** 주거나 둘 다 생략해야 한다 — 한쪽만 주면 ``ValueError``.
+
+    Raises:
+        ValueError: ``after_count``·``after_uid`` 중 한쪽만 준 경우. 조용히 무시하면 첫 쪽을 다시
+            돌려주어 **중복**이 나는데, 오류가 없어 화면은 그것을 알 수 없다.
 
     Returns:
         ``[{entity_type, entity_uid, node_id, name, source, description, confirmed_count, total_count,
@@ -606,6 +648,8 @@ def list_entities(
         배열 필드는 빈 값을 뺀 **가나다 순**이다(같은 입력이면 같은 순서 · 헌법 3조). ``keywords`` 는 원문
         **전부**다 — 상위 몇 개를 어떤 순서로 보일지는 호출자 몫. id 는 전부 문자열.
     """
+    if (after_count is None) != (after_uid is None):
+        raise ValueError("이어읽기 책갈피는 after_count·after_uid 를 함께 줘야 한다(반쪽이면 중복이 난다)")
     params = {
         "kind": MM_MEMBER_KIND_CODE,
         "statuses": _wanted_statuses(statuses),
@@ -613,9 +657,12 @@ def list_entities(
         "minsize": int(min_bundle_size),
         "limit": int(limit),
         "form_skills": [str(c) for c in (form_skill_codes or [])],
+        "after_count": None if after_count is None else int(after_count),
+        "after_uid": None if after_uid is None else str(after_uid),
         **_area_params(area_names),
     }
-    sql = _LIST_ENTITIES_SQL.format(area_filter=_ENTITY_AREA_FILTER_SQL.format(alias="n"))
+    sql = _LIST_ENTITIES_SQL.format(
+        area_filter=_ENTITY_AREA_FILTER_SQL.format(alias="n"), keyset=_ENTITY_KEYSET_SQL.strip())
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(sql, params)
         rows = cur.fetchall()
@@ -637,6 +684,47 @@ def list_entities(
         }
         for r in rows
     ]
+
+
+def count_entities(
+    conn: Connection[Any],
+    *,
+    entity_type: str | None = None,
+    area_names: list[str] | None = None,
+    min_bundle_size: int,
+    statuses: list[str] | None = None,
+) -> int:
+    """지금 걸린 조건으로 **노출 개체가 모두 몇 개인지** 센다(읽기 전용 · 099 FR-006).
+
+    화면의 "N건 중 M건"에서 **N** 을 만드는 값이다. 목록(``list_entities``)은 한 쪽(``limit``)만 돌려주므로
+    돌려준 개수를 세면 모수가 아니라 **쪽 크기**가 나온다 — 200개만 받아 놓고 "200건"이라 적던 것이
+    그 오해였다(실제 노출 대상은 822개). 조건은 목록과 **같게** 걸되 카드 재료(이름·모달리티·키워드…)는
+    조립하지 않는다. 새 LLM 호출 없음.
+
+    Args:
+        entity_type: 종류(타입) 필터. ``None`` 이면 전체.
+        area_names: 갈래(개체 라벨) 이름들 — **모두 가진** 개체만(AND). ``None``·빈 목록이면 필터 없음.
+        min_bundle_size: 노출 임계 — 구성 자산 수가 이 값 이상인 개체만(목록과 같은 값을 줘야 한다).
+        statuses: 소속 엣지 상태. ``None`` 이면 active+proposed(목록 기본과 같다).
+
+    Returns:
+        개체 수(0 이상). 상한에 걸리지 않는 **모수**다.
+    """
+    params = {
+        "kind": MM_MEMBER_KIND_CODE,
+        "statuses": _wanted_statuses(statuses),
+        "etype": entity_type,
+        "minsize": int(min_bundle_size),
+        **_area_params(area_names),
+    }
+    exposed = _EXPOSED_ENTITIES_SQL.format(
+        type_cond=_TYPE_COND_SQL,
+        area_cond="AND " + _ENTITY_AREA_FILTER_SQL.format(alias="n"),
+    )
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(_COUNT_ENTITIES_SQL.format(exposed=exposed), params)
+        row = cur.fetchone()
+    return int(row["n"]) if row else 0
 
 
 def count_entities_by_type(

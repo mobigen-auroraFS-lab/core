@@ -11,6 +11,20 @@
 | **MINOR** | 공개 API **추가** — 기존 호출은 그대로 동작 |
 | **PATCH** | 공개 API 무변경 — 내부 수정·버그 수정 |
 
+## [Unreleased] — 2026-09-17 (099 G1 개체 커서 순회 · 커서 토큰 개수·타입 검사)
+
+### 추가 (MINOR — 기존 호출 무변경)
+- `relations.graph_query.list_entities(…, after_count=None, after_uid=None)` — 개체 목록의 **이어읽기 책갈피**(무한 스크롤). 직전 쪽 마지막 개체의 `(confirmed_count, entity_uid)` 를 주면 그 다음부터 잇는다. 둘 다 생략하면 첫 쪽이고 **종전과 같은 결과**다. 한쪽만 주면 `ValueError`(반쪽 커서를 조용히 무시하면 첫 쪽을 다시 읽어 중복이 난다).
+  - `confirmed_count` 는 `HAVING COUNT(DISTINCT …)` **집계**라 `WHERE` 에서 비교할 수 없어, 본문을 CTE(`ent`)로 한 겹 감싸고 바깥에서 조건을 건다. 정렬이 `수 내림차순 + 표기 키 오름차순` 으로 섞여 있어 튜플 비교 대신 `수 < 기준 OR (수 = 기준 AND 표기 키 > 기준)` 로 쓴다 — **동점 무더기를 가르는 조건이 핵심이다**(dev 실측 최대 동점 그룹 291개 · `<` 만 쓰면 통째로 잃고 `<=` 면 통째로 중복).
+  - dev 실측: 822건 완주 · 중복 0 · 누락 0 · 쪽 크기(50·37)를 바꿔도 한 번에 받은 목록과 **완전 일치** · 2회 순회 순서 동일(헌법 3조).
+- `relations.graph_query.count_entities(conn, *, entity_type=None, area_names=None, min_bundle_size, statuses=None) -> int` — 지금 조건으로 **노출 개체가 모두 몇 개인지**(모수). 화면의 "N건 중 M건"에서 N 을 만든다. 목록은 한 쪽만 돌려주므로 돌려준 개수를 세면 쪽 크기가 나온다 — 200개만 받아 놓고 "200건"이라 적던 것이 그 오해였다(dev 실측 실제 노출 대상 **822개**). 노출 개체의 정의·필터는 기존 집계 함수들과 **같은 조각**을 쓰고, 카드 재료(배열 집계)는 조립하지 않는다.
+- 공개 API 표에 `src.search.cursor` 등재 — `encode_cursor` · `decode_cursor` · `CursorError`. 097 에서 표·목록·CHANGELOG 셋 다 빠져 백엔드(`routes_file_search.py`)가 **계약 밖 이름**을 import 하고 있었다(코드리뷰 2026-09-16 §11). 코드 변경 0 · 계약면 명시.
+
+### 변경 (MINOR — 인자 추가 · 잘못된 입력의 응답만 바뀜)
+- `search.cursor.decode_cursor(token, *, expect_sort, expect_arity=None)` — 정렬값 **개수** 검사를 붙였다. `expect_arity` 를 주면 개수가 다른 토큰을 `CursorError` 로 끊는다. 생략하면 개수를 따지지 않아 **기존 호출은 그대로**다.
+- 🔴 `decode_cursor` 가 정렬값 **원소 타입**(스칼라: 문자열·수·`None`)을 **항상** 검사한다. 종전에는 위조·구버전 토큰의 객체 원소가 그대로 통과해 `search_after` 로 흘렀고, 검색 엔진이 400 을 내면 그 예외는 `CursorError` 가 아니라서 호출부가 400 으로 바꾸지 못하고 **HTTP 500** 이 됐다(코드리뷰 2026-09-16). 이제 `CursorError` 로 끊긴다.
+  - ⚠️ **호출부 조치**: 새로 커서를 쓰는 곳은 `expect_arity=<정렬 키 수>` 를 주는 것을 권한다. 기존 파일 검색 경로(`file_search.browse_files`)는 이번 변경에서 **배선하지 않았다**(하위호환 유지).
+
 ## [Unreleased] — 2026-09-09 (형태소 분석기가 조사를 걷어낸다 · 분석기 어긋남 감지)
 
 ### 변경 (MINOR — 반환값 추가 · 기존 호출 무변경)

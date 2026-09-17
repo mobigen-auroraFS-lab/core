@@ -65,6 +65,74 @@ class 커서_거부(unittest.TestCase):
             decode_cursor(token, expect_sort="created_desc")
 
 
+class 커서_정렬값_모양(unittest.TestCase):
+    """099 T005 — 정렬값의 **개수·타입**을 되읽을 때 검사한다.
+
+    왜 여기서 막나: 검사가 없으면 위조·구버전 토큰이 그대로 ``search_after`` 로 흘러 검색 엔진이
+    400 을 내고, 그 예외는 ``CursorError`` 가 아니라서 호출부가 400 으로 바꾸지 못하고 **HTTP 500**
+    이 된다(코드리뷰 2026-09-16). 쓰레기 입력에 서버 오류로 답하는 셈이다.
+    """
+
+    def _forge(self, sort_name: str, values):
+        """검증을 건너뛰고 임의 정렬값을 담은 토큰을 만든다(위조·구버전 흉내).
+
+        Args:
+            sort_name: 토큰에 담을 정렬 이름.
+            values: 담을 정렬값 리스트(검사 없이 그대로 넣는다).
+
+        Returns:
+            base64 커서 문자열.
+        """
+        import base64
+        import json
+        raw = json.dumps({"o": sort_name, "s": values}, ensure_ascii=False).encode("utf-8")
+        return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+    def test_개수가_기대와_다르면_거부한다(self):
+        """구버전 토큰(정렬 키가 1개이던 시절)이 2키 정렬에 들어오는 상황."""
+        token = encode_cursor("created_desc", ["2026-09-11"])
+        with self.assertRaises(CursorError):
+            decode_cursor(token, expect_sort="created_desc", expect_arity=2)
+
+    def test_개수가_더_많아도_거부한다(self):
+        token = self._forge("created_desc", ["2026-09-11", "01a0", "군더더기"])
+        with self.assertRaises(CursorError):
+            decode_cursor(token, expect_sort="created_desc", expect_arity=2)
+
+    def test_개수가_맞으면_그대로_돌려준다(self):
+        values = ["2026-09-11T17:46:00", "018f0000-0000-7000-8000-000000000001"]
+        token = encode_cursor("created_desc", values)
+        self.assertEqual(
+            decode_cursor(token, expect_sort="created_desc", expect_arity=2), values)
+
+    def test_객체_원소를_거부한다(self):
+        """🔴 dict·list 는 ``search_after`` 가 받지 못한다 — 통과시키면 엔진 400 → HTTP 500."""
+        for bad in ([{"a": 1}, "01a0"], [["중첩"], "01a0"], ["2026-09-11", {"b": 2}]):
+            with self.subTest(bad=bad):
+                token = self._forge("created_desc", bad)
+                with self.assertRaises(CursorError):
+                    decode_cursor(token, expect_sort="created_desc", expect_arity=2)
+
+    def test_객체_원소는_개수를_묻지_않아도_거부한다(self):
+        """타입 검사는 **항상** 돈다 — ``expect_arity`` 를 안 준 기존 호출부도 500 이 새면 안 된다."""
+        token = self._forge("created_desc", [{"a": 1}, "01a0"])
+        with self.assertRaises(CursorError):
+            decode_cursor(token, expect_sort="created_desc")
+
+    def test_스칼라는_전부_통과한다(self):
+        """문자열·정수·실수·None 은 엔진이 받는 정렬값이다(널 필드는 null 로 온다)."""
+        values = ["가.mp4", 123, 1.5, None]
+        token = self._forge("name_asc", values)
+        self.assertEqual(
+            decode_cursor(token, expect_sort="name_asc", expect_arity=4), values)
+
+    def test_개수를_주지_않으면_따지지_않는다(self):
+        """하위호환 — 기존 호출부(``file_search``)는 인자를 주지 않고 종전대로 동작한다."""
+        token = encode_cursor("name_asc", ["가.mp4", "01a0", "덤"])
+        self.assertEqual(
+            decode_cursor(token, expect_sort="name_asc"), ["가.mp4", "01a0", "덤"])
+
+
 class 정렬_규약(unittest.TestCase):
     def test_모든_정렬이_두_번째_키로_asset_id_를_갖는다(self):
         """🔴 고유값이 없으면 같은 정렬값이 쪽 경계에 걸릴 때 **건너뛰거나 겹친다**.

@@ -43,7 +43,7 @@ PUBLIC_API: dict[str, tuple[str, ...]] = {
     "src.registry.access_tier": ("project_ext_meta", "principal_clearance"),
     "src.registry.ext_meta_field_registry": ("fetch_access_tiers", "validate_ext_meta"),
     "src.relations.graph_query": (
-        "fetch_relations_for_asset", "fetch_active_relations_for_asset", "mm_meta_of_asset", "mm_meta_bundle", "list_entities", "count_entities_by_type", "count_entities_by_area", "assets_of_entities",
+        "fetch_relations_for_asset", "fetch_active_relations_for_asset", "mm_meta_of_asset", "mm_meta_bundle", "list_entities", "count_entities", "count_entities_by_type", "count_entities_by_area", "assets_of_entities",
     ),
     "src.relations.approval_policy": ("TIER_ORDER", "tier_rank"),
     "src.relations.review": (
@@ -62,6 +62,9 @@ PUBLIC_API: dict[str, tuple[str, ...]] = {
         "SEMANTIC_MIN_COSINE_DEFAULT", "SEMANTIC_CAP_DEFAULT", "build_semantic_body",
         "SORT_OPTIONS", "SORT_DEFAULT", "SORT_DEPTH_DEFAULT",
     ),
+    # 099 T009: 097 이 등재를 빠뜨린 커서 규약을 여기서 올린다 — 백엔드가 이미
+    # ``CursorError`` 를 import 해 400 으로 바꾸고 있는데 표에 없어 계약 밖 이름이었다(코드리뷰 2026-09-16 §11).
+    "src.search.cursor": ("encode_cursor", "decode_cursor", "CursorError"),
     "src.search.tag_facets": ("aggregate_tag_facets", "normalize_tag_key"),
     "src.search.query_embed": ("embed_query_for_media_search",),
     # 096: 파이프라인 적재·재색인 경로가 쓰는 이름을 등재한다(코드 변경 0 · 계약면 명시).
