@@ -168,7 +168,7 @@ tests/          단위 테스트
 | 검색 | `src.search.search_tuning` | `SearchTuning` |
 | 검색 | `src.search.refine` | `refine_rows` · `refine_tokens` |
 | 검색 | `src.search.facets` | `aggregate_facets` |
-| 파일 검색 | `src.search.file_search` | `search_files` · `build_rank_body` · `build_facet_body` · `build_facet_plan` · `build_semantic_body` · `ABOUT_BRANCH_DEFAULT` · `FACET_FIELDS` · `FACET_SELF_FILTERS` · `RANK_DEPTH_DEFAULT` · `TOTAL_CAP_DEFAULT` · `FACET_SIZE_DEFAULT` · `SEARCH_PIPELINE_DEFAULT` · `WORD_OPERATOR_DEFAULT` · `SEMANTIC_MIN_COSINE_DEFAULT` · `SEMANTIC_CAP_DEFAULT` · `SORT_OPTIONS` · `SORT_DEFAULT` · `SORT_DEPTH_DEFAULT` |
+| 파일 검색 | `src.search.file_search` | `search_files` · `build_rank_body` · `build_facet_body` · `build_facet_plan` · `build_semantic_body` · `ABOUT_BRANCH_DEFAULT` · `FACET_FIELDS` · `FACET_SELF_FILTERS` · `RANK_DEPTH_DEFAULT` · `TOTAL_CAP_DEFAULT` · `FACET_SIZE_DEFAULT` · `SEARCH_PIPELINE_DEFAULT` · `WORD_OPERATOR_DEFAULT` · `SEMANTIC_MIN_COSINE_DEFAULT` · `SEMANTIC_CAP_DEFAULT` · `SORT_OPTIONS` · `SORT_DEFAULT` · `SORT_DEPTH_DEFAULT` · `browse_files` · `build_browse_body` · `browse_scope_clause` · `STABLE_SORTS` · `refine_clause` · `REFINE_FIELDS` |
 | 검색 커서 | `src.search.cursor` | `encode_cursor` · `decode_cursor` · `CursorError` |
 | 검색 | `src.search.tag_facets` | `aggregate_tag_facets` · `normalize_tag_key` |
 | 검색 | `src.search.query_embed` | `embed_query_for_media_search` |

@@ -11,6 +11,19 @@
 | **MINOR** | 공개 API **추가** — 기존 호출은 그대로 동작 |
 | **PATCH** | 공개 API 무변경 — 내부 수정·버그 수정 |
 
+## [Unreleased] — 2026-09-17 (099 G3 파일 결과 내 재검색을 **검색 엔진 질의 절**로)
+
+### 추가 (MINOR — 기존 호출 무변경)
+- `search.file_search.refine_clause(refine) -> dict | None` · `REFINE_FIELDS`(= `file_name`·`summary`·`keywords`) — 결과 내 재검색어를 **집합을 좁히는 AND 절**로 만드는 순수 부품. 낱말끼리 AND, 한 낱말 안에서 필드끼리 OR(091 §2-2·§2-4 규율 그대로). 빈 값이면 `None`(좁히지 않음 = 되돌림).
+- `search_files(…, refine=None)` · `browse_files(…, refine=None)` · `build_rank_body` · `build_browse_body` · `build_facet_body` · `build_facet_plan` 에 같은 인자 추가. 🔴 **랭킹·커서 두 경로가 같은 부품을 쓴다**(plan 099 §1-⑤) — 따로 만들면 한쪽만 고쳐져 경로에 따라 결과가 갈린다. 빈 값이면 질의 본문이 **종전과 바이트 동일**하다.
+- `search_files`·`browse_files` 응답에 **`scope_total`** 추가 — 좁히기 **이전** 결과 집합 크기(화면의 "지우면 N건"). `total` 은 좁히기 **이후** 모수이며 둘 다 **엔진이 센 모수**다. refine 을 준 요청에서만 질의가 하나 늘고(묶음이라 왕복은 그대로), refine 이 없으면 `scope_total == total`.
+- 공개 API 표에 `browse_files` · `build_browse_body` · `browse_scope_clause` · `STABLE_SORTS` 등재 — 097 이 표·목록·CHANGELOG 셋 다 빠뜨려 백엔드(`routes_file_search.py`)가 **계약 밖 이름**을 import 하고 있었다(코드리뷰 2026-09-16 §11 · G1 이월분). 코드 변경 0 · 계약면 명시.
+
+### 변경 (동작 변경 — 소비 레포 확인 필요)
+- 🔴 **파일 refine 의 매칭이 「부분 문자열」에서 「낱말(형태소)」로 바뀐다**(spec 099 §3-4 · 2026-09-17 사용자 결정). 색인 텍스트 필드가 `nori_user` 분석기라 질의 절로 옮기면 분석기가 같이 걸린다. `치찌` 로 `김치찌개` 가 걸리던 **엉뚱한 매칭이 사라지고**, `김치를` 처럼 조사가 붙어도 걸린다. 대체로 더 정확하지만 **결과가 달라진다** — 091 의 D1(위양성 0)·D2(다어절)는 새 방식으로 재측정 대상이다(SC-008).
+- 🔴 refine 이 **결과 집합 전체**에 걸린다. 종전에는 받아 온 한 페이지 안에서만 좁혀 2쪽 이후 자산은 구조적으로 닿지 못했다(091 §2-3 의 의도된 한계 · 099 가 그 전제를 개정). 커서 순회 중 refine 이 바뀌면 집합이 바뀌므로 화면은 **커서를 버리고 처음부터** 받아야 한다.
+- `browse_files` 가 커서를 풀 때 정렬값 **개수**까지 대조한다(`decode_cursor(…, expect_arity=len(SORT_OPTIONS[sort]))`). 종전에는 개수가 틀린 위조·구버전 토큰이 `search_after` 로 흘러 엔진 400 → **HTTP 500** 이 됐다. 이제 `CursorError` 라 호출부가 400 으로 바꾼다(099 G1 이월 · 코드리뷰 2026-09-16).
+
 ## [Unreleased] — 2026-09-17 (099 G1 개체 커서 순회 · 커서 토큰 개수·타입 검사)
 
 ### 추가 (MINOR — 기존 호출 무변경)

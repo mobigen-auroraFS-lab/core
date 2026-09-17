@@ -61,6 +61,11 @@ PUBLIC_API: dict[str, tuple[str, ...]] = {
         "FACET_SIZE_DEFAULT", "SEARCH_PIPELINE_DEFAULT", "WORD_OPERATOR_DEFAULT",
         "SEMANTIC_MIN_COSINE_DEFAULT", "SEMANTIC_CAP_DEFAULT", "build_semantic_body",
         "SORT_OPTIONS", "SORT_DEFAULT", "SORT_DEPTH_DEFAULT",
+        # 099 G1 이월: 097 이 등재를 빠뜨린 커서 훑기 경로. 백엔드가 이미
+        # ``routes_file_search.py`` 에서 ``browse_files``·``STABLE_SORTS`` 를 import 하고 있었다.
+        # 099 G3: refine 을 엔진 질의 절로 옮기며 늘어난 이름(``refine_clause``·``REFINE_FIELDS``).
+        "browse_files", "build_browse_body", "browse_scope_clause", "STABLE_SORTS",
+        "refine_clause", "REFINE_FIELDS",
     ),
     # 099 T009: 097 이 등재를 빠뜨린 커서 규약을 여기서 올린다 — 백엔드가 이미
     # ``CursorError`` 를 import 해 400 으로 바꾸고 있는데 표에 없어 계약 밖 이름이었다(코드리뷰 2026-09-16 §11).

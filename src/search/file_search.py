@@ -238,6 +238,14 @@ SORT_DEFAULT = "relevance"
 # 필드 정렬로 넘길 수 있는 깊이. 하이브리드와 달리 이웃 탐색이 없어 깊이 제약이 색인 결과창뿐이다.
 SORT_DEPTH_DEFAULT = 10_000
 
+# 결과 내 재검색(refine)이 글자를 찾아보는 **색인 필드**. 091 파이썬판(``asset_refine_fields``)이
+#   보던 축과 같다 — 파일명 · 요약 · 태그. 셋을 고른 이유는 **화면 카드·표에 실제로 보이는 값**이기
+#   때문이다("보이는 것으로 걸러진다"는 계약이 서면 사용자가 결과에 놀라지 않는다).
+# 🔴 태그의 **색인 이름은 ``keywords``** 다(응답 행의 ``tags`` 는 이 필드를 옮겨 담은 것 · ``_row``).
+#   정확 일치용 ``keywords_norm``(keyword 타입)을 쓰면 안 된다 — 그쪽은 태그 하나를 통째로 비교하는
+#   칸이라 `배추` 로 `배추김치` 태그를 못 찾는다. 여기 셋은 전부 ``nori_user`` text 필드라 낱말로 맞는다.
+REFINE_FIELDS: tuple[str, ...] = ("file_name", "summary", "keywords")
+
 __all__ = [
     "ABOUT_BRANCH_DEFAULT",
     "FACET_FIELDS",
@@ -249,10 +257,12 @@ __all__ = [
     "SEMANTIC_MIN_COSINE_DEFAULT",
     "SORT_DEFAULT",
     "SORT_DEPTH_DEFAULT",
+    "REFINE_FIELDS",
     "STABLE_SORTS",
     "browse_files",
     "build_browse_body",
     "browse_scope_clause",
+    "refine_clause",
     "SORT_OPTIONS",
     "TOTAL_CAP_DEFAULT",
     "WORD_OPERATOR_DEFAULT",
@@ -420,6 +430,69 @@ def browse_scope_clause(
     return {"bool": {"must": [{"match_all": {}}], "filter": list(filters)}}
 
 
+def refine_clause(refine: str | None) -> dict[str, Any] | None:
+    """결과 내 재검색어를 **집합을 좁히는 AND 절**로 만든다(순수 · 099 G3).
+
+    쇼핑몰에서 "노트북"을 검색해 목록을 받은 뒤 위쪽 작은 칸에 "16인치"를 쳐서 더 줄이는 그 칸이다.
+    091 은 그 좁히기를 **받아 온 한 페이지 안에서 파이썬 글자 비교**로 했고, 그래서 2쪽·30쪽에 있는
+    자산은 처음부터 좁히기 대상이 아니었다. 여기서는 같은 판정을 **질의 절**로 만들어 검색 엔진에게
+    맡긴다 — 엔진은 색인 전체를 보므로 몇 쪽에 있든 걸린다(spec 099 §3-1·SC-004).
+
+    🔴 **질의(``q``)를 바꾸지 않는다.** ``q`` 가 정한 집합은 그대로 두고 그 위에 AND 필터로만 얹는다.
+    질의를 바꾸면 kNN 게이트가 다시 판정해 **좁혔는데 없던 것이 나타나는** 일이 생긴다(091 이 서버
+    재질의를 거부한 근거 ③ · 099 는 "필터로 얹는다"로 그것을 피한다).
+
+    🔴 **매칭이 낱말 단위로 바뀐다**(spec §3-4 · 2026-09-17 사용자 결정). 색인 텍스트 필드는 형태소
+    분석기(``nori_user``)를 거쳐 낱말로 쪼개져 있다. 파이썬 부분 문자열로는 `치찌` 가 `김치찌개` 에
+    걸렸지만(엉뚱한 매칭) 엔진은 걸지 않는다. 반대로 `김치를` 처럼 조사가 붙어도 분석기가 걷어내
+    `김치` 로 맞는다. 대체로 엔진 쪽이 정확하며 **의도된 변화**다.
+
+    조합 규칙은 091 그대로다 — **낱말끼리 AND, 한 낱말 안에서 필드끼리 OR**. `전통음식 배추` 처럼
+    한 낱말은 태그에, 다른 낱말은 요약에 있는 경우가 흔해서 한 필드에 전부 있기를 요구하면 실제로는
+    거의 걸리지 않는다(091 §2-4). 반대로 낱말끼리 OR 로 하면 좁혀지지 않는다(그건 찾아오기 규칙이다).
+
+    Args:
+        refine: 재검색어 원문. 공백으로 쪼갠 낱말이 그대로 AND 조건이 된다. ``None``·빈 문자열·
+            공백뿐이면 **절을 만들지 않는다** — 칸을 비우면 좁히기 전으로 돌아가는 되돌림의 실질이다.
+
+    Returns:
+        ``bool.filter`` 안에 낱말별 절을 담은 ``bool`` 절. 좁힐 것이 없으면 ``None``
+        (호출부가 "조건을 얹지 않음"으로 읽는다).
+    """
+    # 정규화(``normalize_text_key``)를 여기서 걸지 않는다 — 색인과 질의가 **같은 분석기**를 지나야
+    #   대칭이 성립하는데, 미리 소문자로 바꾸면 분석기에 소문자 필터가 없는 이 색인에서는 `AI` 로
+    #   색인된 문서를 `ai` 로 묻게 되어 오히려 못 찾는다. 낱말 나누기(공백)만 우리가 한다.
+    tokens = [t for t in (refine or "").split() if t]
+    if not tokens:
+        return None
+    return {"bool": {"filter": [
+        {"bool": {
+            "should": [{"match": {field: {"query": token}}} for field in REFINE_FIELDS],
+            "minimum_should_match": 1,
+        }}
+        for token in tokens
+    ]}}
+
+
+def _with_refine(clauses: list[dict[str, Any]], refine: str | None) -> list[dict[str, Any]]:
+    """조건 절 목록 끝에 refine 절을 얹는다 — **두 경로가 쓰는 단 하나의 배선점**.
+
+    왜 조건 목록에 얹나: 이 목록은 집합 절(``_scope_clause``·``browse_scope_clause``)과 하이브리드
+    두 서브질의가 **모두** 쓰는 자리다. 여기 한 번 얹으면 순위 질의·커서 질의·집계 질의가 자동으로
+    같은 조건을 갖는다 — 자리마다 따로 얹으면 **한 곳을 빠뜨려 경로에 따라 결과가 갈린다**
+    (plan 099 §1-⑤ · 095 데모 SQL 결함과 같은 계열).
+
+    Args:
+        clauses: 선필터에서 나온 조건 절 목록.
+        refine: 재검색어. 빈 값이면 목록이 그대로다(사본을 돌려준다 — 호출부가 원본을 고치지 않게).
+
+    Returns:
+        refine 절이 끝에 붙은 새 목록(또는 원본의 사본).
+    """
+    extra = refine_clause(refine)
+    return [*clauses, extra] if extra is not None else list(clauses)
+
+
 _ROW_SOURCE: tuple[str, ...] = (
     "asset_id", "modality", "domain_label", "file_name", "fs_uri",
     "summary", "keywords", "topics", "subtopics", "topic_pairs",
@@ -438,6 +511,7 @@ def build_rank_body(
     operator: str = WORD_OPERATOR_DEFAULT,
     about_branch: bool = ABOUT_BRANCH_DEFAULT,
     sort: str = SORT_DEFAULT,
+    refine: str | None = None,
 ) -> dict[str, Any]:
     """순위 질의 본문 — 집합은 ``_scope_clause`` 가 정하고 순서만 정렬 방식이 정한다(순수).
 
@@ -458,6 +532,9 @@ def build_rank_body(
         operator: 단어 매칭 연산자.
         about_branch: 개체(about) 갈래를 쓸지.
         sort: 정렬 이름(``SORT_OPTIONS`` 의 키).
+        refine: 결과 내 재검색어(``refine_clause`` 참조). 빈 값이면 **본문이 종전과 한 글자도
+            다르지 않다**(되돌림 경로). 🔴 커서 경로(``build_browse_body``)와 **같은 부품**을 써야
+            경로에 따라 결과가 갈리지 않는다(plan 099 §1-⑤).
 
     Returns:
         OpenSearch 검색 본문. ``search_pipeline`` 은 호출부가 붙인다(정규화·결합이 그 파이프라인 몫이며
@@ -468,7 +545,9 @@ def build_rank_body(
     """
     if sort not in SORT_OPTIONS:
         raise ValueError(f"알 수 없는 정렬: {sort!r} (허용: {sorted(SORT_OPTIONS)})")
-    clauses = filters_to_opensearch_bool(filters)
+    # 🔴 refine 을 **조건 목록에** 얹는다 — 아래 집합 절과 하이브리드 두 서브질의가 이 목록을 함께
+    #   쓰므로, 한 곳만 좁히고 다른 곳을 빠뜨리는 일이 구조적으로 불가능해진다(합집합으로 새지 않는다).
+    clauses = _with_refine(filters_to_opensearch_bool(filters), refine)
     body: dict[str, Any] = {
         "from": int(from_),
         "size": int(size),
@@ -507,6 +586,7 @@ def build_facet_body(
     axes: Sequence[str] = tuple(FACET_FIELDS),
     operator: str = WORD_OPERATOR_DEFAULT,
     about_branch: bool = ABOUT_BRANCH_DEFAULT,
+    refine: str | None = None,
 ) -> dict[str, Any]:
     """개수·좁히기 칩 질의 본문 — **세는 대상 = 순위 질의의 집합**(순수).
 
@@ -525,6 +605,9 @@ def build_facet_body(
         axes: 셀 축 이름들(``FACET_FIELDS`` 의 키).
         operator: 단어 매칭 연산자.
         about_branch: 개체(about) 갈래를 쓸지.
+        refine: 결과 내 재검색어. 🔴 **세는 질의에도 건다** — 좁힌 결과를 보여 주면서 좁히기 전 수를
+            적으면 "적힌 숫자 = 누르면 나오는 수"가 깨진다(096 원칙). 좁히기 **이전** 모수가 따로
+            필요하면 ``build_facet_plan`` 이 그것만 세는 질의를 하나 더 만든다.
 
     Returns:
         OpenSearch 검색 본문(행은 받지 않는다 · ``size`` 0).
@@ -557,9 +640,10 @@ def build_facet_body(
         #   `total_cap` 은 손잡이로 남긴다: 10만·100만 건에서 비용이 보이면 되살린다.
         "track_total_hits": True if total_cap >= TOTAL_CAP_DEFAULT else int(total_cap),
         # 🔴 훑기(빈 질의)와 검색이 **같은 집합**을 세야 "적힌 숫자 = 누르면 나오는 수"가 성립한다.
-        "query": browse_scope_clause(query, semantic_ids,
-                                     filters=filters_to_opensearch_bool(filters),
-                                     operator=operator, about_branch=about_branch),
+        "query": browse_scope_clause(
+            query, semantic_ids,
+            filters=_with_refine(filters_to_opensearch_bool(filters), refine),
+            operator=operator, about_branch=about_branch),
         "aggs": aggs,
     }
 
@@ -594,6 +678,7 @@ def build_facet_plan(
     axes: Sequence[str] = tuple(FACET_FIELDS),
     operator: str = WORD_OPERATOR_DEFAULT,
     about_branch: bool = ABOUT_BRANCH_DEFAULT,
+    refine: str | None = None,
 ) -> list[dict[str, Any]]:
     """집계 **계획** — 어떤 축을 어떤 조건으로 셀지 정한다(순수 · 질의를 보내지 않는다).
 
@@ -610,10 +695,13 @@ def build_facet_plan(
         axes: 셀 축 이름들.
         operator: 단어 매칭 연산자.
         about_branch: 개체(about) 갈래를 쓸지.
+        refine: 결과 내 재검색어. 주면 **좁히기 이전 모수만 세는 질의**를 계획 끝에 하나 더 붙인다
+            (``scope_total`` 참) — 화면의 "지우면 N건"이 그 값이다. 빈 값이면 계획이 종전과 같다.
 
     Returns:
         ``[{"axes": (축…), "body": {…}, "total": bool}]``. **첫 항목이 조건을 전부 적용한 질의**이며
         전체 개수를 센다(``total`` 참). 나머지는 칩 전용이라 개수를 쓰지 않는다.
+        refine 을 준 경우 **맨 끝 항목**에 ``scope_total`` 참이 붙는다(좁히기 이전 모수 전용).
 
     Raises:
         ValueError: 모르는 축 이름이거나 ``total_cap``·``facet_size`` 가 1 미만일 때.
@@ -635,7 +723,7 @@ def build_facet_plan(
         "total": True,
         "body": build_facet_body(query, semantic_ids, filters=filters, total_cap=total_cap,
                                  facet_size=facet_size, axes=base_axes, operator=operator,
-                                 about_branch=about_branch),
+                                 about_branch=about_branch, refine=refine),
     }]
     # 순서를 못 박는다 — 질의 순서가 흔들리면 응답 짝짓기가 어긋난다.
     for drop in sorted(groups, key=lambda d: sorted(d)):
@@ -645,7 +733,19 @@ def build_facet_plan(
             "total": False,
             "body": build_facet_body(query, semantic_ids, filters=scoped, total_cap=total_cap,
                                      facet_size=facet_size, axes=tuple(groups[drop]),
-                                     operator=operator, about_branch=about_branch),
+                                     operator=operator, about_branch=about_branch, refine=refine),
+        })
+    # 좁히기 **이전** 모수("지우면 N건")는 refine 절이 빠진 같은 질의로만 얻을 수 있다. 축은 세지
+    #   않으므로(``axes=()``) 숫자 하나만 받아 오며, 계획 **맨 끝**에 붙여 기존 항목의 자리를
+    #   밀지 않는다 — 응답 짝짓기가 순서로 맞춰지기 때문이다. 묶음(msearch)이라 왕복은 늘지 않는다.
+    if refine_clause(refine) is not None:
+        plan.append({
+            "axes": (),
+            "total": False,
+            "scope_total": True,
+            "body": build_facet_body(query, semantic_ids, filters=filters, total_cap=total_cap,
+                                     facet_size=facet_size, axes=(), operator=operator,
+                                     about_branch=about_branch),
         })
     return plan
 
@@ -751,6 +851,25 @@ def _run_facets(client: Any, index: str, plan: Sequence[Mapping[str, Any]]) -> l
     return list(responses)
 
 
+def _scope_total_of(plan: Sequence[Mapping[str, Any]], responses: Sequence[Mapping[str, Any]],
+                    *, default: int) -> int:
+    """계획·응답에서 **좁히기 이전 모수**를 꺼낸다(없으면 기본값).
+
+    Args:
+        plan: ``build_facet_plan`` 결과.
+        responses: 그 계획을 실행한 응답들(같은 순서).
+        default: 좁히기 전용 질의가 없을 때 쓸 값 — refine 이 없으면 좁히기 전후가 같으므로
+            보통 ``total`` 을 넘긴다("항상 값이 있다"를 지키기 위해서다 · FR-006).
+
+    Returns:
+        좁히기 이전 결과 집합의 크기.
+    """
+    for entry, resp in zip(plan, responses, strict=False):
+        if entry.get("scope_total"):
+            return int(((resp.get("hits") or {}).get("total") or {}).get("value") or 0)
+    return int(default)
+
+
 def search_files(
     client: Any,
     index: str,
@@ -771,6 +890,7 @@ def search_files(
     semantic_cap: int = SEMANTIC_CAP_DEFAULT,
     operator: str = WORD_OPERATOR_DEFAULT,
     about_branch: bool = ABOUT_BRANCH_DEFAULT,
+    refine: str | None = None,
 ) -> dict[str, Any]:
     """조건으로 좁힌 파일을 **유사도 순 한 페이지 + 정확한 전체 개수 + 좁히기 칩**으로 조회한다.
 
@@ -802,9 +922,13 @@ def search_files(
         semantic_cap: 뜻으로 걸린 자산 id 를 받아올 상한.
         operator: 단어 매칭 연산자.
         about_branch: 개체(about) 갈래를 쓸지.
+        refine: 결과 내 재검색어(099 G3). **집합 전체**에 걸리므로 몇 쪽에 있든 걸러진다 —
+            091 처럼 받아 온 한 페이지 안에서만 좁히지 않는다. 빈 값이면 종전과 같다.
 
     Returns:
-        ``{rows, total, total_capped, facets, from, size, sort}``. ``total_capped`` 가 참이면
+        ``{rows, total, scope_total, total_capped, facets, from, size, sort}``. ``total`` 은
+        **좁히기 이후** 모수, ``scope_total`` 은 **좁히기 이전** 모수다("지우면 N건" · refine 이
+        없으면 둘이 같다). ``total_capped`` 가 참이면
         ``total`` 은 "이 수 이상"이라는 뜻이다(화면이 "1만 건 이상"으로 표기한다). ``facets`` 는
         ``{축: [{key, label, count}]}`` 이고, 각 칩 수는 **그 칩 하나만 골랐을 때 나오는 수**다
         (모듈 docstring 참조 — 같은 축의 다른 선택은 세는 데서 빼기 때문이다).
@@ -850,10 +974,11 @@ def search_files(
 
     plan = build_facet_plan(q, semantic_ids, filters=filters, total_cap=total_cap,
                             facet_size=facet_size, axes=axes, operator=operator,
-                            about_branch=about_branch)
+                            about_branch=about_branch, refine=refine)
     responses = _run_facets(client, index, plan)
     total_info = (responses[0].get("hits") or {}).get("total") or {}
     total = int(total_info.get("value") or 0)
+    scope_total = _scope_total_of(plan, responses, default=total)
 
     hits: list[dict[str, Any]] = []
     if from_ < total:
@@ -864,7 +989,7 @@ def search_files(
                                  from_=from_,
                                  # 남은 것보다 더 달라고 하면 같은 오류가 난다 — 남은 만큼만 청한다.
                                  size=min(size, total - from_), rank_depth=rank_depth, sort=sort,
-                                 operator=operator, about_branch=about_branch),
+                                 operator=operator, about_branch=about_branch, refine=refine),
             params=params,
         )
         hits = ((rank.get("hits") or {}).get("hits") or [])
@@ -877,6 +1002,8 @@ def search_files(
     return {
         "rows": [_row(h) for h in hits],
         "total": total,
+        # 좁히기 **이전** 모수 — 화면의 "지우면 N건". refine 이 없으면 ``total`` 과 같다.
+        "scope_total": scope_total,
         # 상한에 걸렸으면 검색 엔진이 ``gte``(이 수 이상)로 알려 준다.
         "total_capped": str(total_info.get("relation") or "eq") != "eq",
         # 축 순서는 요청 순서를 따른다(화면이 칩 묶음을 그 순서로 그린다).
@@ -897,6 +1024,7 @@ def build_browse_body(
     size: int = 50,
     operator: str = WORD_OPERATOR_DEFAULT,
     about_branch: bool = ABOUT_BRANCH_DEFAULT,
+    refine: str | None = None,
 ) -> dict[str, Any]:
     """**커서로 이어 읽는** 한 쪽의 검색 본문을 만든다(순수 · 097).
 
@@ -915,6 +1043,8 @@ def build_browse_body(
         size: 이 쪽의 행 수.
         operator: 단어 매칭 연산자.
         about_branch: 개체(about) 갈래를 쓸지.
+        refine: 결과 내 재검색어. 🔴 랭킹 경로(``build_rank_body``)와 **같은 부품**(``refine_clause``)
+            을 쓴다 — 따로 만들면 한쪽만 고쳐져 경로에 따라 결과가 갈린다(plan 099 §1-⑤).
 
     Returns:
         OpenSearch 검색 본문. 🔴 ``track_total_hits`` 를 넣지 않는다 — 개수는 집계 질의가 센다
@@ -941,7 +1071,7 @@ def build_browse_body(
         "sort": [dict(s) for s in order],
         "query": browse_scope_clause(
             query, semantic_ids,
-            filters=filters_to_opensearch_bool(filters),
+            filters=_with_refine(filters_to_opensearch_bool(filters), refine),
             operator=operator, about_branch=about_branch,
         ),
     }
@@ -966,6 +1096,7 @@ def browse_files(
     semantic_cap: int = SEMANTIC_CAP_DEFAULT,
     operator: str = WORD_OPERATOR_DEFAULT,
     about_branch: bool = ABOUT_BRANCH_DEFAULT,
+    refine: str | None = None,
 ) -> dict[str, Any]:
     """조건으로 좁힌 파일을 **커서로 이어 읽는다** — 1만 건 벽이 없다.
 
@@ -986,20 +1117,33 @@ def browse_files(
         semantic_cap: 뜻으로 걸 id 상한.
         operator: 단어 매칭 연산자.
         about_branch: 개체(about) 갈래를 쓸지.
+        refine: 결과 내 재검색어(099 G3). 랭킹 경로(``search_files``)와 **같은 부품**을 쓰므로
+            같은 입력이면 같은 집합이 나온다. refine 이 바뀌면 집합이 바뀌므로 화면은 **커서를 버리고
+            처음부터** 다시 받아야 한다(spec 099 §3-1).
 
     Returns:
-        ``rows``·``total``·``total_capped``·``facets``·``sort``·``size`` 에 더해
-        ``next_cursor``(마지막 쪽이면 ``None`` — 더 없다는 뜻).
+        ``rows``·``total``·``scope_total``·``total_capped``·``facets``·``sort``·``size`` 에 더해
+        ``next_cursor``(마지막 쪽이면 ``None`` — 더 없다는 뜻). ``scope_total`` 은 좁히기 **이전**
+        모수다("지우면 N건" · refine 이 없으면 ``total`` 과 같다).
 
     Raises:
         ValueError: 모르는 정렬·``relevance``·``size`` 범위 오류.
-        CursorError: 커서가 깨졌거나 요청 정렬과 어긋날 때(호출부가 400 으로 바꾼다).
+        CursorError: 커서가 깨졌거나 요청 정렬과 어긋날 때, 정렬값 **개수**가 맞지 않을 때
+            (호출부가 400 으로 바꾼다).
     """
     # 🔴 `search_files`(offset)를 고치지 않고 나란히 둔 이유: 두 함수의 **계약이 다르다.** 저쪽은
     #   "검색어가 있는 검색"이고 그 뜻이 docstring 에 봉인돼 있다. 관련도 정렬에서만 커서를 못 준다는
     #   예외까지 한 함수에 섞으면 읽는 사람이 어느 쪽 규칙인지 알 수 없다. 092 가
     #   `find_similar_entities` 를 남기고 새 함수를 만든 것과 같은 판단 — 되돌림 경로를 남긴다.
-    after = decode_cursor(cursor, expect_sort=sort) if cursor else None
+    # 🔴 정렬값 **개수**까지 대조한다(099 G1 이월 · 코드리뷰 2026-09-16). 개수가 틀린 위조·구버전
+    #   토큰을 통과시키면 그 값이 그대로 ``search_after`` 로 흘러 엔진이 400 을 내는데, 그 예외는
+    #   ``CursorError`` 가 아니라서 호출부가 400 으로 바꾸지 못하고 **HTTP 500** 이 된다 —
+    #   주소창의 커서 한 글자를 고친 것뿐인데 "서버 오류"가 뜨는 셈이다.
+    #   ⚠️ 모르는 정렬·``relevance``(정렬 절 ``None``)는 개수를 따지지 않고 넘긴다. 그 둘은 몇 줄
+    #   아래 ``build_browse_body`` 가 ValueError 로 끊으며, 여기서 먼저 죽으면 오류 종류가 바뀐다.
+    order = SORT_OPTIONS.get(sort)
+    after = decode_cursor(cursor, expect_sort=sort,
+                          expect_arity=len(order) if order else None) if cursor else None
 
     # ① 뜻으로 걸린 자산을 **한 번만** 구해 id 로 굳힌다(조건마다 다시 하면 집합이 갈린다 · 096).
     #    질의가 비면 벡터 검색을 돌릴 것이 없다 — 집합은 조건만으로 정해진다.
@@ -1017,6 +1161,7 @@ def browse_files(
     plan = build_facet_plan(
         query=query, semantic_ids=semantic_ids, filters=filters,
         facet_size=facet_size, axes=axes, operator=operator, about_branch=about_branch,
+        refine=refine,
     )
     responses = _run_facets(client, index, plan)
     total_info: dict[str, Any] = {}
@@ -1028,11 +1173,12 @@ def browse_files(
         for axis in entry["axes"]:
             facets[axis] = _facet_items(axis, aggs.get(axis))
     total = int(total_info.get("value") or 0)
+    scope_total = _scope_total_of(plan, responses, default=total)
 
     # ③ 이 쪽의 행 — 커서로 이어 읽는다.
     page = client.search(index=index, body=build_browse_body(
         query=query, semantic_ids=semantic_ids, filters=filters, sort=sort,
-        after=after, size=size, operator=operator, about_branch=about_branch,
+        after=after, size=size, operator=operator, about_branch=about_branch, refine=refine,
     ))
     hits = list((page.get("hits") or {}).get("hits") or [])
     # 🔴 다음 커서는 **이번 쪽이 꽉 찼을 때만** 준다. 덜 찼으면 마지막 쪽이므로 None 을 주어
@@ -1045,6 +1191,8 @@ def browse_files(
     return {
         "rows": [_row(h) for h in hits],
         "total": total,
+        # 좁히기 **이전** 모수 — 화면의 "지우면 N건". refine 이 없으면 ``total`` 과 같다.
+        "scope_total": scope_total,
         "total_capped": str(total_info.get("relation") or "eq") != "eq",
         "facets": {axis: facets.get(axis, []) for axis in axes},
         "next_cursor": next_cursor,
