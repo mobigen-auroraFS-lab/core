@@ -82,7 +82,11 @@ PUBLIC_API: dict[str, tuple[str, ...]] = {
         "resolve_channel", "check_pgvector_version", "update_asset_mm_skill_labels",
         "mm_skill_label_keys", "build_index_body",
     ),
-    "src.search.entity_search_os": ("search_entities_hybrid",),
+    # 099 G4: 같은 인덱스를 보지만 **계약이 둘**이다 — 순위(``search_entities_hybrid``)와
+    # 집합(``match_entity_keys``). 뒤엣것을 ``q``·결과 내 재검색이 함께 쓴다(spec 099 §3-2a).
+    "src.search.entity_search_os": (
+        "search_entities_hybrid", "match_entity_keys", "entity_match_clause",
+    ),
     "src.mm_meta.entity_search": (
         "split_query", "match_entity_reason", "narrow_entities", "fuse_entity_results", "gate_semantic_hits",
         "entity_refine_fields", "REASON_CODE_NAME", "REASON_CODE_KEYWORD", "REASON_CODE_DESCRIPTION",

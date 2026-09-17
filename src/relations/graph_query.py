@@ -433,10 +433,24 @@ _EXPOSED_ENTITIES_SQL = """
        AND ge.status = ANY(%(statuses)s)
        {type_cond}
        {area_cond}
+       {allow_cond}
      GROUP BY n.entity_type, n.entity_uid, n.node_id
     HAVING COUNT(DISTINCT ge.src_node) >= %(minsize)s
 """
 _TYPE_COND_SQL = "AND (%(etype)s::text IS NULL OR n.entity_type = %(etype)s)"
+
+# 개체 id **화이트리스트** — 검색(집합 판정)이 고른 개체만 남긴다(099 G4 · spec §3-2a).
+# 🔴 ``NULL``(필터 없음)과 **빈 배열**(매칭 0건)을 SQL 이 직접 가른다. 판정을 파이썬 ``if not …`` 에
+#    두면 빈 집합이 "필터 없음"으로 접혀 **검색했는데 전체가 나오는** 조용한 오류가 된다 — 오류가
+#    나지 않으므로 아무도 모른다. 빈 배열이면 ``unnest`` 가 0행이라 ``EXISTS`` 가 거짓이 된다.
+# 개체의 자연키가 (타입, 표기) 둘이라 **두 배열을 나란히** 풀어 짝으로 맞춘다. 한 배열로 표기만
+# 맞추면 타입이 다른 동명 개체가 새어 든다(`김밥` 이 음식과 작품으로 갈린 실례 · entity_doc_id 참조).
+_ENTITY_ALLOW_FILTER_SQL = """
+      (%(allow_types)s::text[] IS NULL OR EXISTS (
+            SELECT 1
+              FROM unnest(%(allow_types)s::text[], %(allow_uids)s::text[]) AS al(t, u)
+             WHERE al.t = {alias}.entity_type AND al.u = {alias}.entity_uid))
+"""
 
 # 이어읽기(keyset) 조건 — **동점 그룹을 갈라 잇는다**.
 # 정렬이 ``confirmed_count DESC, entity_uid ASC`` 라 튜플 비교(``(a,b) < (c,d)``)로는 못 쓴다(방향이 섞였다).
@@ -508,6 +522,7 @@ SELECT n.entity_type, n.entity_uid, n.node_id,
    AND ge.status = ANY(%(statuses)s)
    AND (%(etype)s::text IS NULL OR n.entity_type = %(etype)s)
    AND {area_filter}
+   AND {allow_filter}
  -- node_id 를 함께 묶는다: 전체 건수 서브쿼리가 이 컬럼을 참조한다. 그룹이 쪼개질 위험은 없다 —
  -- uq_node_entity(entity_type, entity_uid) 가 개체마다 node_id 1개를 보장한다.
  GROUP BY n.node_id, n.entity_type, n.entity_uid, n.canonical
@@ -595,6 +610,26 @@ def _area_params(area_names: list[str] | None) -> dict[str, Any]:
     return {"areas": names or None, "area_n": len(set(names))}
 
 
+def _allow_params(uid_allow: set[tuple[str, str]] | None) -> dict[str, Any]:
+    """개체 id 화이트리스트 바인딩 — (타입, 표기) 집합을 **두 배열**로 편다.
+
+    🔴 ``None`` 과 빈 집합을 여기서 섞지 않는다 — ``None`` 은 ``NULL``(필터 없음)로, 빈 집합은
+    **빈 배열**(매칭 0건)로 간다. 파이썬에서는 둘 다 거짓값이라 ``if not uid_allow`` 같은 한 줄이
+    "검색했는데 전체가 나오는" 오류를 만든다. 그래서 ``is None`` 으로만 가른다.
+
+    Args:
+        uid_allow: 허용할 ``(entity_type, entity_uid)`` 집합. ``None`` 이면 필터를 걸지 않는다.
+
+    Returns:
+        ``{"allow_types": […] 또는 None, "allow_uids": […] 또는 None}`` — 짝이 유지되도록 **정렬**한다
+        (같은 집합이면 같은 바인딩 · 헌법 3조).
+    """
+    if uid_allow is None:
+        return {"allow_types": None, "allow_uids": None}
+    pairs = sorted((str(etype), str(uid)) for etype, uid in uid_allow)
+    return {"allow_types": [etype for etype, _ in pairs], "allow_uids": [uid for _, uid in pairs]}
+
+
 def _sorted_strs(values: Any) -> list[str]:
     """배열 컬럼을 **빈 값 제거 · 문자열 · 가나다 순**의 리스트로 만든다(결정적 순서).
 
@@ -618,6 +653,7 @@ def list_entities(
     form_skill_codes: list[str] | None = None,
     after_count: int | None = None,
     after_uid: str | None = None,
+    uid_allow: set[tuple[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
     """노출 개체(멀티모달 메타) **목록**을 구성 자산 수 내림차순으로 조회한다(읽기 전용 · 095 FR-1).
 
@@ -637,6 +673,9 @@ def list_entities(
             개체(그리고 같은 값이면 ``after_uid`` 보다 뒤인 개체)부터 잇는다. ``None`` 이면 첫 쪽이다.
         after_uid: 이어읽기 책갈피의 ``entity_uid``(동점 무더기를 가르는 유일 키). ``after_count`` 와
             **둘 다** 주거나 둘 다 생략해야 한다 — 한쪽만 주면 ``ValueError``.
+        uid_allow: 허용할 개체 ``(entity_type, entity_uid)`` 집합 — 검색(집합 판정)이 고른 개체만
+            남기는 화이트리스트다(099 G4). 🔴 **``None`` 과 빈 집합은 다른 값이다**: ``None`` 이면
+            필터를 걸지 않아 **종전과 완전히 같고**, 빈 집합이면 **0건**이다(검색했는데 매칭이 없음).
 
     Raises:
         ValueError: ``after_count``·``after_uid`` 중 한쪽만 준 경우. 조용히 무시하면 첫 쪽을 다시
@@ -660,9 +699,12 @@ def list_entities(
         "after_count": None if after_count is None else int(after_count),
         "after_uid": None if after_uid is None else str(after_uid),
         **_area_params(area_names),
+        **_allow_params(uid_allow),
     }
     sql = _LIST_ENTITIES_SQL.format(
-        area_filter=_ENTITY_AREA_FILTER_SQL.format(alias="n"), keyset=_ENTITY_KEYSET_SQL.strip())
+        area_filter=_ENTITY_AREA_FILTER_SQL.format(alias="n"),
+        allow_filter=_ENTITY_ALLOW_FILTER_SQL.format(alias="n"),
+        keyset=_ENTITY_KEYSET_SQL.strip())
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(sql, params)
         rows = cur.fetchall()
@@ -693,6 +735,7 @@ def count_entities(
     area_names: list[str] | None = None,
     min_bundle_size: int,
     statuses: list[str] | None = None,
+    uid_allow: set[tuple[str, str]] | None = None,
 ) -> int:
     """지금 걸린 조건으로 **노출 개체가 모두 몇 개인지** 센다(읽기 전용 · 099 FR-006).
 
@@ -706,6 +749,8 @@ def count_entities(
         area_names: 갈래(개체 라벨) 이름들 — **모두 가진** 개체만(AND). ``None``·빈 목록이면 필터 없음.
         min_bundle_size: 노출 임계 — 구성 자산 수가 이 값 이상인 개체만(목록과 같은 값을 줘야 한다).
         statuses: 소속 엣지 상태. ``None`` 이면 active+proposed(목록 기본과 같다).
+        uid_allow: 개체 화이트리스트 — **목록과 같은 값을 줘야 한다**(099 G4). 총계와 목록이 다른
+            모수를 말하면 "N건 중 M건"이 거짓말이 된다. ``None`` = 필터 없음 · 빈 집합 = 0건.
 
     Returns:
         개체 수(0 이상). 상한에 걸리지 않는 **모수**다.
@@ -716,10 +761,12 @@ def count_entities(
         "etype": entity_type,
         "minsize": int(min_bundle_size),
         **_area_params(area_names),
+        **_allow_params(uid_allow),
     }
     exposed = _EXPOSED_ENTITIES_SQL.format(
         type_cond=_TYPE_COND_SQL,
         area_cond="AND " + _ENTITY_AREA_FILTER_SQL.format(alias="n"),
+        allow_cond="AND " + _ENTITY_ALLOW_FILTER_SQL.format(alias="n"),
     )
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(_COUNT_ENTITIES_SQL.format(exposed=exposed), params)
@@ -745,7 +792,8 @@ def count_entities_by_type(
     """
     params = {"kind": MM_MEMBER_KIND_CODE, "statuses": _wanted_statuses(statuses),
               "minsize": int(min_bundle_size)}
-    exposed = _EXPOSED_ENTITIES_SQL.format(type_cond="", area_cond="")
+    # 종류 칩은 조건을 걸지 않는다(갈아타는 축) — 검색 화이트리스트도 얹지 않는다(현행 유지 · T019a).
+    exposed = _EXPOSED_ENTITIES_SQL.format(type_cond="", area_cond="", allow_cond="")
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(_COUNT_BY_TYPE_SQL.format(exposed=exposed), params)
         rows = cur.fetchall()
@@ -789,6 +837,7 @@ def count_entities_by_area(
     exposed = _EXPOSED_ENTITIES_SQL.format(
         type_cond=_TYPE_COND_SQL,
         area_cond="AND " + _ENTITY_AREA_FILTER_SQL.format(alias="n"),
+        allow_cond="",   # 칩·묶음 내려받기는 검색 화이트리스트를 쓰지 않는다(현행 유지 · T019a)
     )
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(_COUNT_BY_AREA_SQL.format(exposed=exposed), params)
@@ -836,6 +885,7 @@ def assets_of_entities(
     exposed = _EXPOSED_ENTITIES_SQL.format(
         type_cond=_TYPE_COND_SQL,
         area_cond="AND " + _ENTITY_AREA_FILTER_SQL.format(alias="n"),
+        allow_cond="",   # 칩·묶음 내려받기는 검색 화이트리스트를 쓰지 않는다(현행 유지 · T019a)
     )
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(_ASSETS_OF_ENTITIES_SQL.format(exposed=exposed), params)

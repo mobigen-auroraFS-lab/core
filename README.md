@@ -174,7 +174,7 @@ tests/          단위 테스트
 | 검색 | `src.search.query_embed` | `embed_query_for_media_search` |
 | 검색 | `src.search.query_builder` | `build_word_should` · `build_bm25_body` · `build_knn_body` |
 | 검색·색인 | `src.search.opensearch_sync` | `get_client` · `ensure_index` · `sync_all` · `index_asset` · `asset_to_doc` · `build_index_body` · `resolve_channel` · `check_pgvector_version` · `update_asset_mm_skill_labels` · `mm_skill_label_keys` |
-| 개체 검색 | `src.search.entity_search_os` | `search_entities_hybrid` |
+| 개체 검색 | `src.search.entity_search_os` | `search_entities_hybrid` · `match_entity_keys` · `entity_match_clause` |
 | 개체 검색 | `src.mm_meta.entity_search` | `split_query` · `match_entity_reason` · `narrow_entities` · `fuse_entity_results` · `gate_semantic_hits` · `entity_refine_fields` · `REASON_CODE_NAME` · `REASON_CODE_KEYWORD` · `REASON_CODE_DESCRIPTION` · `REASON_KEYWORD` · `REASON_DESCRIPTION` · `REASON_SEMANTIC` · `REASON_TEXT_MATCH` |
 | 개체 검색 | `src.mm_meta.entity_embedding` | `find_similar_entities` |
 | 주제 | `src.topic.asset_topic_query` | `fetch_asset_topic` · `find_same_topic_groups` · `list_topics` · `assets_in_topic` · `assets_unclassified` |

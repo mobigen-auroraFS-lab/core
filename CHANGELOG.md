@@ -11,6 +11,22 @@
 | **MINOR** | 공개 API **추가** — 기존 호출은 그대로 동작 |
 | **PATCH** | 공개 API 무변경 — 내부 수정·버그 수정 |
 
+## [Unreleased] — 2026-09-17 (099 G4 개체 검색을 **집합 판정**으로 · 개체 화이트리스트 필터)
+
+### 추가 (MINOR — 기존 호출 무변경)
+- `search.entity_search_os.match_entity_keys(client, index, *, query, max_hits=10000) -> set[(entity_type, entity_uid)]` — 낱말에 **맞는 개체 전부**의 키 집합. 순위가 아니라 **집합**이며, 순서·쪽 나누기·카드 재료는 DB 목록(`list_entities`)이 맡는다. 🔴 **찾아오기(`q`)와 결과 내 재검색이 이 함수 하나를 쓴다**(spec 099 §3-2a) — 둘 다 「낱말을 던져 매칭 개체 집합을 얻기」라서다. 호출부가 교집합(`A ∩ B`)으로 합친다.
+  - 🔴 **임계가 0개다**: 점수 컷·kNN 게이트·상위 N 절단을 쓰지 않는다. 셋 다 순위를 매기는 장치인데 집합 판정에는 순위가 없다. 부수 효과로 "후보 깊이를 늘리면 min-max 정규화 모수와 게이트 배경이 함께 움직인다"는 결합이 이 경로에는 **원천적으로 없다**.
+  - ⚠️ **빈 질의는 `ValueError`** — 빈 집합(=0건)과 "묻지 않았다"(=필터 없음)를 같은 값으로 만들면 교집합에서 결과가 통째로 사라진다.
+  - 매칭이 상한(`max_hits`)에 닿으면 **경고 로그**를 남긴다(조용히 잘린 집합 방지). 현 노출 개체 822건 기준 기본 상한은 12배다.
+- `search.entity_search_os.entity_match_clause(query) -> dict | None` — 위 판정의 순수 부품(엔진 없이 단위 검증 가능). **낱말끼리 AND · 한 낱말 안에서 필드끼리 OR**(091 §2-4 규율 = 파일 경로 `file_search.refine_clause` 와 같은 규칙). 빈 값이면 `None`. ⚠️ `multi_match`+`operator=and` 를 쓰지 않는다 — 그것은 **한 필드 안에** 모든 낱말이 있기를 요구해 `전통음식`(키워드) + `배추`(구성 자산 요약) 같은 흔한 경우가 통째로 탈락한다.
+- 상수 `src.config.search_constants.ENTITY_MATCH_FIELDS_DEFAULT`(= `name`·`keywords`·`description`·`member` · 색인 텍스트 필드 전량) · `ENTITY_MATCH_MAX_HITS_DEFAULT`(= 10,000). 공개 API 표에는 올리지 않는다(소비 레포가 직접 쓰지 않음 · 근거는 상수 주석).
+- `relations.graph_query.list_entities(…, uid_allow=None)` · `count_entities(…, uid_allow=None)` — 개체 **화이트리스트 필터**. 집합 판정 결과를 목록·총계에 얹는 자리다. 🔴 **`None` 과 빈 집합은 다른 값이다**: `None` = 필터 없음(**종전과 완전히 같은 결과**) · `set()` = **0건**(매칭 없음). 판정을 파이썬이 아니라 **SQL 에서** 가른다(배열이 `NULL` 이면 조건이 열리고, 빈 배열이면 `unnest` 가 0행이라 `EXISTS` 가 거짓). 섞으면 "검색했는데 전체가 나오는" 조용한 오류가 된다.
+  - 조건은 CTE **안쪽** `WHERE` 에 건다(커서 조건은 바깥 — 099 G1 구조 유지). 개체 자연키가 (타입, 표기) 둘이라 두 배열을 나란히 풀어 **짝으로** 맞춘다(타입만 맞는 동명 개체 유입 차단).
+  - 칩 집계(`count_entities_by_type`·`count_entities_by_area`)와 묶음 내려받기(`assets_of_entities`)는 **현행 유지** — 화이트리스트를 얹지 않는다(종류는 갈아타는 축이라 검색으로 좁히면 갈아탈 칩이 사라진다 · spec 087 2차 정정과 같은 사유). 검색을 칩에 반영할지는 화면 정책(G5).
+
+### 변경 없음
+- `search_entities_hybrid` 의 계약·기본값(`top_n=5` · `operator=or` · 게이트 `eps=0.15` · `candidate_size=20`)은 **그대로다** — 되돌림 경로로 남긴다(plan 099 §1-④). 단위 테스트가 이 불변을 함께 지킨다.
+
 ## [Unreleased] — 2026-09-17 (색인 분석기에 `lowercase` — 검색 대소문자 구분 해소)
 
 ### 변경 (동작 변경 — 🔴 **전량 재색인 필요**)
