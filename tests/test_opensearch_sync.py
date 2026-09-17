@@ -265,8 +265,17 @@ class TestIndexBody(unittest.TestCase):
         )
         self.assertEqual(analysis["filter"]["nori_josa_word"], {"type": "stop", "stopwords": ["의"]})
         self.assertEqual(
-            analysis["analyzer"]["nori_user"]["filter"], ["nori_josa_pos", "nori_josa_word"]
+            analysis["analyzer"]["nori_user"]["filter"],
+            ["nori_josa_pos", "nori_josa_word", "lowercase"],
         )
+
+    def test_lowercase_filter_in_analyzer(self) -> None:
+        # 🔴 099 후속(2026-09-17 실측 발견) — 라틴 문자 대소문자를 흡수한다.
+        # 없으면 색인·질의가 같은 분석기를 지나도 `AI` 와 `ai` 가 **다른 토큰**이 되어
+        # "pdf 로 검색하면 PDF 가 든 자산이 안 나온다"(실 OpenSearch `_analyze` 로 확인).
+        # 한글은 대소문자가 없어 무관하고, 라틴 표기 자산에서만 드러나던 구멍이다.
+        analysis = build_index_body()["settings"]["analysis"]
+        self.assertIn("lowercase", analysis["analyzer"]["nori_user"]["filter"])
 
     def test_nori_user_words_override(self) -> None:
         # 사전 목록은 인자로 주입 가능(settings 단일 출처가 IO 층에서 전달) — 결정적 반영.

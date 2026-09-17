@@ -239,7 +239,14 @@ def build_index_body(
                     "nori_user": {
                         "type": "custom",
                         "tokenizer": "nori_user_tokenizer",
-                        "filter": ["nori_josa_pos", "nori_josa_word"],
+                        # 🔴 ``lowercase`` 는 라틴 문자 대소문자를 흡수한다(2026-09-17 추가).
+                        #   없으면 색인·질의가 같은 분석기를 지나도 ``AI`` 와 ``ai`` 가 **다른 토큰**이라
+                        #   "pdf 로 검색하면 PDF 가 든 자산이 안 나온다"(실 OpenSearch ``_analyze`` 확인:
+                        #   ``AI``→``AI`` · ``ai``→``ai`` · ``PDF문서``→``PDF``+``문서``).
+                        #   한글은 대소문자가 없어 무관하고 라틴 표기 자산에서만 드러나던 구멍이었다.
+                        #   ⚠️ 분석기 변경은 매핑처럼 덧붙일 수 없다 — **전량 재색인**(``--recreate``)이 필요하며
+                        #   ``ensure_index`` 가 'analysis-stale' 로 알린다.
+                        "filter": ["nori_josa_pos", "nori_josa_word", "lowercase"],
                     }
                 },
             },

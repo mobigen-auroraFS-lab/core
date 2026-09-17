@@ -11,6 +11,19 @@
 | **MINOR** | 공개 API **추가** — 기존 호출은 그대로 동작 |
 | **PATCH** | 공개 API 무변경 — 내부 수정·버그 수정 |
 
+## [Unreleased] — 2026-09-17 (색인 분석기에 `lowercase` — 검색 대소문자 구분 해소)
+
+### 변경 (동작 변경 — 🔴 **전량 재색인 필요**)
+- `search.opensearch_sync.build_index_body` 의 `nori_user` 분석기 filter 에 **`lowercase`** 추가.
+  종전에는 filter 가 `["nori_josa_pos","nori_josa_word"]` 뿐이라 라틴 문자 대소문자가 **다른 토큰**이었다 —
+  실 OpenSearch `_analyze` 실측: `AI`→`AI` · `ai`→`ai` · `PDF문서`→`PDF`+`문서`.
+  질의도 같은 분석기를 지나므로 **`pdf` 로 검색하면 `PDF` 가 든 자산이 나오지 않았다**(한글은 무관).
+- 이 구멍은 **099 가 만든 것이 아니라 원래 있던 것**이다. 종전 파이썬 재검색이 `casefold` 로 대소문자를
+  무시해 **재검색이 본검색보다 관대한** 비대칭이 있었고, 099 G3 이 재검색을 엔진으로 옮기며 드러났다.
+- ⚠️ **분석기는 매핑처럼 덧붙여 고칠 수 없다.** 적용하려면 `run_opensearch_resync --recreate` 로
+  전량 재색인해야 하며, 그 전까지 `ensure_index` 가 `'analysis-stale'` 을 돌려준다.
+  실측 선례: 1,526건 재색인 17초(2026-09-09) → 현 16,865건 기준 수 분.
+
 ## [Unreleased] — 2026-09-17 (099 G3 파일 결과 내 재검색을 **검색 엔진 질의 절**로)
 
 ### 추가 (MINOR — 기존 호출 무변경)
