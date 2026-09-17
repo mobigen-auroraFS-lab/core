@@ -43,9 +43,13 @@ class TestListEntities(unittest.TestCase):
         self.assertIn("rk.kind_code = %(kind)s", sql)
         self.assertIn("ge.status = ANY(%(statuses)s)", sql)
         self.assertIn("HAVING COUNT(DISTINCT ge.src_node) >= %(minsize)s", sql)
-        # 099 T006 로 본문이 CTE(``ent``)에 들어가면서 정렬 한정자가 ``n.`` → ``ent.`` 로 바뀌었다.
-        # 보는 것은 그대로다 — 유일 tiebreaker(표기 키)로 끝나는 결정적 정렬 + 상한이 **바인딩**인지.
-        self.assertIn("ORDER BY ent.confirmed_count DESC, ent.entity_uid ASC LIMIT %(limit)s", sql)
+        # 099 T006 로 본문이 CTE(``ent``)에 들어가면서 정렬 한정자가 ``n.`` → ``ent.`` 로 바뀌었고,
+        # 099 G7 로 **우선 티어**가 맨 앞에 붙었다(이름이 걸린 개체를 위로 · 기본값이면 전원 0 이라
+        # 종전 순서와 같다). 보는 것은 그대로다 — 유일 tiebreaker(표기 키)로 끝나는 결정적 정렬 +
+        # 상한이 **바인딩**인지.
+        self.assertIn(
+            "ORDER BY ent.prio_tier DESC, ent.confirmed_count DESC, ent.entity_uid ASC "
+            "LIMIT %(limit)s", sql)
         self.assertIn("el.label_code <> 'unassigned'", sql)  # 갈래 집계에서 미부여 제외
         self.assertNotIn("'active'", sql)  # 상태는 리터럴이 아니라 바인딩
         self.assertEqual(p["kind"], MM_MEMBER_KIND_CODE)

@@ -46,7 +46,8 @@ class TestListEntitiesCursorSql(unittest.TestCase):
 
     def test_집계는_CTE_안에_이어읽기_조건은_바깥에_있다(self) -> None:
         conn, cur = _conn_returning([])
-        gq.list_entities(conn, min_bundle_size=3, limit=50, after_count=5, after_uid="제주도")
+        gq.list_entities(conn, min_bundle_size=3, limit=50,
+                         after_tier=0, after_count=5, after_uid="제주도")
         sql, _p = _sql_and_params(cur)
         self.assertIn("WITH ent AS (", sql)
         # 노출 정의(HAVING 집계)는 그대로 안쪽에 남는다.
@@ -57,11 +58,17 @@ class TestListEntitiesCursorSql(unittest.TestCase):
                         "이어읽기 조건이 CTE 안쪽으로 들어갔다 — 집계는 WHERE 에서 비교할 수 없다")
 
     def test_정렬은_바깥에서_유일_tiebreaker_로_끝난다(self) -> None:
-        """헌법 3조 — 같은 질의가 같은 순서를 내야 커서가 성립한다."""
+        """헌법 3조 — 같은 질의가 같은 순서를 내야 커서가 성립한다.
+
+        099 G7 로 맨 앞에 **우선 티어**가 붙었다. 우선 대상을 주지 않으면 전원 0 이라 순서는
+        종전과 같고, 끝은 여전히 유일 tiebreaker(표기 키)다.
+        """
         conn, cur = _conn_returning([])
         gq.list_entities(conn, min_bundle_size=3, limit=50)
         sql, _p = _sql_and_params(cur)
-        self.assertIn("ORDER BY ent.confirmed_count DESC, ent.entity_uid ASC LIMIT %(limit)s", sql)
+        self.assertIn(
+            "ORDER BY ent.prio_tier DESC, ent.confirmed_count DESC, ent.entity_uid ASC "
+            "LIMIT %(limit)s", sql)
 
 
 class TestListEntitiesTieBoundary(unittest.TestCase):
@@ -69,7 +76,8 @@ class TestListEntitiesTieBoundary(unittest.TestCase):
 
     def test_동점이면_표기_키가_뒤인_것만_잇는다(self) -> None:
         conn, cur = _conn_returning([])
-        gq.list_entities(conn, min_bundle_size=3, limit=50, after_count=3, after_uid="나주")
+        gq.list_entities(conn, min_bundle_size=3, limit=50,
+                         after_tier=0, after_count=3, after_uid="나주")
         sql, p = _sql_and_params(cur)
         # 동점 아래(구성 자산 수가 더 적은 개체)는 전부 다음 쪽 대상.
         self.assertIn("ent.confirmed_count < %(after_count)s::bigint", sql)
@@ -81,6 +89,9 @@ class TestListEntitiesTieBoundary(unittest.TestCase):
         self.assertNotIn("ent.confirmed_count <= %(after_count)s", sql)
         self.assertNotIn("ent.entity_uid >= %(after_uid)s", sql)
         self.assertEqual((p["after_count"], p["after_uid"]), (3, "나주"))
+        # 099 G7 — 이 두 단은 **같은 우선 티어 안에서만** 적용된다(티어가 낮으면 무조건 다음 쪽).
+        self.assertIn("ent.prio_tier = %(after_tier)s::int", sql)
+        self.assertEqual(p["after_tier"], 0)
 
     def test_한쪽만_주면_거부한다(self) -> None:
         """반쪽 커서는 조건이 성립하지 않는다 — 조용히 무시하면 처음부터 다시 읽어 **중복**이 난다."""
@@ -89,6 +100,9 @@ class TestListEntitiesTieBoundary(unittest.TestCase):
             gq.list_entities(conn, min_bundle_size=3, limit=50, after_count=3)
         with self.assertRaises(ValueError):
             gq.list_entities(conn, min_bundle_size=3, limit=50, after_uid="나주")
+        # 099 G7 — 티어만 준 경우도 반쪽이다(정렬 키가 셋이라 값도 셋이어야 한다).
+        with self.assertRaises(ValueError):
+            gq.list_entities(conn, min_bundle_size=3, limit=50, after_count=3, after_uid="나주")
 
 
 class TestListEntitiesNoCursorRegression(unittest.TestCase):
@@ -116,7 +130,8 @@ class TestListEntitiesNoCursorRegression(unittest.TestCase):
             "description": None, "confirmed_count": 14, "total_count": 14,
             "modalities": ["video"], "keywords": None, "topics": None, "forms": None, "areas": None,
         }])
-        [row] = gq.list_entities(conn, min_bundle_size=3, limit=1, after_count=20, after_uid="가")
+        [row] = gq.list_entities(conn, min_bundle_size=3, limit=1,
+                                 after_tier=0, after_count=20, after_uid="가")
         self.assertEqual(row["entity_uid"], "제주도")
         self.assertEqual(row["confirmed_count"], 14)
         self.assertEqual(row["keywords"], [])

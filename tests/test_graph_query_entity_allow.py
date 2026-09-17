@@ -95,10 +95,11 @@ class TestListEntitiesAllowFilter(unittest.TestCase):
     def test_커서와_함께_쓸_수_있다(self) -> None:
         """검색 결과를 커서로 이어 읽는 것이 099 의 목적이다(spec §3-2a)."""
         conn, cur = _conn_returning([])
+        # 099 G7 로 정렬 키가 셋이 되어 책갈피도 세 값이다(우선 티어·구성 자산 수·표기 키).
         gq.list_entities(conn, min_bundle_size=3, limit=50, uid_allow={("작품", "훈민정음")},
-                         after_count=5, after_uid="가")
+                         after_tier=0, after_count=5, after_uid="가")
         sql, p = _sql_and_params(cur)
-        self.assertEqual((p["after_count"], p["after_uid"]), (5, "가"))
+        self.assertEqual((p["after_tier"], p["after_count"], p["after_uid"]), (0, 5, "가"))
         self.assertLess(sql.index("%(allow_types)s"), sql.index("%(after_count)s"))
 
 

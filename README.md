@@ -184,6 +184,11 @@ tests/          단위 테스트
 | 분류 스킬 | `src.mm_classify.read` | `label_names_of_assets` · `fetch_active_skills` |
 | LLM | `src.llm.client` | `get_llm_client` · `complete_text` · `complete_json` · `complete_vision_json` |
 
+> 🔴 **커서(책갈피)는 2026-09-17 에 깨는 변경이 있었습니다**(099 G7). `encode_cursor`·`decode_cursor`·
+> `browse_files` 가 **조건 지문**(`scope`/`expect_scope`)을 **필수**로 받습니다 — 호출부가 "이번 조회를
+> 정의하는 것 전부"를 문자열 하나로 모아 주면 커서가 그 지문을 담고 다음 쪽에서 대조합니다. 지문이
+> 없거나 다른 토큰은 `CursorError` 입니다(예전 토큰 포함). 이유·전환 방법은 `CHANGELOG.md` 참조.
+
 > ⚠️ `search_hybrid` 는 기존 멀티모달 검색 화면(종류별 그룹 응답)용이며 **새 화면은 `file_search.search_files` 를 쓴다**(대체 창구 — 같은 단어 절·점수식 · 개수·칩·페이징·정렬 · 12배 빠름). 남기는 이유는 모듈 docstring 에 있다. 표 셀은 이름만 적는다 — 위 표는 테스트(`tests/test_public_api.py`)가 그대로 읽는다.
 
 > 표에 없는 이름이 필요하면 코어에 **함수 이름 · 도메인 용어 인자 · 반환 레코드** 로 요청하십시오.

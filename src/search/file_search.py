@@ -1097,6 +1097,7 @@ def browse_files(
     operator: str = WORD_OPERATOR_DEFAULT,
     about_branch: bool = ABOUT_BRANCH_DEFAULT,
     refine: str | None = None,
+    scope: str,
 ) -> dict[str, Any]:
     """조건으로 좁힌 파일을 **커서로 이어 읽는다** — 1만 건 벽이 없다.
 
@@ -1118,8 +1119,15 @@ def browse_files(
         operator: 단어 매칭 연산자.
         about_branch: 개체(about) 갈래를 쓸지.
         refine: 결과 내 재검색어(099 G3). 랭킹 경로(``search_files``)와 **같은 부품**을 쓰므로
-            같은 입력이면 같은 집합이 나온다. refine 이 바뀌면 집합이 바뀌므로 화면은 **커서를 버리고
-            처음부터** 다시 받아야 한다(spec 099 §3-1).
+            같은 입력이면 같은 집합이 나온다.
+        scope: **이번 조회를 정의하는 것 전부**를 호출부가 모은 문자열(099 G7 · 조건 지문 재료).
+            커서에는 원문이 아니라 지문(해시)만 실리고, 다음 쪽에서 **같은 지문인지 대조**한다.
+            🔴 조건이 바뀌면 커서를 거부해 ``CursorError`` 를 올린다 — 종전에는 "바뀌면 커서를
+            버려라"가 **주석으로만** 있어 프론트가 실수하면 오류 없이 자료가 빠졌다(실측 2026-09-17:
+            전체 훑기 커서를 ``modality=text`` 에 쓰자 첫 건이 통째로 누락).
+            🔴 **기본값을 두지 않는다** — 깜빡 빠뜨리면 검사가 조용히 사라진다.
+            ⚠️ 무엇을 넣을지는 **호출부가 정한다**. 코어는 화면 파라미터를 알면 안 되고(093 경계),
+            여기 들어오는 것은 이미 "조건 원문"이 아니라 대조용 문자열 하나다.
 
     Returns:
         ``rows``·``total``·``scope_total``·``total_capped``·``facets``·``sort``·``size`` 에 더해
@@ -1128,8 +1136,8 @@ def browse_files(
 
     Raises:
         ValueError: 모르는 정렬·``relevance``·``size`` 범위 오류.
-        CursorError: 커서가 깨졌거나 요청 정렬과 어긋날 때, 정렬값 **개수**가 맞지 않을 때
-            (호출부가 400 으로 바꾼다).
+        CursorError: 커서가 깨졌거나 요청 정렬과 어긋날 때, 정렬값 **개수**가 맞지 않을 때,
+            **조건 지문이 없거나 다를 때**(호출부가 400 으로 바꾼다).
     """
     # 🔴 `search_files`(offset)를 고치지 않고 나란히 둔 이유: 두 함수의 **계약이 다르다.** 저쪽은
     #   "검색어가 있는 검색"이고 그 뜻이 docstring 에 봉인돼 있다. 관련도 정렬에서만 커서를 못 준다는
@@ -1143,7 +1151,8 @@ def browse_files(
     #   아래 ``build_browse_body`` 가 ValueError 로 끊으며, 여기서 먼저 죽으면 오류 종류가 바뀐다.
     order = SORT_OPTIONS.get(sort)
     after = decode_cursor(cursor, expect_sort=sort,
-                          expect_arity=len(order) if order else None) if cursor else None
+                          expect_arity=len(order) if order else None,
+                          expect_scope=scope) if cursor else None
 
     # ① 뜻으로 걸린 자산을 **한 번만** 구해 id 로 굳힌다(조건마다 다시 하면 집합이 갈린다 · 096).
     #    질의가 비면 벡터 검색을 돌릴 것이 없다 — 집합은 조건만으로 정해진다.
@@ -1184,7 +1193,7 @@ def browse_files(
     # 🔴 다음 커서는 **이번 쪽이 꽉 찼을 때만** 준다. 덜 찼으면 마지막 쪽이므로 None 을 주어
     #    화면이 "더 없음"을 알 수 있게 한다(빈 쪽을 한 번 더 받으러 가지 않는다).
     next_cursor = (
-        encode_cursor(sort, list(hits[-1].get("sort") or []))
+        encode_cursor(sort, list(hits[-1].get("sort") or []), scope=scope)
         if hits and len(hits) == int(size) and hits[-1].get("sort")
         else None
     )

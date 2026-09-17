@@ -44,6 +44,10 @@ from src.search.file_search import (
     search_files,
 )
 
+# 커서 조건 지문(099 G7). 이 파일이 보는 것은 **좁히기 절**이라 지문은 한 값으로 고정한다 —
+# 지문 자체의 계약은 `tests/test_browse_files_scope.py`·`tests/test_cursor_scope.py` 가 본다.
+_SCOPE = "q=한복|refine=배추"
+
 # 가짜 질의 임베딩 — 값에 뜻이 없다(본문 조립만 본다).
 VEC: tuple[float, ...] = (0.1, 0.2)
 
@@ -357,7 +361,7 @@ class TestSetEquivalence(unittest.TestCase):
         a = search_files(_TinyIndex(CORPUS), "idx", query="한복", query_vector=VEC,
                          sort="created_desc", size=10, refine="배추")
         b = browse_files(_TinyIndex(CORPUS), "idx", query="한복", query_vector=VEC,
-                         sort="created_desc", size=10, refine="배추")
+                         sort="created_desc", size=10, refine="배추", scope=_SCOPE)
         self.assertEqual([r["asset_id"] for r in a["rows"]], [r["asset_id"] for r in b["rows"]])
         self.assertEqual(a["total"], b["total"])
 
@@ -365,25 +369,25 @@ class TestSetEquivalence(unittest.TestCase):
         """091 에서는 원리상 불가능했다 — 좁히기가 **받아 온 50건 안**에서만 돌았기 때문이다."""
         # 등록일 **오름차순** 이라 `배추` 를 가진 a07 은 맨 뒤(3쪽)에 있다 — 1쪽엔 없다.
         plain = browse_files(_TinyIndex(CORPUS), "idx", query="한복", query_vector=VEC,
-                             sort="created_asc", size=3)
+                             sort="created_asc", size=3, scope=_SCOPE)
         first_page = [r["asset_id"] for r in plain["rows"]]
         self.assertEqual(first_page, ["a01", "a02", "a03"])
         self.assertNotIn("a07", first_page, "이 자산은 1쪽에 없어야 시험이 성립한다")
 
         narrowed = browse_files(_TinyIndex(CORPUS), "idx", query="한복", query_vector=VEC,
-                                sort="created_asc", size=3, refine="배추")
+                                sort="created_asc", size=3, refine="배추", scope=_SCOPE)
         self.assertEqual([r["asset_id"] for r in narrowed["rows"]], ["a07"])
         self.assertEqual(narrowed["total"], 1)
 
     def test_낱말_AND_는_두_낱말이_다른_필드에_있어도_걸린다(self) -> None:
         """`전통음식` 은 태그에 `배추` 는 요약에 있다 — 091 D2(다어절) 규율 그대로."""
         got = browse_files(_TinyIndex(CORPUS), "idx", query="한복", query_vector=VEC,
-                           sort="created_desc", size=10, refine="전통음식 배추")
+                           sort="created_desc", size=10, refine="전통음식 배추", scope=_SCOPE)
         self.assertEqual([r["asset_id"] for r in got["rows"]], ["a07"])
 
     def test_한_낱말이라도_없으면_빠진다(self) -> None:
         got = browse_files(_TinyIndex(CORPUS), "idx", query="한복", query_vector=VEC,
-                           sort="created_desc", size=10, refine="배추 없는말")
+                           sort="created_desc", size=10, refine="배추 없는말", scope=_SCOPE)
         self.assertEqual(got["rows"], [])
         self.assertEqual(got["total"], 0)
 
@@ -393,7 +397,7 @@ class TestScopeTotal(unittest.TestCase):
 
     def test_커서_경로가_두_모수를_함께_돌려준다(self) -> None:
         got = browse_files(_TinyIndex(CORPUS), "idx", query="한복", query_vector=VEC,
-                           sort="created_desc", size=3, refine="배추")
+                           sort="created_desc", size=3, refine="배추", scope=_SCOPE)
         self.assertEqual(got["scope_total"], 7)   # 지우면 7건
         self.assertEqual(got["total"], 1)         # 좁히면 1건
 
@@ -406,7 +410,7 @@ class TestScopeTotal(unittest.TestCase):
     def test_좁히기가_없으면_두_값이_같다(self) -> None:
         """항상 내보내는 값이라 refine 이 없을 때도 뜻이 있어야 한다(FR-006)."""
         got = browse_files(_TinyIndex(CORPUS), "idx", query="한복", query_vector=VEC,
-                           sort="created_desc", size=10)
+                           sort="created_desc", size=10, scope=_SCOPE)
         self.assertEqual(got["scope_total"], got["total"])
         self.assertEqual(got["total"], 7)
 
@@ -416,17 +420,17 @@ class TestCursorArity(unittest.TestCase):
 
     def test_개수가_틀린_커서는_엔진에_닿기_전에_끊긴다(self) -> None:
         """🔴 통과시키면 엔진이 400 을 내는데 그 예외는 CursorError 가 아니라 **HTTP 500** 이 된다."""
-        forged = encode_cursor("created_desc", ["2026-09-05"])   # 정렬 키는 2개인데 1개만
+        forged = encode_cursor("created_desc", ["2026-09-05"], scope=_SCOPE)   # 정렬 키는 2개인데 1개만
         client = _TinyIndex(CORPUS)
         with self.assertRaises(CursorError):
-            browse_files(client, "idx", query="", sort="created_desc", cursor=forged, size=3)
+            browse_files(client, "idx", query="", sort="created_desc", cursor=forged, size=3, scope=_SCOPE)
         self.assertEqual(client.bodies, [], "엔진에 질의가 나가면 안 된다")
 
     def test_개수가_맞는_커서는_그대로_이어_읽는다(self) -> None:
-        first = browse_files(_TinyIndex(CORPUS), "idx", query="", sort="created_desc", size=3)
+        first = browse_files(_TinyIndex(CORPUS), "idx", query="", sort="created_desc", size=3, scope=_SCOPE)
         self.assertIsNotNone(first["next_cursor"])
         second = browse_files(_TinyIndex(CORPUS), "idx", query="", sort="created_desc", size=3,
-                              cursor=first["next_cursor"])
+                              cursor=first["next_cursor"], scope=_SCOPE)
         self.assertEqual([r["asset_id"] for r in first["rows"]], ["a07", "a06", "a05"])
         self.assertEqual([r["asset_id"] for r in second["rows"]], ["a04", "a03", "a02"])
 

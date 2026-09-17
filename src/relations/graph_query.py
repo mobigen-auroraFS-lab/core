@@ -452,18 +452,42 @@ _ENTITY_ALLOW_FILTER_SQL = """
              WHERE al.t = {alias}.entity_type AND al.u = {alias}.entity_uid))
 """
 
+# **우선 티어**(099 G7) — 호출부가 앞세우라고 준 개체에 1, 나머지에 0.
+# 왜 필요한가(실측 2026-09-17): 이름으로 찾아도 그 개체가 위에 오지 않았다(`숭례문` 7위 · `경포대`
+# 15위). 정렬이 구성 자산 수뿐이라 **큰 개체가 늘 위**로 오기 때문이다. 도서관에서 제목이 정확히
+# 같은 책이 있는데도 "두꺼운 책부터" 꽂아 둔 셈이다.
+# 🔴 **누가 우선인지는 코어가 정하지 않는다** — "이름이 정확히 같다"는 판정은 화면 정책이라
+#    호출부가 집합으로 준다(093 책무 경계). 코어가 아는 것은 "이 짝들을 앞세워라"뿐이다.
+# 🔴 ``NULL``(우선 대상 없음)을 SQL 이 직접 가른다 — 배열이 NULL 이면 전원 0 이라 **종전 순서와
+#    완전히 같다**. 빈 배열도 결과가 같다(앞세울 개체가 없다). ``uid_allow`` 와 달리 여기서는
+#    NULL 과 빈 집합의 뜻이 **같다**: 저쪽은 "무엇을 남길까"(거르기)이고 이쪽은 "무엇을 앞세울까"
+#    (순서)이기 때문이다.
+_ENTITY_FIRST_TIER_SQL = """
+       CASE WHEN %(first_types)s::text[] IS NULL THEN 0
+            WHEN EXISTS (
+                 SELECT 1
+                   FROM unnest(%(first_types)s::text[], %(first_uids)s::text[]) AS fs(t, u)
+                  WHERE fs.t = n.entity_type AND fs.u = n.entity_uid) THEN 1
+            ELSE 0 END                               AS prio_tier
+"""
+
 # 이어읽기(keyset) 조건 — **동점 그룹을 갈라 잇는다**.
-# 정렬이 ``confirmed_count DESC, entity_uid ASC`` 라 튜플 비교(``(a,b) < (c,d)``)로는 못 쓴다(방향이 섞였다).
-# 🔴 동점 처리가 이 조건의 전부다: 구성 자산 수 3건짜리 개체가 수백 개인 것이 정상이라, 쪽 경계는
-#    거의 늘 동점 무더기 한가운데에 떨어진다. ``<`` 만 쓰면 그 무더기의 나머지를 **통째로 잃고**,
-#    ``<=`` 를 쓰면 **통째로 다시 읽는다**(중복). 둘 다 오류를 내지 않아 아무도 모른다.
+# 정렬이 ``prio_tier DESC, confirmed_count DESC, entity_uid ASC`` 라 튜플 비교(``(a,b) < (c,d)``)로는
+# 못 쓴다(방향이 섞였다).
+# 🔴 동점 처리가 이 조건의 전부다: 구성 자산 수 3건짜리 개체가 수백 개인 것이 정상이라(실측 291개
+#    무더기), 쪽 경계는 거의 늘 동점 무더기 한가운데에 떨어진다. ``<`` 만 쓰면 그 무더기의 나머지를
+#    **통째로 잃고**, ``<=`` 를 쓰면 **통째로 다시 읽는다**(중복). 둘 다 오류를 내지 않아 아무도 모른다.
+# 🔴 정렬 키가 셋이 되면 이 조건도 **3단**이어야 한다(099 G7). 티어 경계에서 한 단이 빠지면 우선
+#    무리의 꼬리나 평범한 무리의 머리가 통째로 날아간다 — 같은 종류의 조용한 오류다.
 # NULL(커서 없음)이면 조건 전체가 참이 되어 첫 쪽이 된다 — 커서 유무로 SQL 을 갈라 두면 한쪽만
-# 고쳐져 첫 쪽과 다음 쪽의 정의가 어긋난다.
+# 고쳐져 첫 쪽과 다음 쪽의 정의가 어긋난다. 세 값은 파이썬이 **함께 오거나 함께 없게** 막는다.
 _ENTITY_KEYSET_SQL = """
       (%(after_count)s::bigint IS NULL
-       OR ent.confirmed_count < %(after_count)s::bigint
-       OR (ent.confirmed_count = %(after_count)s::bigint
-           AND ent.entity_uid > %(after_uid)s::text))
+       OR ent.prio_tier < %(after_tier)s::int
+       OR (ent.prio_tier = %(after_tier)s::int
+           AND (ent.confirmed_count < %(after_count)s::bigint
+                OR (ent.confirmed_count = %(after_count)s::bigint
+                    AND ent.entity_uid > %(after_uid)s::text))))
 """
 
 # ⚠️ 본문을 CTE(``ent``)로 감싸는 이유: ``confirmed_count`` 는 ``HAVING COUNT(DISTINCT ge.src_node)``
@@ -502,7 +526,8 @@ SELECT n.entity_type, n.entity_uid, n.node_id,
          WHERE el.entity_type = n.entity_type
            AND el.entity_uid = n.entity_uid
            AND (elb->>'code') = el.label_code
-           AND el.label_code <> 'unassigned')          AS areas
+           AND el.label_code <> 'unassigned')          AS areas,
+{first_tier}
   FROM node n
   JOIN graph_edge ge    ON ge.dst_node = n.node_id
   JOIN relation_kind rk ON rk.relation_kind_id = ge.relation_kind_id
@@ -530,7 +555,7 @@ HAVING COUNT(DISTINCT ge.src_node) >= %(minsize)s
 )
 SELECT * FROM ent
  WHERE {keyset}
- ORDER BY ent.confirmed_count DESC, ent.entity_uid ASC
+ ORDER BY ent.prio_tier DESC, ent.confirmed_count DESC, ent.entity_uid ASC
  LIMIT %(limit)s
 """
 
@@ -630,6 +655,27 @@ def _allow_params(uid_allow: set[tuple[str, str]] | None) -> dict[str, Any]:
     return {"allow_types": [etype for etype, _ in pairs], "allow_uids": [uid for _, uid in pairs]}
 
 
+def _first_params(uid_first: set[tuple[str, str]] | None) -> dict[str, Any]:
+    """**앞세울 개체** 집합을 (타입, 표기) 두 배열로 편다(099 G7 · 순서 전용).
+
+    ⚠️ ``_allow_params`` 와 모양은 같지만 **뜻이 다르다**: 저쪽은 "무엇을 남길까"(거르기)라
+    ``None``(전체)과 빈 집합(0건)이 정반대지만, 이쪽은 "무엇을 앞세울까"(순서)라 둘 다
+    **앞세울 것이 없다**로 같은 결과가 된다. 그래도 두 표기를 모두 받는 이유는 호출부가 목록·총계에
+    같은 인자 묶음을 그대로 넘길 수 있게 하기 위해서다.
+
+    Args:
+        uid_first: 맨 앞에 둘 ``(entity_type, entity_uid)`` 집합. ``None`` 이면 우선 대상 없음.
+
+    Returns:
+        ``{"first_types": […] 또는 None, "first_uids": […] 또는 None}`` — 짝이 유지되도록 **정렬**
+        한다(같은 집합이면 같은 바인딩 · 헌법 3조).
+    """
+    if uid_first is None:
+        return {"first_types": None, "first_uids": None}
+    pairs = sorted((str(etype), str(uid)) for etype, uid in uid_first)
+    return {"first_types": [etype for etype, _ in pairs], "first_uids": [uid for _, uid in pairs]}
+
+
 def _sorted_strs(values: Any) -> list[str]:
     """배열 컬럼을 **빈 값 제거 · 문자열 · 가나다 순**의 리스트로 만든다(결정적 순서).
 
@@ -651,11 +697,16 @@ def list_entities(
     limit: int,
     statuses: list[str] | None = None,
     form_skill_codes: list[str] | None = None,
+    after_tier: int | None = None,
     after_count: int | None = None,
     after_uid: str | None = None,
     uid_allow: set[tuple[str, str]] | None = None,
+    uid_first: set[tuple[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
     """노출 개체(멀티모달 메타) **목록**을 구성 자산 수 내림차순으로 조회한다(읽기 전용 · 095 FR-1).
+
+    ⚠️ 099 G7 부터 정렬 앞에 **우선 티어**가 한 단 붙는다(``uid_first`` — 호출부가 앞세우라고 준
+    개체). 주지 않으면 전원 같은 티어라 **종전과 완전히 같은 순서**다.
 
     개체 화면의 카드 그리드가 쓰는 재료다. 카드 한 장에 필요한 사실을 한 질의로 모은다 — 이름·출처·생성
     설명·구성 자산 수(필터 안)·전체 자산 수(필터 무관)·모달리티·근거 키워드·주제·형식 라벨·갈래.
@@ -669,26 +720,37 @@ def list_entities(
         statuses: 소속 엣지 상태. ``None`` 이면 active+proposed(초기엔 전건 proposed 라 빼면 화면이 빈다).
         form_skill_codes: 형식 축(``forms``)으로 읽을 자산 라벨 스킬 코드들. ``None``·빈 목록이면 ``forms``
             는 빈 리스트다. 어느 스킬을 형식 축으로 보이나는 화면 정책이라 호출자가 준다(데모는 ``content_form`` 하나).
-        after_count: **이어읽기 책갈피** — 직전 쪽 마지막 개체의 ``confirmed_count``. 이 값보다 적은
-            개체(그리고 같은 값이면 ``after_uid`` 보다 뒤인 개체)부터 잇는다. ``None`` 이면 첫 쪽이다.
-        after_uid: 이어읽기 책갈피의 ``entity_uid``(동점 무더기를 가르는 유일 키). ``after_count`` 와
-            **둘 다** 주거나 둘 다 생략해야 한다 — 한쪽만 주면 ``ValueError``.
+        after_tier: **이어읽기 책갈피** ①(099 G7) — 직전 쪽 마지막 개체의 우선 티어(1=앞세운 개체·
+            0=나머지). 정렬 첫 키라 이것부터 잇는다. ``None`` 이면 첫 쪽이다.
+        after_count: 이어읽기 책갈피 ② — 직전 쪽 마지막 개체의 ``confirmed_count``. 같은 티어 안에서
+            이 값보다 적은 개체(그리고 같은 값이면 ``after_uid`` 보다 뒤인 개체)부터 잇는다.
+        after_uid: 이어읽기 책갈피 ③ — ``entity_uid``(동점 무더기를 가르는 유일 키). 🔴 세 값은
+            **함께 주거나 함께 생략**해야 한다 — 일부만 주면 ``ValueError``.
         uid_allow: 허용할 개체 ``(entity_type, entity_uid)`` 집합 — 검색(집합 판정)이 고른 개체만
             남기는 화이트리스트다(099 G4). 🔴 **``None`` 과 빈 집합은 다른 값이다**: ``None`` 이면
             필터를 걸지 않아 **종전과 완전히 같고**, 빈 집합이면 **0건**이다(검색했는데 매칭이 없음).
+        uid_first: **맨 앞에 둘** 개체 집합(099 G7 · 순서만 바꾼다 · 거르지 않는다). 이름으로 찾아도
+            그 개체가 7위·15위에 있던 결함을 푸는 자리다. 🔴 누가 우선인지의 **판정 규칙은 호출부**
+            (화면)에 있다 — 코어는 "이 짝들을 앞세워라"만 안다(093 책무 경계).
+            ⚠️ ``uid_allow`` 와 달리 ``None`` 과 빈 집합의 **뜻이 같다**(앞세울 것이 없음 = 종전 순서).
 
     Raises:
-        ValueError: ``after_count``·``after_uid`` 중 한쪽만 준 경우. 조용히 무시하면 첫 쪽을 다시
-            돌려주어 **중복**이 나는데, 오류가 없어 화면은 그것을 알 수 없다.
+        ValueError: ``after_tier``·``after_count``·``after_uid`` 중 일부만 준 경우. 조용히 무시하면
+            첫 쪽을 다시 돌려주어 **중복**이 나는데, 오류가 없어 화면은 그것을 알 수 없다.
 
     Returns:
         ``[{entity_type, entity_uid, node_id, name, source, description, confirmed_count, total_count,
-        modalities, keywords, topics, forms, areas}]`` — 구성 자산 수 내림차순 → 표기 키 오름차순.
+        modalities, keywords, topics, forms, areas}]`` — 우선 티어 내림차순 → 구성 자산 수 내림차순 →
+        표기 키 오름차순(``uid_first`` 가 없으면 종전과 같은 두 단 정렬이다).
         배열 필드는 빈 값을 뺀 **가나다 순**이다(같은 입력이면 같은 순서 · 헌법 3조). ``keywords`` 는 원문
         **전부**다 — 상위 몇 개를 어떤 순서로 보일지는 호출자 몫. id 는 전부 문자열.
     """
-    if (after_count is None) != (after_uid is None):
-        raise ValueError("이어읽기 책갈피는 after_count·after_uid 를 함께 줘야 한다(반쪽이면 중복이 난다)")
+    # 세 값은 **함께** 와야 한다 — 하나라도 빠지면 이어읽기 조건이 성립하지 않는다(099 G7 로
+    # 정렬 키가 셋이 되며 두 값에서 늘었다. 옛 2값 토큰은 호출부의 커서 검사가 400 으로 막는다).
+    bookmark = (after_tier, after_count, after_uid)
+    if any(v is not None for v in bookmark) and any(v is None for v in bookmark):
+        raise ValueError(
+            "이어읽기 책갈피는 after_tier·after_count·after_uid 를 함께 줘야 한다(반쪽이면 중복이 난다)")
     params = {
         "kind": MM_MEMBER_KIND_CODE,
         "statuses": _wanted_statuses(statuses),
@@ -696,14 +758,17 @@ def list_entities(
         "minsize": int(min_bundle_size),
         "limit": int(limit),
         "form_skills": [str(c) for c in (form_skill_codes or [])],
+        "after_tier": None if after_tier is None else int(after_tier),
         "after_count": None if after_count is None else int(after_count),
         "after_uid": None if after_uid is None else str(after_uid),
         **_area_params(area_names),
         **_allow_params(uid_allow),
+        **_first_params(uid_first),
     }
     sql = _LIST_ENTITIES_SQL.format(
         area_filter=_ENTITY_AREA_FILTER_SQL.format(alias="n"),
         allow_filter=_ENTITY_ALLOW_FILTER_SQL.format(alias="n"),
+        first_tier=_ENTITY_FIRST_TIER_SQL.strip("\n"),
         keyset=_ENTITY_KEYSET_SQL.strip())
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(sql, params)
@@ -736,6 +801,7 @@ def count_entities(
     min_bundle_size: int,
     statuses: list[str] | None = None,
     uid_allow: set[tuple[str, str]] | None = None,
+    uid_first: set[tuple[str, str]] | None = None,
 ) -> int:
     """지금 걸린 조건으로 **노출 개체가 모두 몇 개인지** 센다(읽기 전용 · 099 FR-006).
 
@@ -751,6 +817,10 @@ def count_entities(
         statuses: 소속 엣지 상태. ``None`` 이면 active+proposed(목록 기본과 같다).
         uid_allow: 개체 화이트리스트 — **목록과 같은 값을 줘야 한다**(099 G4). 총계와 목록이 다른
             모수를 말하면 "N건 중 M건"이 거짓말이 된다. ``None`` = 필터 없음 · 빈 집합 = 0건.
+        uid_first: 목록에서 **맨 앞에 둘** 개체 집합(099 G7). 🔴 **총계는 이 값에 영향을 받지 않는다**
+            — 순서를 바꿀 뿐 대상을 늘리거나 줄이지 않기 때문이다(줄을 어떻게 세우든 사람 수는 같다).
+            그래도 인자로 받는 이유는 호출부가 목록·총계에 **같은 인자 묶음**을 그대로 넘겨
+            "조건이 어긋난 두 수"를 만들지 않게 하기 위해서다. 단위 테스트가 무영향을 봉인한다.
 
     Returns:
         개체 수(0 이상). 상한에 걸리지 않는 **모수**다.
