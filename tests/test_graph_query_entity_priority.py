@@ -6,15 +6,17 @@
 있는데도 "두꺼운 책부터" 꽂아 둔 셈이다.
 
 그래서 정렬을 **3단**으로 바꾼다: ``우선티어 DESC → 구성 자산 수 DESC → 표기 키 ASC``.
+(2026-09-18 에 마지막에 ``종류 ASC`` 가 한 단 더 붙어 **4단**이 됐다 — 표기만으로는 유일하지
+않아서다. 같은 표기가 종류로 갈린 개체가 실제로 있다.)
 🔴 **누가 우선인지는 코어가 정하지 않는다** — 호출부(화면)가 집합(``uid_first``)으로 준다.
 "이름이 정확히 같다"는 판정은 화면 정책이고, 코어에 넣으면 화면이 바뀔 때마다 코어를 고쳐야 한다.
 
 🔴 여기서 가장 조심하는 것은 **회귀**다. 커서(keyset)는 099 G1 에서 가장 공들여 검증한 자리이고,
 실측상 구성 자산 3건짜리 동점 무더기가 **291개**라 쪽 경계는 거의 늘 동점 한가운데 떨어진다.
-정렬 키가 하나 늘면 이어읽기 조건도 함께 3단이 되어야 하며, 한 단이라도 빠지면 그 무더기를
+정렬 키가 하나 늘면 이어읽기 조건도 함께 같은 단수가 되어야 하며, 한 단이라도 빠지면 그 무더기를
 **통째로 잃거나 통째로 중복**한다(둘 다 오류가 나지 않아 아무도 모른다).
 
-봉인 목록: ① 정렬 3단 ② 커서 조건 3단 ③ ``None``/``set()`` 이면 종전과 같다 ④ 책갈피 세 값 전부
+봉인 목록: ① 정렬 4단 ② 커서 조건 4단 ③ ``None``/``set()`` 이면 종전과 같다 ④ 책갈피 네 값 전부
 있어야 한다 ⑤ 총계는 우선 티어와 무관하다.
 """
 
@@ -59,14 +61,15 @@ def _sql_and_params(cur) -> tuple[str, dict]:
 
 
 class TestPriorityOrder(unittest.TestCase):
-    """① 정렬이 3단이다 — 우선 티어가 **맨 앞**."""
+    """① 정렬이 4단이다 — 우선 티어가 **맨 앞**, 자연키 전체가 **맨 뒤**."""
 
     def test_정렬은_우선티어_구성수_표기키_순이다(self) -> None:
         conn, cur = _conn_returning([])
         gq.list_entities(conn, min_bundle_size=3, limit=50, uid_first={("장소", "숭례문")})
         sql, _p = _sql_and_params(cur)
         self.assertIn(
-            "ORDER BY ent.prio_tier DESC, ent.confirmed_count DESC, ent.entity_uid ASC "
+            "ORDER BY ent.prio_tier DESC, ent.confirmed_count DESC, "
+            "ent.entity_uid ASC, ent.entity_type ASC "
             "LIMIT %(limit)s", sql)
 
     def test_우선_집합은_타입과_표기를_짝으로_맞춘다(self) -> None:
@@ -89,12 +92,12 @@ class TestPriorityOrder(unittest.TestCase):
 
 
 class TestPriorityKeyset(unittest.TestCase):
-    """② 커서 조건도 3단 — 티어 경계와 동점 무더기를 함께 다룬다."""
+    """② 커서 조건도 4단 — 티어 경계·동점 무더기·같은 표기를 함께 다룬다."""
 
-    def test_이어읽기_조건이_3단이다(self) -> None:
+    def test_이어읽기_조건이_4단이다(self) -> None:
         conn, cur = _conn_returning([])
         gq.list_entities(conn, min_bundle_size=3, limit=50,
-                         after_tier=1, after_count=5, after_uid="숭례문",
+                         after_tier=1, after_count=5, after_uid="숭례문", after_type="장소",
                          uid_first={("장소", "숭례문")})
         sql, p = _sql_and_params(cur)
         # ⓐ 티어가 낮은 개체는 전부 다음 쪽(우선 무리를 다 읽은 뒤 평범한 무리로 넘어간다).
@@ -103,28 +106,36 @@ class TestPriorityKeyset(unittest.TestCase):
         self.assertIn(
             "ent.prio_tier = %(after_tier)s::int AND (ent.confirmed_count < %(after_count)s::bigint "
             "OR (ent.confirmed_count = %(after_count)s::bigint "
-            "AND ent.entity_uid > %(after_uid)s::text))", sql)
+            "AND (ent.entity_uid > %(after_uid)s::text", sql)
+        # 🔴 표기까지 같으면 종류로 가른다 — 이 단이 없으면 같은 표기의 두 개체 중 하나가 샌다.
+        self.assertIn(
+            "ent.entity_uid = %(after_uid)s::text AND ent.entity_type > %(after_type)s::text", sql)
+        self.assertNotIn("ent.entity_type >= %(after_type)s", sql)
         # 🔴 느슨한 비교는 금물 — `<=` 면 동점 무더기를 통째로 다시 읽는다(중복).
         self.assertNotIn("ent.prio_tier <= %(after_tier)s", sql)
         self.assertNotIn("ent.confirmed_count <= %(after_count)s", sql)
         self.assertNotIn("ent.entity_uid >= %(after_uid)s", sql)
-        self.assertEqual((p["after_tier"], p["after_count"], p["after_uid"]), (1, 5, "숭례문"))
+        self.assertEqual((p["after_tier"], p["after_count"], p["after_uid"], p["after_type"]),
+                         (1, 5, "숭례문", "장소"))
 
     def test_책갈피는_세_값을_함께_줘야_한다(self) -> None:
         """반쪽 책갈피를 조용히 무시하면 첫 쪽을 다시 읽어 **중복**이 나는데 오류가 없다."""
         conn, _cur = _conn_returning([])
         for kw in ({"after_tier": 0}, {"after_count": 3}, {"after_uid": "나주"},
+                   {"after_type": "장소"},
                    {"after_count": 3, "after_uid": "나주"},
-                   {"after_tier": 0, "after_count": 3}):
+                   {"after_tier": 0, "after_count": 3},
+                   {"after_tier": 0, "after_count": 3, "after_uid": "나주"}):
             with self.subTest(kw=kw), self.assertRaises(ValueError):
                 gq.list_entities(conn, min_bundle_size=3, limit=50, **kw)
 
     def test_세_값을_모두_주면_통과한다(self) -> None:
         conn, cur = _conn_returning([])
         gq.list_entities(conn, min_bundle_size=3, limit=50,
-                         after_tier=0, after_count=3, after_uid="나주")
+                         after_tier=0, after_count=3, after_uid="나주", after_type="장소")
         _sql, p = _sql_and_params(cur)
-        self.assertEqual((p["after_tier"], p["after_count"], p["after_uid"]), (0, 3, "나주"))
+        self.assertEqual((p["after_tier"], p["after_count"], p["after_uid"], p["after_type"]),
+                         (0, 3, "나주", "장소"))
 
 
 class TestNoPriorityRegression(unittest.TestCase):

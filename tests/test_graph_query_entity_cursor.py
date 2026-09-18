@@ -47,7 +47,7 @@ class TestListEntitiesCursorSql(unittest.TestCase):
     def test_집계는_CTE_안에_이어읽기_조건은_바깥에_있다(self) -> None:
         conn, cur = _conn_returning([])
         gq.list_entities(conn, min_bundle_size=3, limit=50,
-                         after_tier=0, after_count=5, after_uid="제주도")
+                         after_tier=0, after_count=5, after_uid="제주도", after_type="장소")
         sql, _p = _sql_and_params(cur)
         self.assertIn("WITH ent AS (", sql)
         # 노출 정의(HAVING 집계)는 그대로 안쪽에 남는다.
@@ -60,15 +60,17 @@ class TestListEntitiesCursorSql(unittest.TestCase):
     def test_정렬은_바깥에서_유일_tiebreaker_로_끝난다(self) -> None:
         """헌법 3조 — 같은 질의가 같은 순서를 내야 커서가 성립한다.
 
-        099 G7 로 맨 앞에 **우선 티어**가 붙었다. 우선 대상을 주지 않으면 전원 0 이라 순서는
-        종전과 같고, 끝은 여전히 유일 tiebreaker(표기 키)다.
+        099 G7 로 맨 앞에 **우선 티어**가 붙었고, 2026-09-18 에 맨 뒤로 **종류**가 붙었다.
+        표기 하나로는 유일하지 않아서다 — 같은 표기가 종류로 갈린 개체가 실제로 있고(``백두산``
+        장소/작품 등 4쌍), 그 둘이 동점이 되면 순서가 정해지지 않는다. 끝은 이제 개체의
+        **자연키 전체**(표기+종류)라 같은 줄이 둘 나올 수 없다.
         """
         conn, cur = _conn_returning([])
         gq.list_entities(conn, min_bundle_size=3, limit=50)
         sql, _p = _sql_and_params(cur)
         self.assertIn(
-            "ORDER BY ent.prio_tier DESC, ent.confirmed_count DESC, ent.entity_uid ASC "
-            "LIMIT %(limit)s", sql)
+            "ORDER BY ent.prio_tier DESC, ent.confirmed_count DESC, "
+            "ent.entity_uid ASC, ent.entity_type ASC LIMIT %(limit)s", sql)
 
 
 class TestListEntitiesTieBoundary(unittest.TestCase):
@@ -77,18 +79,22 @@ class TestListEntitiesTieBoundary(unittest.TestCase):
     def test_동점이면_표기_키가_뒤인_것만_잇는다(self) -> None:
         conn, cur = _conn_returning([])
         gq.list_entities(conn, min_bundle_size=3, limit=50,
-                         after_tier=0, after_count=3, after_uid="나주")
+                         after_tier=0, after_count=3, after_uid="나주", after_type="장소")
         sql, p = _sql_and_params(cur)
         # 동점 아래(구성 자산 수가 더 적은 개체)는 전부 다음 쪽 대상.
         self.assertIn("ent.confirmed_count < %(after_count)s::bigint", sql)
         # 🔴 동점 무더기 안에서는 **표기 키가 뒤인 것만** — `<` 만 있으면 동점 나머지를 통째로 잃고
         #    `<=` 면 통째로 다시 읽는다(중복). 둘 다 사용자에겐 조용한 오류다.
         self.assertIn(
-            "ent.confirmed_count = %(after_count)s::bigint AND ent.entity_uid > %(after_uid)s::text",
-            sql)
+            "ent.confirmed_count = %(after_count)s::bigint "
+            "AND (ent.entity_uid > %(after_uid)s::text", sql)
+        # 표기까지 같은 자리는 **종류**로 가른다(자연키가 둘이라 표기만으로는 유일하지 않다).
+        self.assertIn(
+            "ent.entity_uid = %(after_uid)s::text AND ent.entity_type > %(after_type)s::text", sql)
+        self.assertNotIn("ent.entity_type >= %(after_type)s", sql)
         self.assertNotIn("ent.confirmed_count <= %(after_count)s", sql)
         self.assertNotIn("ent.entity_uid >= %(after_uid)s", sql)
-        self.assertEqual((p["after_count"], p["after_uid"]), (3, "나주"))
+        self.assertEqual((p["after_count"], p["after_uid"], p["after_type"]), (3, "나주", "장소"))
         # 099 G7 — 이 두 단은 **같은 우선 티어 안에서만** 적용된다(티어가 낮으면 무조건 다음 쪽).
         self.assertIn("ent.prio_tier = %(after_tier)s::int", sql)
         self.assertEqual(p["after_tier"], 0)
@@ -100,9 +106,13 @@ class TestListEntitiesTieBoundary(unittest.TestCase):
             gq.list_entities(conn, min_bundle_size=3, limit=50, after_count=3)
         with self.assertRaises(ValueError):
             gq.list_entities(conn, min_bundle_size=3, limit=50, after_uid="나주")
-        # 099 G7 — 티어만 준 경우도 반쪽이다(정렬 키가 셋이라 값도 셋이어야 한다).
+        # 099 G7 — 티어만 준 경우도 반쪽이다(정렬 키가 넷이라 값도 넷이어야 한다).
         with self.assertRaises(ValueError):
             gq.list_entities(conn, min_bundle_size=3, limit=50, after_count=3, after_uid="나주")
+        # 2026-09-18 — 종류가 빠진 3값 책갈피도 반쪽이다(같은 표기를 가르지 못한다).
+        with self.assertRaises(ValueError):
+            gq.list_entities(conn, min_bundle_size=3, limit=50,
+                             after_tier=0, after_count=3, after_uid="나주")
 
 
 class TestListEntitiesNoCursorRegression(unittest.TestCase):
@@ -131,7 +141,7 @@ class TestListEntitiesNoCursorRegression(unittest.TestCase):
             "modalities": ["video"], "keywords": None, "topics": None, "forms": None, "areas": None,
         }])
         [row] = gq.list_entities(conn, min_bundle_size=3, limit=1,
-                                 after_tier=0, after_count=20, after_uid="가")
+                                 after_tier=0, after_count=20, after_uid="가", after_type="장소")
         self.assertEqual(row["entity_uid"], "제주도")
         self.assertEqual(row["confirmed_count"], 14)
         self.assertEqual(row["keywords"], [])

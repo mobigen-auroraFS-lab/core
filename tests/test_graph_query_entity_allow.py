@@ -97,9 +97,10 @@ class TestListEntitiesAllowFilter(unittest.TestCase):
         conn, cur = _conn_returning([])
         # 099 G7 로 정렬 키가 셋이 되어 책갈피도 세 값이다(우선 티어·구성 자산 수·표기 키).
         gq.list_entities(conn, min_bundle_size=3, limit=50, uid_allow={("작품", "훈민정음")},
-                         after_tier=0, after_count=5, after_uid="가")
+                         after_tier=0, after_count=5, after_uid="가", after_type="장소")
         sql, p = _sql_and_params(cur)
-        self.assertEqual((p["after_tier"], p["after_count"], p["after_uid"]), (0, 5, "가"))
+        self.assertEqual((p["after_tier"], p["after_count"], p["after_uid"], p["after_type"]),
+                         (0, 5, "가", "장소"))
         self.assertLess(sql.index("%(allow_types)s"), sql.index("%(after_count)s"))
 
 

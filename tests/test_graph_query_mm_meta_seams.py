@@ -48,7 +48,8 @@ class TestListEntities(unittest.TestCase):
         # 종전 순서와 같다). 보는 것은 그대로다 — 유일 tiebreaker(표기 키)로 끝나는 결정적 정렬 +
         # 상한이 **바인딩**인지.
         self.assertIn(
-            "ORDER BY ent.prio_tier DESC, ent.confirmed_count DESC, ent.entity_uid ASC "
+            "ORDER BY ent.prio_tier DESC, ent.confirmed_count DESC, "
+            "ent.entity_uid ASC, ent.entity_type ASC "
             "LIMIT %(limit)s", sql)
         self.assertIn("el.label_code <> 'unassigned'", sql)  # 갈래 집계에서 미부여 제외
         self.assertNotIn("'active'", sql)  # 상태는 리터럴이 아니라 바인딩

@@ -477,8 +477,13 @@ _ENTITY_FIRST_TIER_SQL = """
 # 🔴 동점 처리가 이 조건의 전부다: 구성 자산 수 3건짜리 개체가 수백 개인 것이 정상이라(실측 291개
 #    무더기), 쪽 경계는 거의 늘 동점 무더기 한가운데에 떨어진다. ``<`` 만 쓰면 그 무더기의 나머지를
 #    **통째로 잃고**, ``<=`` 를 쓰면 **통째로 다시 읽는다**(중복). 둘 다 오류를 내지 않아 아무도 모른다.
-# 🔴 정렬 키가 셋이 되면 이 조건도 **3단**이어야 한다(099 G7). 티어 경계에서 한 단이 빠지면 우선
-#    무리의 꼬리나 평범한 무리의 머리가 통째로 날아간다 — 같은 종류의 조용한 오류다.
+# 🔴 정렬 키가 넷이 되면 이 조건도 **4단**이어야 한다. 한 단이 빠지면 그 경계의 무리가 통째로
+#    날아가거나 두 번 읽힌다 — 오류 없이 조용히.
+# 🔴 마지막 단이 ``entity_type`` 인 이유(2026-09-18): 개체의 자연키는 **(종류, 표기) 둘**이다.
+#    같은 표기가 종류로 갈린 개체가 실제로 있고(``백두산`` 장소/작품 등 4쌍), 그 둘이 같은 티어·
+#    같은 구성 자산 수가 되면 표기까지 같아 **순서가 정해지지 않는다.** 책갈피는 "마지막 값 다음
+#    부터"라 같은 값이 둘이면 하나를 건너뛰거나 두 번 낸다. 종류를 **표기 뒤에** 둔 것은 이미
+#    정해져 있던 순서를 바꾸지 않기 위해서다(앞에 두면 동점 무리가 종류별로 뭉쳐 보인다).
 # NULL(커서 없음)이면 조건 전체가 참이 되어 첫 쪽이 된다 — 커서 유무로 SQL 을 갈라 두면 한쪽만
 # 고쳐져 첫 쪽과 다음 쪽의 정의가 어긋난다. 세 값은 파이썬이 **함께 오거나 함께 없게** 막는다.
 _ENTITY_KEYSET_SQL = """
@@ -487,7 +492,9 @@ _ENTITY_KEYSET_SQL = """
        OR (ent.prio_tier = %(after_tier)s::int
            AND (ent.confirmed_count < %(after_count)s::bigint
                 OR (ent.confirmed_count = %(after_count)s::bigint
-                    AND ent.entity_uid > %(after_uid)s::text))))
+                    AND (ent.entity_uid > %(after_uid)s::text
+                         OR (ent.entity_uid = %(after_uid)s::text
+                             AND ent.entity_type > %(after_type)s::text))))))
 """
 
 # ⚠️ 본문을 CTE(``ent``)로 감싸는 이유: ``confirmed_count`` 는 ``HAVING COUNT(DISTINCT ge.src_node)``
@@ -555,7 +562,8 @@ HAVING COUNT(DISTINCT ge.src_node) >= %(minsize)s
 )
 SELECT * FROM ent
  WHERE {keyset}
- ORDER BY ent.prio_tier DESC, ent.confirmed_count DESC, ent.entity_uid ASC
+ ORDER BY ent.prio_tier DESC, ent.confirmed_count DESC,
+          ent.entity_uid ASC, ent.entity_type ASC
  LIMIT %(limit)s
 """
 
@@ -700,6 +708,7 @@ def list_entities(
     after_tier: int | None = None,
     after_count: int | None = None,
     after_uid: str | None = None,
+    after_type: str | None = None,
     uid_allow: set[tuple[str, str]] | None = None,
     uid_first: set[tuple[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
@@ -724,7 +733,9 @@ def list_entities(
             0=나머지). 정렬 첫 키라 이것부터 잇는다. ``None`` 이면 첫 쪽이다.
         after_count: 이어읽기 책갈피 ② — 직전 쪽 마지막 개체의 ``confirmed_count``. 같은 티어 안에서
             이 값보다 적은 개체(그리고 같은 값이면 ``after_uid`` 보다 뒤인 개체)부터 잇는다.
-        after_uid: 이어읽기 책갈피 ③ — ``entity_uid``(동점 무더기를 가르는 유일 키). 🔴 세 값은
+        after_type: 이어읽기 책갈피 ④ — ``entity_type``. 표기까지 같은 자리를 가른다(자연키가
+            (종류, 표기) 둘이라 표기만으로는 유일하지 않다).
+        after_uid: 이어읽기 책갈피 ③ — ``entity_uid``. 🔴 네 값은
             **함께 주거나 함께 생략**해야 한다 — 일부만 주면 ``ValueError``.
         uid_allow: 허용할 개체 ``(entity_type, entity_uid)`` 집합 — 검색(집합 판정)이 고른 개체만
             남기는 화이트리스트다(099 G4). 🔴 **``None`` 과 빈 집합은 다른 값이다**: ``None`` 이면
@@ -745,12 +756,13 @@ def list_entities(
         배열 필드는 빈 값을 뺀 **가나다 순**이다(같은 입력이면 같은 순서 · 헌법 3조). ``keywords`` 는 원문
         **전부**다 — 상위 몇 개를 어떤 순서로 보일지는 호출자 몫. id 는 전부 문자열.
     """
-    # 세 값은 **함께** 와야 한다 — 하나라도 빠지면 이어읽기 조건이 성립하지 않는다(099 G7 로
-    # 정렬 키가 셋이 되며 두 값에서 늘었다. 옛 2값 토큰은 호출부의 커서 검사가 400 으로 막는다).
-    bookmark = (after_tier, after_count, after_uid)
+    # 네 값은 **함께** 와야 한다 — 하나라도 빠지면 이어읽기 조건이 성립하지 않는다(정렬 키가
+    # 넷이라 값도 넷이다. 옛 2·3값 토큰은 호출부의 커서 길이 검사가 400 으로 막는다).
+    bookmark = (after_tier, after_count, after_uid, after_type)
     if any(v is not None for v in bookmark) and any(v is None for v in bookmark):
         raise ValueError(
-            "이어읽기 책갈피는 after_tier·after_count·after_uid 를 함께 줘야 한다(반쪽이면 중복이 난다)")
+            "이어읽기 책갈피는 after_tier·after_count·after_uid·after_type 을 함께 줘야 한다"
+            "(반쪽이면 중복이 난다)")
     params = {
         "kind": MM_MEMBER_KIND_CODE,
         "statuses": _wanted_statuses(statuses),
@@ -761,6 +773,7 @@ def list_entities(
         "after_tier": None if after_tier is None else int(after_tier),
         "after_count": None if after_count is None else int(after_count),
         "after_uid": None if after_uid is None else str(after_uid),
+        "after_type": None if after_type is None else str(after_type),
         **_area_params(area_names),
         **_allow_params(uid_allow),
         **_first_params(uid_first),
