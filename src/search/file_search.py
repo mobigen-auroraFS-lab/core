@@ -451,6 +451,9 @@ def refine_clause(refine: str | None) -> dict[str, Any] | None:
     한 낱말은 태그에, 다른 낱말은 요약에 있는 경우가 흔해서 한 필드에 전부 있기를 요구하면 실제로는
     거의 걸리지 않는다(091 §2-4). 반대로 낱말끼리 OR 로 하면 좁혀지지 않는다(그건 찾아오기 규칙이다).
 
+    한 낱말이 다시 형태소로 쪼개지는 층에서도 AND 다(``operator: "and"``) — 빼면 조각 하나만 맞아도
+    걸려 좁히기가 오히려 결과를 늘린다. 설계 배경: ``docs/설계_변경이력.md`` 2026-09-18.
+
     Args:
         refine: 재검색어 원문. 공백으로 쪼갠 낱말이 그대로 AND 조건이 된다. ``None``·빈 문자열·
             공백뿐이면 **절을 만들지 않는다** — 칸을 비우면 좁히기 전으로 돌아가는 되돌림의 실질이다.
@@ -460,14 +463,17 @@ def refine_clause(refine: str | None) -> dict[str, Any] | None:
         (호출부가 "조건을 얹지 않음"으로 읽는다).
     """
     # 정규화(``normalize_text_key``)를 여기서 걸지 않는다 — 색인과 질의가 **같은 분석기**를 지나야
-    #   대칭이 성립하는데, 미리 소문자로 바꾸면 분석기에 소문자 필터가 없는 이 색인에서는 `AI` 로
-    #   색인된 문서를 `ai` 로 묻게 되어 오히려 못 찾는다. 낱말 나누기(공백)만 우리가 한다.
+    #   대칭이 성립한다. 우리가 미리 손대면 그 대칭이 깨진다. 낱말 나누기(공백)만 우리가 한다.
+    #   (대소문자는 분석기의 ``lowercase`` 필터가 양쪽에 똑같이 걸어 준다 — 2026-09-17 추가.)
     tokens = [t for t in (refine or "").split() if t]
     if not tokens:
         return None
     return {"bool": {"filter": [
         {"bool": {
-            "should": [{"match": {field: {"query": token}}} for field in REFINE_FIELDS],
+            "should": [
+                {"match": {field: {"query": token, "operator": "and"}}}
+                for field in REFINE_FIELDS
+            ],
             "minimum_should_match": 1,
         }}
         for token in tokens

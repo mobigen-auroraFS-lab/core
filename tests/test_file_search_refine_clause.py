@@ -108,6 +108,21 @@ class TestRefineClause(unittest.TestCase):
         self.assertEqual(per_token["minimum_should_match"], 1)
         self.assertEqual(len(per_token["should"]), len(REFINE_FIELDS))
 
+    def test_한_낱말이_형태소로_쪼개져도_모두_포함해야_한다(self) -> None:
+        """🔴 좁히기는 **줄이는** 일이다 — 쪼개진 조각 중 하나만 맞아도 걸리면 오히려 늘어난다.
+
+        분석기(``nori_user``)는 붙여 쓴 `없는낱말zzz` 를 `없`·`는`·`낱말`·`zzz` 로 쪼갠다.
+        ``match`` 의 기본 결합은 OR 이라, 지정하지 않으면 `없` 하나만 든 문서까지 전부 걸린다
+        (실측 2026-09-18: 16,864건 중 **6,502건** — 전체의 39%). 좁히기 칸에 없는 낱말을 쳤는데
+        결과가 늘어나는 셈이라 칸의 뜻 자체가 무너진다. 개체 검색에서 같은 결함을
+        ``entity_match_clause`` 에 ``operator: "and"`` 로 막았고(818건 → 0건), 같은 규율을 여기에도 건다.
+        """
+        clause = refine_clause("없는낱말zzz")
+        assert clause is not None
+        for per_field in clause["bool"]["filter"][0]["bool"]["should"]:
+            body = next(iter(per_field["match"].values()))
+            self.assertEqual(body.get("operator"), "and")
+
     def test_보는_필드는_파일명_요약_키워드다(self) -> None:
         """091 파이썬판(``asset_refine_fields``)이 보던 축 그대로 — 화면에 보이는 값이다."""
         self.assertEqual(tuple(REFINE_FIELDS), ("file_name", "summary", "keywords"))
