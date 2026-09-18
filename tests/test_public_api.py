@@ -43,7 +43,7 @@ PUBLIC_API: dict[str, tuple[str, ...]] = {
     "src.registry.access_tier": ("project_ext_meta", "principal_clearance"),
     "src.registry.ext_meta_field_registry": ("fetch_access_tiers", "validate_ext_meta"),
     "src.relations.graph_query": (
-        "fetch_relations_for_asset", "fetch_active_relations_for_asset", "mm_meta_of_asset", "mm_meta_bundle", "list_entities", "count_entities_by_type", "count_entities_by_area", "assets_of_entities",
+        "fetch_relations_for_asset", "fetch_active_relations_for_asset", "mm_meta_of_asset", "mm_meta_bundle", "list_entities", "count_entities", "count_entities_by_type", "count_entities_by_area", "assets_of_entities",
     ),
     "src.relations.approval_policy": ("TIER_ORDER", "tier_rank"),
     "src.relations.review": (
@@ -61,7 +61,15 @@ PUBLIC_API: dict[str, tuple[str, ...]] = {
         "FACET_SIZE_DEFAULT", "SEARCH_PIPELINE_DEFAULT", "WORD_OPERATOR_DEFAULT",
         "SEMANTIC_MIN_COSINE_DEFAULT", "SEMANTIC_CAP_DEFAULT", "build_semantic_body",
         "SORT_OPTIONS", "SORT_DEFAULT", "SORT_DEPTH_DEFAULT",
+        # 099 G1 이월: 097 이 등재를 빠뜨린 커서 훑기 경로. 백엔드가 이미
+        # ``routes_file_search.py`` 에서 ``browse_files``·``STABLE_SORTS`` 를 import 하고 있었다.
+        # 099 G3: refine 을 엔진 질의 절로 옮기며 늘어난 이름(``refine_clause``·``REFINE_FIELDS``).
+        "browse_files", "build_browse_body", "browse_scope_clause", "STABLE_SORTS",
+        "refine_clause", "REFINE_FIELDS",
     ),
+    # 099 T009: 097 이 등재를 빠뜨린 커서 규약을 여기서 올린다 — 백엔드가 이미
+    # ``CursorError`` 를 import 해 400 으로 바꾸고 있는데 표에 없어 계약 밖 이름이었다(코드리뷰 2026-09-16 §11).
+    "src.search.cursor": ("encode_cursor", "decode_cursor", "CursorError"),
     "src.search.tag_facets": ("aggregate_tag_facets", "normalize_tag_key"),
     "src.search.query_embed": ("embed_query_for_media_search",),
     # 096: 파이프라인 적재·재색인 경로가 쓰는 이름을 등재한다(코드 변경 0 · 계약면 명시).
@@ -74,7 +82,18 @@ PUBLIC_API: dict[str, tuple[str, ...]] = {
         "resolve_channel", "check_pgvector_version", "update_asset_mm_skill_labels",
         "mm_skill_label_keys", "build_index_body",
     ),
-    "src.search.entity_search_os": ("search_entities_hybrid",),
+    # 099 G4: 같은 인덱스를 보지만 **계약이 둘**이다 — 순위(``search_entities_hybrid``)와
+    # 집합(``match_entity_keys``). 뒤엣것을 ``q``·결과 내 재검색이 함께 쓴다(spec 099 §3-2a).
+    # 집합도 **뜻으로 찾는다**(2026-09-17 결정): 낱말 매칭 ∪ 게이트를 통과한 kNN 창.
+    # ``semantic_entity_keys``·``EntitySemanticMatch`` 를 올리는 이유는 게이트 차단 사실을
+    # **값으로** 읽는 경로이기 때문이다(로그만 두면 화면이 근거를 보일 수 없다).
+    # ``EntityMatchSet`` 은 ``match_entity_keys`` 의 **반환 모양**이다 — 결과 집합과 「어느 갈래로
+    # 걸렸는지」를 함께 싣는다(2026-09-17 결정). 뜻(kNN)으로 걸린 결과는 화면에 검색어가 보이지
+    # 않아(`왕실 무덤`→`영릉`) 근거를 못 보이면 사용자가 검색을 의심한다.
+    "src.search.entity_search_os": (
+        "search_entities_hybrid", "match_entity_keys", "entity_match_clause",
+        "semantic_entity_keys", "EntitySemanticMatch", "EntityMatchSet",
+    ),
     "src.mm_meta.entity_search": (
         "split_query", "match_entity_reason", "narrow_entities", "fuse_entity_results", "gate_semantic_hits",
         "entity_refine_fields", "REASON_CODE_NAME", "REASON_CODE_KEYWORD", "REASON_CODE_DESCRIPTION",

@@ -160,7 +160,7 @@ tests/          단위 테스트
 | 수치 | `src.domain.numeric` | `safe_float` |
 | 권한 | `src.registry.access_tier` | `project_ext_meta` · `principal_clearance` |
 | 권한 | `src.registry.ext_meta_field_registry` | `fetch_access_tiers` · `validate_ext_meta` |
-| 그래프 읽기 | `src.relations.graph_query` | `fetch_relations_for_asset` · `fetch_active_relations_for_asset` · `mm_meta_of_asset` · `mm_meta_bundle` · `list_entities` · `count_entities_by_type` · `count_entities_by_area` · `assets_of_entities` |
+| 그래프 읽기 | `src.relations.graph_query` | `fetch_relations_for_asset` · `fetch_active_relations_for_asset` · `mm_meta_of_asset` · `mm_meta_bundle` · `list_entities` · `count_entities` · `count_entities_by_type` · `count_entities_by_area` · `assets_of_entities` |
 | 관계 정책 | `src.relations.approval_policy` | `TIER_ORDER` · `tier_rank` |
 | 관계 검토 | `src.relations.review` | `list_edges_for_review` · `list_relation_kinds` · `bulk_review` · `revise_edge` · `promote_relation_kind` |
 | 검색 | `src.search.search_service` | `search_hybrid` |
@@ -168,12 +168,13 @@ tests/          단위 테스트
 | 검색 | `src.search.search_tuning` | `SearchTuning` |
 | 검색 | `src.search.refine` | `refine_rows` · `refine_tokens` |
 | 검색 | `src.search.facets` | `aggregate_facets` |
-| 파일 검색 | `src.search.file_search` | `search_files` · `build_rank_body` · `build_facet_body` · `build_facet_plan` · `build_semantic_body` · `ABOUT_BRANCH_DEFAULT` · `FACET_FIELDS` · `FACET_SELF_FILTERS` · `RANK_DEPTH_DEFAULT` · `TOTAL_CAP_DEFAULT` · `FACET_SIZE_DEFAULT` · `SEARCH_PIPELINE_DEFAULT` · `WORD_OPERATOR_DEFAULT` · `SEMANTIC_MIN_COSINE_DEFAULT` · `SEMANTIC_CAP_DEFAULT` · `SORT_OPTIONS` · `SORT_DEFAULT` · `SORT_DEPTH_DEFAULT` |
+| 파일 검색 | `src.search.file_search` | `search_files` · `build_rank_body` · `build_facet_body` · `build_facet_plan` · `build_semantic_body` · `ABOUT_BRANCH_DEFAULT` · `FACET_FIELDS` · `FACET_SELF_FILTERS` · `RANK_DEPTH_DEFAULT` · `TOTAL_CAP_DEFAULT` · `FACET_SIZE_DEFAULT` · `SEARCH_PIPELINE_DEFAULT` · `WORD_OPERATOR_DEFAULT` · `SEMANTIC_MIN_COSINE_DEFAULT` · `SEMANTIC_CAP_DEFAULT` · `SORT_OPTIONS` · `SORT_DEFAULT` · `SORT_DEPTH_DEFAULT` · `browse_files` · `build_browse_body` · `browse_scope_clause` · `STABLE_SORTS` · `refine_clause` · `REFINE_FIELDS` |
+| 검색 커서 | `src.search.cursor` | `encode_cursor` · `decode_cursor` · `CursorError` |
 | 검색 | `src.search.tag_facets` | `aggregate_tag_facets` · `normalize_tag_key` |
 | 검색 | `src.search.query_embed` | `embed_query_for_media_search` |
 | 검색 | `src.search.query_builder` | `build_word_should` · `build_bm25_body` · `build_knn_body` |
 | 검색·색인 | `src.search.opensearch_sync` | `get_client` · `ensure_index` · `sync_all` · `index_asset` · `asset_to_doc` · `build_index_body` · `resolve_channel` · `check_pgvector_version` · `update_asset_mm_skill_labels` · `mm_skill_label_keys` |
-| 개체 검색 | `src.search.entity_search_os` | `search_entities_hybrid` |
+| 개체 검색 | `src.search.entity_search_os` | `search_entities_hybrid` · `match_entity_keys` · `entity_match_clause` · `semantic_entity_keys` · `EntitySemanticMatch` · `EntityMatchSet` |
 | 개체 검색 | `src.mm_meta.entity_search` | `split_query` · `match_entity_reason` · `narrow_entities` · `fuse_entity_results` · `gate_semantic_hits` · `entity_refine_fields` · `REASON_CODE_NAME` · `REASON_CODE_KEYWORD` · `REASON_CODE_DESCRIPTION` · `REASON_KEYWORD` · `REASON_DESCRIPTION` · `REASON_SEMANTIC` · `REASON_TEXT_MATCH` |
 | 개체 검색 | `src.mm_meta.entity_embedding` | `find_similar_entities` |
 | 주제 | `src.topic.asset_topic_query` | `fetch_asset_topic` · `find_same_topic_groups` · `list_topics` · `assets_in_topic` · `assets_unclassified` |
@@ -182,6 +183,11 @@ tests/          단위 테스트
 | 분류 스킬 | `src.mm_classify.persist` | `fetch_active_skills` |
 | 분류 스킬 | `src.mm_classify.read` | `label_names_of_assets` · `fetch_active_skills` |
 | LLM | `src.llm.client` | `get_llm_client` · `complete_text` · `complete_json` · `complete_vision_json` |
+
+> 🔴 **커서(책갈피)는 2026-09-17 에 깨는 변경이 있었습니다**(099 G7). `encode_cursor`·`decode_cursor`·
+> `browse_files` 가 **조건 지문**(`scope`/`expect_scope`)을 **필수**로 받습니다 — 호출부가 "이번 조회를
+> 정의하는 것 전부"를 문자열 하나로 모아 주면 커서가 그 지문을 담고 다음 쪽에서 대조합니다. 지문이
+> 없거나 다른 토큰은 `CursorError` 입니다(예전 토큰 포함). 이유·전환 방법은 `CHANGELOG.md` 참조.
 
 > ⚠️ `search_hybrid` 는 기존 멀티모달 검색 화면(종류별 그룹 응답)용이며 **새 화면은 `file_search.search_files` 를 쓴다**(대체 창구 — 같은 단어 절·점수식 · 개수·칩·페이징·정렬 · 12배 빠름). 남기는 이유는 모듈 docstring 에 있다. 표 셀은 이름만 적는다 — 위 표는 테스트(`tests/test_public_api.py`)가 그대로 읽는다.
 

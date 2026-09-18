@@ -1,14 +1,20 @@
-"""025 G3 — 코퍼스-골든 정합 가드(순수) 단위.
+"""025 G3 / 099 T031 — 코퍼스-골든 정합 가드(순수) 단위.
 
-신규 토픽 자산이 코퍼스에 추가되면 골든 질의도 추가되어야 한다(운영 규칙)는 것을
-순수 함수 `uncovered_topics` 로 강제한다 — 미커버 토픽이 생기면 gated e2e 가 실패한다.
+"코퍼스에 자산이 추가되면 골든 질의도 추가되어야 한다"(운영 규칙)를 순수 함수로 강제한다.
+가드는 두 세대가 있다:
+
+- **현행** `uncovered_assets(registered_ids, golden_ids)` — 자산 id 집합 뺄셈. "적재됐는데 어느
+  골든 질의의 정답도 아닌 자산"을 센다. 골든이 자산 id 를 직접 들고 있으니 파싱이 없다.
+- **레거시** `topic_of_filename` / `uncovered_topics` — 파일명에서 주제를 읽어 토픽 단위로 비교.
+  현 코퍼스에서 96.8% 퇴화해(099 T031 실측) 가드로는 죽었지만, 옛 골든 전용 도구와 골든 빌더의
+  `topics` 태그가 아직 쓰므로 함수는 남겨 두고 테스트도 그대로 지킨다(회귀 방지).
 """
 
 from __future__ import annotations
 
 import unittest
 
-from src.search.golden_guard import topic_of_filename, uncovered_topics
+from src.search.golden_guard import topic_of_filename, uncovered_assets, uncovered_topics
 
 
 class TopicOfFilenameTest(unittest.TestCase):
@@ -59,6 +65,49 @@ class UncoveredTopicsTest(unittest.TestCase):
 
     def test_deterministic_sorted(self) -> None:
         self.assertEqual(uncovered_topics({"c", "a", "b"}, set()), ["a", "b", "c"])
+
+
+class UncoveredAssetsTest(unittest.TestCase):
+    """099 T031 — 파일명 파싱을 버리고 **자산 id 집합 뺄셈**으로 커버리지를 본다.
+
+    비유: 학급 명부(적재된 자산)와 시험 답안지에 이름이 적힌 학생(골든 정답)을 맞대 보고,
+    답안지에 한 번도 안 나온 학생을 뽑아내는 일이다. 이름 규칙을 해석할 필요가 없다.
+
+    id 는 **합성값**이다 — 실 자산 id 는 공개 레포에 두지 않는다(문서 정책).
+    """
+
+    A1 = "018f0000-0000-7000-8000-000000000001"
+    A2 = "018f0000-0000-7000-8000-000000000002"
+    A3 = "018f0000-0000-7000-8000-000000000003"
+
+    def test_full_coverage_returns_empty(self) -> None:
+        # 적재 자산이 모두 어떤 골든 질의의 정답이면 미커버 없음.
+        self.assertEqual(uncovered_assets({self.A1, self.A2}, {self.A1, self.A2, self.A3}), [])
+
+    def test_uncovered_asset_detected(self) -> None:
+        # A3 가 새로 적재됐는데 어느 골든 질의의 정답도 아니다 → 검출.
+        self.assertEqual(
+            uncovered_assets({self.A1, self.A2, self.A3}, {self.A1, self.A2}), [self.A3]
+        )
+
+    def test_golden_only_ids_ignored(self) -> None:
+        # 방향은 한쪽이다 — 골든에만 있고 적재되지 않은 id(삭제된 자산 등)는 이 가드의 관심사가 아니다.
+        self.assertEqual(uncovered_assets({self.A1}, {self.A1, self.A2, self.A3}), [])
+
+    def test_empty_inputs_safe(self) -> None:
+        # 빈 코퍼스·빈 골든이어도 예외 없이 빈 목록(부트스트랩 시점 안전).
+        self.assertEqual(uncovered_assets(set(), set()), [])
+        self.assertEqual(uncovered_assets(set(), {self.A1}), [])
+
+    def test_all_uncovered_when_golden_empty(self) -> None:
+        # 골든이 비면 적재 자산 전량이 미커버.
+        self.assertEqual(
+            uncovered_assets({self.A2, self.A1}, set()), [self.A1, self.A2]
+        )
+
+    def test_deterministic_sorted(self) -> None:
+        # 집합은 순서가 없다 — 정렬해 돌려줘야 실행마다 같은 보고가 나온다(헌법 3조 결정성).
+        self.assertEqual(uncovered_assets({"c", "a", "b"}, set()), ["a", "b", "c"])
 
 
 if __name__ == "__main__":

@@ -11,7 +11,8 @@
 
 결정성: 같은 코퍼스·설정에서 2회 동일(헌법 3조·rerank forward 결정적). 질의정규화 on 시에만 검색시점 LLM(gemma temp=0).
 
-실행: conda run -n AuroraFS python scripts/measure_search_golden.py [--query-norm {on,off}] [--skip-nomatch]
+실행: conda run -n AuroraFS python scripts/measure_search_golden.py [--query-norm {on,off}]
+            [--skip-nomatch] [--skip-rerank]
       (augment 측정엔 reranker 모델 로드 — RUN_OS_E2E 환경의 실OS·실모델 필요)
 """
 
@@ -28,6 +29,9 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 _MODALITIES = ["text", "audio", "image", "video"]
+# 정합 가드 보고에 찍을 표본 개수. **전량 인쇄 금지** — 종전 토픽 가드는 미커버 16,569개를
+# 한 줄로 쏟아내 로그를 못 쓰게 만들었다. 건수(=판단 근거) + 표본 몇 개면 충분하다.
+_GUARD_SAMPLE_N = 5
 
 
 def _golden_path(fx, name: str = "golden_os.json"):
@@ -73,6 +77,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="골든 58질의 검색 KPI 하니스(025·029)")
     parser.add_argument("--skip-nomatch", action="store_true", help="production no-match 측정 생략")
     parser.add_argument(
+        "--skip-rerank", action="store_true",
+        help="augment(rerank) 조합 측정을 생략한다. 운영이 rerank off(os_rerank_enabled=False)면 "
+             "기준선에 쓰이지 않는 조합이라 리랭커 모델 로드와 질의당 수백 ms 를 통째로 아낀다.",
+    )
+    parser.add_argument(
         "--query-norm", choices=["on", "off"], default="off",
         help="augment 위에 LLM 질의 명사구 정규화(gemma temp=0) 조합도 측정(검색시점 LLM·느림)",
     )
@@ -85,7 +94,7 @@ def main() -> int:
 
     init_settings("dev")
     from src.database.postgres_util import PostgresUtil
-    from src.search.golden_guard import topic_of_filename, uncovered_topics
+    from src.search.golden_guard import uncovered_assets
     from src.search.opensearch_search import get_client, search_assets_os
     from src.search.query_preprocess import noun_phrase_query
     from src.search.search_tuning import SearchTuning
@@ -160,15 +169,26 @@ def main() -> int:
         return seen
 
     # ── 1) 코퍼스-골든 정합 가드 ─────────────────────────────────────────────
+    # 099 T031: 기준을 **파일명 토픽 → 자산 id** 로 바꿨다. 파일명 주제표식은 현 코퍼스에서
+    # 96.8% 퇴화해(토픽/자산 0.982) "미커버 16,569" 라는 무의미한 숫자만 냈다. 지금 세는 것은
+    # "적재됐는데 어느 골든 질의의 정답도 아닌 자산"이다(2026-09-17 정본 골든 기준 38건).
     db = PostgresUtil()
     with db, db.connection() as conn, conn.cursor() as cur:
-        cur.execute("SELECT fs_path FROM asset WHERE status='registered'")
-        corpus_topics = {topic_of_filename(Path(r[0]).name) for r in cur.fetchall()}
-    golden_topics: set[str] = set()
+        cur.execute("SELECT asset_id FROM asset WHERE status='registered'")
+        registered_ids = {str(r[0]) for r in cur.fetchall()}
+    golden_ids: set[str] = set()
     for q in queries:
-        golden_topics.update(q.get("topics", []))
-    missing = uncovered_topics(corpus_topics, golden_topics)
-    print(f"## 정합 가드 — 코퍼스 토픽 {len(corpus_topics)} · 골든 커버 {len(golden_topics)} · 미커버 {missing or '없음'}")
+        golden_ids.update(str(a) for a in q.get("relevant", []))
+    missing = uncovered_assets(registered_ids, golden_ids)
+    sample = ""
+    if missing:
+        sample = " · 예: " + ", ".join(missing[:_GUARD_SAMPLE_N])
+        if len(missing) > _GUARD_SAMPLE_N:
+            sample += f" … (+{len(missing) - _GUARD_SAMPLE_N})"
+    print(
+        f"## 정합 가드 — 적재 자산 {len(registered_ids)} · 골든 정답 {len(golden_ids)} · "
+        f"미커버 {len(missing)}{sample}"
+    )
 
     scored = [q for q in queries if q.get("relevant")]
     absent = [q for q in queries if q.get("expect_empty")]
@@ -233,7 +253,9 @@ def main() -> int:
     base027 = measure("027 gate-on", cutoff=True, rerank=False, qnorm=False, nomatch=nm)
     report(base027)
     # ③ augment(gate-on·rerank on) — SC-002 합격선: recall≥0.9396 ∧ 차단≥23/24 ∧ p@3≥0.8111.
-    report(measure("augment(rerank)", cutoff=True, rerank=True, qnorm=False, nomatch=nm), base027)
+    #    운영이 rerank off 인 동안에는 --skip-rerank 로 건너뛴다(기준선은 ②가 운영 경로다).
+    if not args.skip_rerank:
+        report(measure("augment(rerank)", cutoff=True, rerank=True, qnorm=False, nomatch=nm), base027)
     # ④ augment+질의정규화(검색시점 LLM gemma temp=0) — SC-003(--query-norm on 일 때만).
     if args.query_norm == "on":
         report(measure("augment+질의정규화", cutoff=True, rerank=True, qnorm=True, nomatch=nm), base027)
