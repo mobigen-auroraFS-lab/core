@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from src.config.settings import backend_for_channel, get_current_settings
+from src.config.settings import backend_for_channel, get_current_settings, model_for_channel
 from src.embedders.text_embedder import embed_texts, embed_texts_for, pad_embedding_to_storage_dim
 from src.embedders.text_embedding_normalize import normalize_text_for_embedding
 
@@ -44,6 +44,16 @@ def embed_query_for_media_search(
             [q], channel=channel, settings=cfg, normalize_embeddings=cfg.embed.normalize
         )[0]
     else:
-        mn = model_name if model_name is not None else cfg.embed.model
+        # 🔴 모델은 **채널이 정한다** — 문서 임베딩(``embed_texts_for``)이 api·로컬 양쪽 모두
+        #    ``model_for_channel`` 로 해소하므로 질의도 같아야 같은 공간에서 비교된다. 종전에는
+        #    로컬 분기에서 설정 기본 모델로 떨어져, 활성 채널이 로컬 bge 이면 문서는 bge·질의는
+        #    KoSimCSE 가 됐다(오류 없이 코사인만 뜻을 잃는다). 명시 전달이 있으면 그것이 우선이고,
+        #    채널이 없으면 종전대로 설정 기본 모델이다.
+        if model_name is not None:
+            mn = model_name
+        elif channel is not None:
+            mn = model_for_channel(channel, cfg)
+        else:
+            mn = cfg.embed.model
         row = embed_texts([q], model_name=mn, normalize_embeddings=cfg.embed.normalize)[0]
     return pad_embedding_to_storage_dim(row)
