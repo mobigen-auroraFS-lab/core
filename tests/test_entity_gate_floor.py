@@ -73,9 +73,9 @@ class TestGateUsesAbsoluteFloor(unittest.TestCase):
             _Client(_FLAT_LOW), "idx", query_vector=[0.1] * 4, gate_floor=0.30)
         self.assertTrue(got.gate_passed)
 
-    def test_상대_격차는_더_이상_주판정이_아니다(self) -> None:
-        """격차 기본값이 0 이어야 '평평하지만 가까운' 무리가 살아난다."""
-        self.assertEqual(search_constants.ENTITY_SET_GATE_EPS_DEFAULT, 0.0)
+    def test_상대_격차_상수는_남아_있지_않다(self) -> None:
+        """0 으로 둔 값을 남기면 같은 값을 두 번 재는 코드가 다시 생긴다(실제로 겪었다)."""
+        self.assertFalse(hasattr(search_constants, "ENTITY_SET_GATE_EPS_DEFAULT"))
 
     def test_하한_기본값은_실측에서_고른_값이다(self) -> None:
         self.assertEqual(search_constants.ENTITY_SET_GATE_FLOOR_DEFAULT, 0.44)
@@ -139,6 +139,63 @@ class TestGateEdgeCases(unittest.TestCase):
         self.assertEqual(got.keys, {("작품", "훈민정음")})
         self.assertFalse(got.semantic_gate_passed)
         self.assertEqual(got.text_keys, {("작품", "훈민정음")})
+
+
+class TestPerItemFloor(unittest.TestCase):
+    """하한을 **후보 하나하나에도** 건다(2026-09-21 후속).
+
+    종전에는 1등이 하한을 넘으면 후보 20개를 **전부** 내보냈다. 20등이 아무리 멀어도 나갔다.
+    실측(개념 102 · 자료밖 157 · 난수 60): 자료 밖 질의가 평균 1.78건, 난수가 평균 7.00건을
+    물어왔다. 개별 하한을 걸면 각각 **0.23건 · 0.93건** 으로 줄고, 놓치는 것은 **전혀 늘지
+    않는다**(개념 0건 비율 19% 그대로). 잘려 나가는 것이 「바닷가 경치」의 해인사·팔만대장경·
+    첨성대처럼 실제로 무관한 것들이라 그렇다.
+
+    🔴 게이트 하한과 **같은 값**을 쓴다. 뜻이 다르다 — 게이트는 "이 질의를 믿을 만한가"(1등 기준),
+    개별 하한은 "이 후보가 결과로 나갈 만한가"(각자 기준)다. 값이 같으니 결과적으로
+    "하한을 넘는 것만 나간다"가 되고, 게이트 통과는 "적어도 하나는 남는다"와 같은 말이 된다.
+    """
+
+    def test_하한_아래_후보는_결과에서_빠진다(self) -> None:
+        mixed = [_knn("경주시", 0.50), _knn("안동시", 0.46),
+                 _knn("부여군", 0.41), _knn("전주시", 0.30)]
+        got = entity_search_os.semantic_entity_keys(
+            _Client(mixed), "idx", query_vector=[0.1] * 4)
+        self.assertTrue(got.gate_passed)
+        self.assertEqual(got.keys, {("장소", "경주시"), ("장소", "안동시")})
+
+    def test_표본_수는_자른_뒤가_아니라_받은_그대로다(self) -> None:
+        """``sample_size`` 는 진단값이다 — 자른 뒤 수를 넣으면 "후보가 적었나"를 알 수 없다."""
+        mixed = [_knn("경주시", 0.50), _knn("부여군", 0.30)]
+        got = entity_search_os.semantic_entity_keys(
+            _Client(mixed), "idx", query_vector=[0.1] * 4)
+        self.assertEqual(got.sample_size, 2)
+        self.assertEqual(len(got.keys), 1)
+
+    def test_1등만_넘으면_1등만_남는다(self) -> None:
+        """게이트는 통과하되 결과가 하나뿐인 경우 — 종전에는 넷이 다 나갔다."""
+        got = entity_search_os.semantic_entity_keys(
+            _Client([_knn("경주시", 0.50), _knn("안동시", 0.20),
+                     _knn("부여군", 0.10), _knn("전주시", 0.05)]),
+            "idx", query_vector=[0.1] * 4)
+        self.assertEqual(got.keys, {("장소", "경주시")})
+
+    def test_하한을_0으로_주면_종전처럼_전부_나간다(self) -> None:
+        """진단 경로 — 게이트와 개별 하한을 한꺼번에 끄면 옛 동작을 재현할 수 있다."""
+        got = entity_search_os.semantic_entity_keys(
+            _Client(_FLAT_LOW), "idx", query_vector=[0.1] * 4, gate_floor=0.0)
+        self.assertEqual(len(got.keys), 4)
+
+    def test_통과_여부는_남은_후보에서_유도된다(self) -> None:
+        """🔴 1등을 따로 검사하지 않는다 — 1등이 최대값이라 "하나라도 남았나"와 같은 말이다.
+
+        같은 값으로 두 번 재던 것을 하나로 접었다(2026-09-21). 결과는 동일하다.
+        """
+        for cos in (0.44, 0.50, 0.90):
+            got = entity_search_os.semantic_entity_keys(
+                _Client([_knn("경주시", cos), _knn("안동시", 0.01)]),
+                "idx", query_vector=[0.1] * 4)
+            self.assertTrue(got.gate_passed)
+            self.assertGreaterEqual(len(got.keys), 1)
 
 
 if __name__ == "__main__":

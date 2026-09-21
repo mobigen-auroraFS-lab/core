@@ -105,9 +105,11 @@ def _knn_hit(etype: str, uid: str, cosine: float) -> dict[str, Any]:
             "_source": {"entity_type": etype, "entity_uid": uid}}
 
 
-# 게이트 통과 표본: 1등이 무리에서 튀어나온 모양(top 0.60 · 배경 0.37 · 격차 0.23 ≥ 0.15).
-_KNN_PASS = [_knn_hit("음식", "김치", 0.60), _knn_hit("음식", "된장", 0.40),
-             _knn_hit("장소", "제주도", 0.38), _knn_hit("작품", "훈민정음", 0.36)]
+# 게이트 통과 표본: 넷 다 **개별 하한(0.44) 위**라 전부 결과로 나간다.
+# 🔴 2026-09-21 에 하한이 후보 하나하나에도 걸리면서 값을 올렸다. 종전 값(0.40·0.38·0.36)이면
+#    1등만 남아, 합집합·중복 제거를 보려는 아래 시험들이 그 이유로 실패한다(보려는 것이 달라진다).
+_KNN_PASS = [_knn_hit("음식", "김치", 0.60), _knn_hit("음식", "된장", 0.55),
+             _knn_hit("장소", "제주도", 0.50), _knn_hit("작품", "훈민정음", 0.46)]
 # 게이트 차단 표본: 1등이 **절대 하한(0.44) 아래**다(top 0.40).
 # 🔴 2026-09-21 에 판정이 상대 격차 → 절대 하한으로 바뀌어 이 표본도 바뀌었다. 종전 표본
 #    (top 0.50 · 격차 0.045)은 이제 **통과한다** — 평평해도 충분히 가까우면 쓰겠다는 것이 새 계약이다.
@@ -286,7 +288,7 @@ class TestSemanticBranch(unittest.TestCase):
         self.assertTrue(passed.gate_passed)
         self.assertEqual(len(passed.keys), 4)
         self.assertAlmostEqual(passed.top, 0.60, places=6)
-        self.assertAlmostEqual(passed.baseline, 0.37, places=6)
+        self.assertAlmostEqual(passed.baseline, 0.48, places=6)
 
     def test_의미_후보가_0건이면_차단과_다른_문구로_알린다(self) -> None:
         """"게이트가 막았다"와 "애초에 후보가 없다"는 **다른 사건**이다 — 같은 문구면 오진한다."""
@@ -362,7 +364,6 @@ class TestSemanticBranch(unittest.TestCase):
         """
         floor = search_constants.ENTITY_SET_GATE_FLOOR_DEFAULT
         self.assertEqual(floor, 0.44)
-        self.assertEqual(search_constants.ENTITY_SET_GATE_EPS_DEFAULT, 0.0)
         self.assertEqual(search_constants.ENTITY_SEMANTIC_GATE_EPS_DEFAULT, 0.15)
         edge = [_knn_hit("음식", "김치", floor), _knn_hit("음식", "된장", 0.30),
                 _knn_hit("장소", "제주도", 0.30), _knn_hit("작품", "훈민정음", 0.30)]
