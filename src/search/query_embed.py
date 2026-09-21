@@ -46,9 +46,9 @@ def embed_query_for_media_search(
     else:
         # 🔴 모델은 **채널이 정한다** — 문서 임베딩(``embed_texts_for``)이 api·로컬 양쪽 모두
         #    ``model_for_channel`` 로 해소하므로 질의도 같아야 같은 공간에서 비교된다. 종전에는
-        #    로컬 분기에서 설정 기본 모델로 떨어져, 활성 채널이 로컬 bge 이면 문서는 bge·질의는
-        #    KoSimCSE 가 됐다(오류 없이 코사인만 뜻을 잃는다). 명시 전달이 있으면 그것이 우선이고,
-        #    채널이 없으면 종전대로 설정 기본 모델이다.
+        #    로컬 분기에서 **설정 기본 모델**로 떨어져, 활성 채널이 로컬이면 문서와 질의가 다른
+        #    모델이 됐다 — 오류 없이 코사인만 뜻을 잃는다. 명시 전달이 우선이고, 채널이 없으면
+        #    종전대로 설정 기본 모델이다.
         if model_name is not None:
             mn = model_name
         elif channel is not None:
