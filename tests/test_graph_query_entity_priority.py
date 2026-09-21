@@ -83,12 +83,22 @@ class TestPriorityOrder(unittest.TestCase):
         self.assertEqual(p["first_types"], ["음식", "작품"])
         self.assertEqual(p["first_uids"], ["김밥", "김밥"])
 
-    def test_티어는_0_또는_1_이며_NULL_이면_전부_0_이다(self) -> None:
+    def test_티어는_3단이며_아무것도_안_주면_전부_0_이다(self) -> None:
+        """🔴 2026-09-21 에 2단 → 3단. 이름 일치(2) · 뜻 상위(1) · 나머지(0).
+
+        종전 2단에서는 이름이 하나도 안 맞는 개념 질의(「남자 배우」)에서 전원이 0 이 되어
+        구성 자산 수가 순서를 지배했다 — 뜻 14등이 자산이 많으면 1위로 왔다.
+        """
         conn, cur = _conn_returning([])
         gq.list_entities(conn, min_bundle_size=3, limit=50)
-        sql, _p = _sql_and_params(cur)
-        self.assertIn("CASE WHEN %(first_types)s::text[] IS NULL THEN 0", sql)
+        sql, p = _sql_and_params(cur)
+        self.assertIn("THEN 2", sql)
+        self.assertIn("THEN 1", sql)
+        self.assertIn("ELSE 0 END", sql)
         self.assertIn("AS prio_tier", sql)
+        # 아무것도 안 주면 두 집합 모두 NULL 이라 CASE 가 전부 0 으로 떨어진다(종전과 같은 순서).
+        self.assertIsNone(p["first_types"])
+        self.assertIsNone(p["semantic_types"])
 
 
 class TestPriorityKeyset(unittest.TestCase):
