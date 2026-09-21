@@ -105,12 +105,16 @@ def _knn_hit(etype: str, uid: str, cosine: float) -> dict[str, Any]:
             "_source": {"entity_type": etype, "entity_uid": uid}}
 
 
-# 게이트 통과 표본: 1등이 무리에서 튀어나온 모양(top 0.60 · 배경 0.37 · 격차 0.23 ≥ 0.15).
-_KNN_PASS = [_knn_hit("음식", "김치", 0.60), _knn_hit("음식", "된장", 0.40),
-             _knn_hit("장소", "제주도", 0.38), _knn_hit("작품", "훈민정음", 0.36)]
-# 게이트 차단 표본: 전원이 비슷하게 어중간(top 0.50 · 배경 0.455 · 격차 0.045 < 0.15).
-_KNN_BLOCK = [_knn_hit("음식", "김치", 0.50), _knn_hit("음식", "된장", 0.48),
-              _knn_hit("장소", "제주도", 0.46), _knn_hit("작품", "훈민정음", 0.45)]
+# 게이트 통과 표본: 넷 다 **개별 하한(0.44) 위**라 전부 결과로 나간다.
+# 🔴 2026-09-21 에 하한이 후보 하나하나에도 걸리면서 값을 올렸다. 종전 값(0.40·0.38·0.36)이면
+#    1등만 남아, 합집합·중복 제거를 보려는 아래 시험들이 그 이유로 실패한다(보려는 것이 달라진다).
+_KNN_PASS = [_knn_hit("음식", "김치", 0.60), _knn_hit("음식", "된장", 0.55),
+             _knn_hit("장소", "제주도", 0.50), _knn_hit("작품", "훈민정음", 0.46)]
+# 게이트 차단 표본: 1등이 **절대 하한(0.44) 아래**다(top 0.40).
+# 🔴 2026-09-21 에 판정이 상대 격차 → 절대 하한으로 바뀌어 이 표본도 바뀌었다. 종전 표본
+#    (top 0.50 · 격차 0.045)은 이제 **통과한다** — 평평해도 충분히 가까우면 쓰겠다는 것이 새 계약이다.
+_KNN_BLOCK = [_knn_hit("음식", "김치", 0.40), _knn_hit("음식", "된장", 0.38),
+              _knn_hit("장소", "제주도", 0.36), _knn_hit("작품", "훈민정음", 0.35)]
 
 
 class TestEntityMatchClause(unittest.TestCase):
@@ -268,7 +272,8 @@ class TestSemanticBranch(unittest.TestCase):
             entity_search_os.match_entity_keys(c, "mm_entities", query="한글", query_vector=_VEC)
         line = " ".join(log.output)
         self.assertIn("게이트", line)
-        self.assertIn("0.15", line)
+        # 무엇에 막혔는지 알려면 **적용된 하한**이 로그에 있어야 한다.
+        self.assertIn(str(search_constants.ENTITY_SET_GATE_FLOOR_DEFAULT), line)
 
     def test_게이트_차단을_반환값으로도_읽을_수_있다(self) -> None:
         """로그는 사후 추적용이다. 호출부가 화면에 근거를 싣고 싶으면 **값**이 필요하다."""
@@ -283,7 +288,7 @@ class TestSemanticBranch(unittest.TestCase):
         self.assertTrue(passed.gate_passed)
         self.assertEqual(len(passed.keys), 4)
         self.assertAlmostEqual(passed.top, 0.60, places=6)
-        self.assertAlmostEqual(passed.baseline, 0.37, places=6)
+        self.assertAlmostEqual(passed.baseline, 0.48, places=6)
 
     def test_의미_후보가_0건이면_차단과_다른_문구로_알린다(self) -> None:
         """"게이트가 막았다"와 "애초에 후보가 없다"는 **다른 사건**이다 — 같은 문구면 오진한다."""
@@ -322,33 +327,49 @@ class TestSemanticBranch(unittest.TestCase):
         self.assertEqual(c.bodies[1]["size"], 7)
         self.assertEqual(c.bodies[1]["query"]["knn"]["vec"]["k"], 7)
 
-    def test_절대_코사인_하한을_두지_않는다(self) -> None:
-        """실측(2026-09-17): 무의미 질의 1등 0.442 vs 유관 질의 1등 0.456 — 절대값으로는 못 가른다.
-        자산의 ``SEMANTIC_MIN_COSINE_DEFAULT``(0.60)를 개체에 쓰면 전 구간(≤0.64)이 잘린다."""
-        low = [_knn_hit("음식", "김치", 0.25), _knn_hit("음식", "된장", 0.05),
-               _knn_hit("장소", "제주도", 0.05), _knn_hit("작품", "훈민정음", 0.05)]
+    def test_자산의_하한을_그대로_쓰지_않는다(self) -> None:
+        """🔴 하한은 두되 **개체 전용 값**이다 — 자산 값(0.60)을 그대로 쓰면 개체가 전멸한다.
+
+        개체 재료가 짧아(중위 68자) 코사인이 전반적으로 낮다. 실측(2026-09-21 · 개념 질의 102개)
+        에서 개체 1등은 0.380~0.628 구간이라, 0.60 을 쓰면 통과가 3% 로 지금과 같아진다.
+        2026-09-17 에 「절대 하한을 두지 않는다」로 적었던 것은 개체가 82개일 때의 관찰이고,
+        822개에서 다시 재니 0.44 에서 갈린다.
+        """
+        self.assertLess(search_constants.ENTITY_SET_GATE_FLOOR_DEFAULT,
+                        SEMANTIC_MIN_COSINE_DEFAULT)
+        # 자산 하한(0.60)과 개체 하한(0.44) 사이에 있는 무리 — 자산 기준이면 전멸, 개체 기준이면 산다.
+        mid = [_knn_hit("음식", "김치", 0.50), _knn_hit("음식", "된장", 0.48),
+               _knn_hit("장소", "제주도", 0.46), _knn_hit("작품", "훈민정음", 0.45)]
         got = entity_search_os.semantic_entity_keys(
-            _FakeClient(knn_hits=low), "mm_entities", query_vector=_VEC)
+            _FakeClient(knn_hits=mid), "mm_entities", query_vector=_VEC)
         self.assertTrue(got.gate_passed)
         self.assertLess(got.top, SEMANTIC_MIN_COSINE_DEFAULT)
 
-    def test_격차가_모자라면_절대값이_높아도_막힌다(self) -> None:
-        """게이트는 "1등이 무리에서 튀어나왔나"만 본다 — 반 전체가 60점인데 1등이 62점이면 뜻이 없다."""
+    def test_평평해도_충분히_가까우면_통과한다(self) -> None:
+        """🔴 2026-09-21 계약 전환 — 종전에는 "튀어나왔나"만 봐서 이 표본을 막았다.
+
+        그 기준은 색인이 커지면 무리가 빽빽해져 격차가 줄어드는 구조라, 자료가 늘수록 조용히 더
+        막혔다(822개에서 개념 질의 통과율 3%). 지금은 1등이 하한을 넘으면 쓴다.
+        """
         flat = [_knn_hit("음식", "김치", 0.64), _knn_hit("음식", "된장", 0.62),
                 _knn_hit("장소", "제주도", 0.61), _knn_hit("작품", "훈민정음", 0.60)]
         got = entity_search_os.semantic_entity_keys(
             _FakeClient(knn_hits=flat), "mm_entities", query_vector=_VEC)
-        self.assertFalse(got.gate_passed)
+        self.assertTrue(got.gate_passed)
 
-    def test_게이트_기본값은_순위_경로와_같은_0_15_다(self) -> None:
-        """🔴 새 임계를 만들지 않는다 — ``search_entities_hybrid`` 와 **같은 함수·같은 기본값**.
-        경계 격차 0.15 는 통과, 0.14 는 차단(``passes_cutoff`` 의 ``>=`` 규약)."""
+    def test_집합_판정은_절대_하한을_쓰고_순위_경로는_그대로다(self) -> None:
+        """🔴 두 경로가 갈렸다(2026-09-21). 집합 판정만 재보정했고 순위 경로는 재지 않아 안 건드렸다.
+
+        경계 규약은 그대로다 — 하한 자체는 통과, 한 눈금 아래는 차단(``passes_cutoff`` 의 ``>=``).
+        """
+        floor = search_constants.ENTITY_SET_GATE_FLOOR_DEFAULT
+        self.assertEqual(floor, 0.44)
         self.assertEqual(search_constants.ENTITY_SEMANTIC_GATE_EPS_DEFAULT, 0.15)
-        edge = [_knn_hit("음식", "김치", 0.60), _knn_hit("음식", "된장", 0.45),
-                _knn_hit("장소", "제주도", 0.45), _knn_hit("작품", "훈민정음", 0.45)]
+        edge = [_knn_hit("음식", "김치", floor), _knn_hit("음식", "된장", 0.30),
+                _knn_hit("장소", "제주도", 0.30), _knn_hit("작품", "훈민정음", 0.30)]
         self.assertTrue(entity_search_os.semantic_entity_keys(
             _FakeClient(knn_hits=edge), "mm_entities", query_vector=_VEC).gate_passed)
-        under = [_knn_hit("음식", "김치", 0.59), *edge[1:]]
+        under = [_knn_hit("음식", "김치", floor - 0.01), *edge[1:]]
         self.assertFalse(entity_search_os.semantic_entity_keys(
             _FakeClient(knn_hits=under), "mm_entities", query_vector=_VEC).gate_passed)
 

@@ -71,6 +71,7 @@ from src.config.search_constants import (
     ENTITY_MATCH_MAX_HITS_DEFAULT,
     ENTITY_SEARCH_TOP_N_DEFAULT,
     ENTITY_SEMANTIC_GATE_EPS_DEFAULT,
+    ENTITY_SET_GATE_FLOOR_DEFAULT,
 )
 from src.search.fusion import (
     gate_signal,
@@ -278,6 +279,9 @@ class EntitySemanticMatch(NamedTuple):
         top: 표본의 최고 코사인(진단용 · 표본이 없으면 0.0).
         baseline: 배경 수준 = 표본 하위 절반 평균(진단용 · 표본이 2개 미만이면 0.0).
         sample_size: 실제로 받은 kNN 후보 수(≤ 창 크기). 0이면 색인에 후보 자체가 없었다는 뜻.
+        ranked: ``keys`` 와 같은 것을 담은 **코사인 내림차순 튜플**. 집합에는 순서가 없어 "무엇이
+            상위인가"를 알 수 없었다 — 화면이 뜻 상위를 앞세우려면 이 순서가 필요하다. 몇 개를
+            앞세울지는 **화면 정책**이라 호출부가 정한다(093 경계).
     """
 
     keys: frozenset[tuple[str, str]]
@@ -285,6 +289,7 @@ class EntitySemanticMatch(NamedTuple):
     top: float
     baseline: float
     sample_size: int
+    ranked: tuple[tuple[str, str], ...] = ()
 
 
 class EntityMatchSet(NamedTuple):
@@ -304,6 +309,9 @@ class EntityMatchSet(NamedTuple):
         text_keys: ① 낱말(BM25) 갈래로 걸린 키들 — 그 글자가 **실제로 적혀 있는** 개체다.
         semantic_keys: ② 의미(kNN) 갈래로 걸린 키들. 게이트에 막혔거나 벡터를 주지 않았으면
             **빈 집합**이다(일부만 버리지 않는다 · 090 후속 게이트 계약).
+        semantic_ranked: ``semantic_keys`` 와 같은 것을 담은 코사인 내림차순 튜플. 화면이 뜻
+            상위를 앞자리에 세울 때 쓴다 — 집합만으로는 무엇이 상위인지 알 수 없다. 의미를 껐거나
+            막혔으면 빈 튜플이다.
         semantic_gate_passed: ② 가 게이트를 통과했는지. ``False`` 이면 ``semantic_keys`` 가 빈
             집합이며, "막혔다"·"후보가 없다"·"껐다"의 구분은 경고 로그가 말한다.
     """
@@ -312,6 +320,7 @@ class EntityMatchSet(NamedTuple):
     text_keys: frozenset[tuple[str, str]]
     semantic_keys: frozenset[tuple[str, str]]
     semantic_gate_passed: bool
+    semantic_ranked: tuple[tuple[str, str], ...] = ()
 
 
 def semantic_entity_keys(
@@ -320,7 +329,7 @@ def semantic_entity_keys(
     *,
     query_vector: Sequence[float],
     candidate_size: int = DEFAULT_CANDIDATE_SIZE,
-    gate_eps: float = ENTITY_SEMANTIC_GATE_EPS_DEFAULT,
+    gate_floor: float = ENTITY_SET_GATE_FLOOR_DEFAULT,
 ) -> EntitySemanticMatch:
     """**뜻이 가까운** 개체를 kNN 으로 고르고, 믿을 만할 때만 돌려준다(099 G4 · 2026-09-17).
 
@@ -346,7 +355,8 @@ def semantic_entity_keys(
         query_vector: 질의 임베딩(저장 차원). 🔴 개체 벡터와 **같은 모델·같은 채널**이어야 한다 —
             다른 모델로 만들면 유사도가 뜻을 잃는다(090 G4 에서 실제로 겪었다).
         candidate_size: kNN 창 크기(=받을 후보 수 = ``k``). 🔴 **키우지 말 것**(위 단조성).
-        gate_eps: 게이트 임계((top − baseline) 하한). 기본은 090 후속 실측 확정치 0.15.
+        gate_floor: 판정의 절대 하한(기본 0.44). ``top`` 이 이 값 미만이면
+            의미 갈래를 통째로 버린다. 실측에서 고른 값이라 실사용 로그가 쌓이면 다시 본다.
 
     Returns:
         ``EntitySemanticMatch``. 게이트를 못 넘거나 후보가 없으면 ``keys`` 가 빈 집합이다
@@ -363,11 +373,23 @@ def semantic_entity_keys(
     rows = _rows(hits.get("hits", []) or [])
     cosines = [knn_score_to_cosine(score) for _doc_id, _etype, _uid, score in rows]
     top, baseline = gate_signal(cosines)
-    passed = bool(rows) and passes_cutoff(top, baseline, eps=gate_eps, floor=_GATE_NO_FLOOR)
-    keys = (frozenset((etype, uid) for _doc_id, etype, uid, _score in rows if uid)
-            if passed else frozenset())
+    # 🔴 판정은 **후보 하나하나**에 건다(2026-09-21). 종전에는 1등만 보고 통과시키면 20등까지
+    #    전부 나갔다 — 실측에서 자료 밖 질의가 평균 1.78건, 난수가 7.00건을 물어왔다. 개별로
+    #    거르면 각각 0.23·0.93 으로 줄고 **놓치는 것은 늘지 않는다**(개념 질의 0건 비율 불변).
+    #    잘려 나가는 것이 「바닷가 경치」의 해인사·팔만대장경처럼 실제로 무관한 꼬리라서다.
+    #    ``baseline=0·eps=0`` 이라 사실상 "코사인이 하한 이상인가"만 본다(음수도 걸러진다).
+    # 🔴 순서를 **먼저** 만들고 집합을 거기서 파생시킨다. 두 곳에서 따로 거르면 한쪽만 고쳐져
+    #    화면(순서)과 총계(집합)가 어긋난다. 색인이 코사인 내림차순으로 주므로 그대로 쓴다.
+    ranked = tuple((etype, uid)
+                   for (_doc_id, etype, uid, _score), cos in zip(rows, cosines, strict=True)
+                   if uid and passes_cutoff(cos, 0.0, eps=0.0, floor=gate_floor))
+    keys = frozenset(ranked)
+    # 🔴 "통과했나"는 **유도값**이다 — 하한을 넘는 후보가 하나라도 남으면 통과다. 1등을 따로
+    #    검사하지 않는다: 1등이 하한을 못 넘으면 아무도 못 넘으므로(1등이 최대값) 같은 말이다.
+    #    종전에는 같은 값으로 두 번 검사했고, 읽는 사람이 두 단계로 오해했다.
+    passed = bool(keys)
     return EntitySemanticMatch(keys=keys, gate_passed=passed, top=top, baseline=baseline,
-                               sample_size=len(rows))
+                               sample_size=len(rows), ranked=ranked)
 
 
 def match_entity_keys(
@@ -378,7 +400,7 @@ def match_entity_keys(
     query_vector: Sequence[float] | None,
     max_hits: int = ENTITY_MATCH_MAX_HITS_DEFAULT,
     candidate_size: int = DEFAULT_CANDIDATE_SIZE,
-    gate_eps: float = ENTITY_SEMANTIC_GATE_EPS_DEFAULT,
+    gate_floor: float = ENTITY_SET_GATE_FLOOR_DEFAULT,
 ) -> EntityMatchSet:
     """질의에 **맞는 개체 전부**의 키 집합을 구한다(순위 없음 · 099 G4 · FR-003).
 
@@ -415,7 +437,8 @@ def match_entity_keys(
             방지선**). 상한에 닿으면 집합이 불완전해지므로 경고 로그를 남긴다.
             🔴 이 값은 ② 의 창이 **아니다**(창을 넓히면 게이트가 관대해진다 · 위 함수 주석).
         candidate_size: ② kNN 창 크기(기본 20 · 고정이 원칙).
-        gate_eps: ② 게이트 임계. 순위 경로와 **같은 기본값**(0.15)을 쓴다.
+        gate_floor: ② 게이트의 **절대 하한**(주판정). 1등 코사인이 이 값 미만이면 의미 갈래를
+            버린다. 코사인 값 자체는 색인 크기와 무관해 자료가 늘어도 흔들리지 않는다.
 
     Raises:
         ValueError: ``query`` 가 비었을 때. 🔴 빈 집합(=0건)과 "묻지 않았다"(=필터 없음)는 **다른
@@ -461,24 +484,27 @@ def match_entity_keys(
         _LOG.warning("개체 집합 판정에서 의미(kNN) 갈래가 꺼졌다 — 질의 벡터가 없다(낱말 매칭 %d건만)",
                      len(text_keys))
         return EntityMatchSet(keys=text_keys, text_keys=text_keys,
-                              semantic_keys=frozenset(), semantic_gate_passed=False)
+                              semantic_keys=frozenset(), semantic_gate_passed=False,
+                              semantic_ranked=())
 
     semantic = semantic_entity_keys(client, index, query_vector=query_vector,
-                                    candidate_size=candidate_size, gate_eps=gate_eps)
+                                    candidate_size=candidate_size, gate_floor=gate_floor)
     if semantic.sample_size == 0:
         _LOG.warning("개체 의미(kNN) 갈래의 후보가 0건이다 — 색인이 비었거나 벡터 필드가 없다"
                      "(낱말 매칭 %d건만)", len(text_keys))
     elif not semantic.gate_passed:
         # 게이트 차단은 "정답이 없다"는 판정이라 **정상 동작**이지만, 조용하면 "왜 못 찾지"를
         # 추적할 수 없다. 격차와 임계를 함께 남겨 사후에 판정을 재현할 수 있게 한다.
-        _LOG.warning("개체 의미(kNN) 갈래가 게이트에 막혔다 — top=%.4f baseline=%.4f "
-                     "격차=%.4f < eps=%.2f(후보 %d건) · 낱말 매칭 %d건만 남긴다",
-                     semantic.top, semantic.baseline, semantic.top - semantic.baseline,
-                     gate_eps, semantic.sample_size, len(text_keys))
+        # 주판정이 절대 하한이므로 **하한과 top 을** 먼저 남긴다 — 격차는 참고값으로 뒤에 붙인다.
+        _LOG.warning("개체 의미(kNN) 갈래가 게이트에 막혔다 — top=%.4f < 하한=%s "
+                     "(배경=%.4f 격차=%.4f · 후보 %d건) · 낱말 매칭 %d건만 남긴다",
+                     semantic.top, gate_floor, semantic.baseline,
+                     semantic.top - semantic.baseline, semantic.sample_size, len(text_keys))
     # 🔴 ``keys`` 는 **파생값**이다 — 갈래를 따로 싣는다고 결과 집합이 달라지지 않는다.
     return EntityMatchSet(keys=text_keys | semantic.keys, text_keys=text_keys,
                           semantic_keys=semantic.keys,
-                          semantic_gate_passed=semantic.gate_passed)
+                          semantic_gate_passed=semantic.gate_passed,
+                          semantic_ranked=semantic.ranked)
 
 
 def _total_hits(total: Any, fallback: int) -> int:

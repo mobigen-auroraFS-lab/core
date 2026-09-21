@@ -462,12 +462,21 @@ _ENTITY_ALLOW_FILTER_SQL = """
 #    완전히 같다**. 빈 배열도 결과가 같다(앞세울 개체가 없다). ``uid_allow`` 와 달리 여기서는
 #    NULL 과 빈 집합의 뜻이 **같다**: 저쪽은 "무엇을 남길까"(거르기)이고 이쪽은 "무엇을 앞세울까"
 #    (순서)이기 때문이다.
+# 🔴 티어는 **3단**이다(2026-09-21). 종전 2단에서는 「남자 배우」처럼 이름이 하나도 안 맞는
+#    개념 질의에서 전원이 티어 0 이 되어, 구성 자산 수가 순서를 지배했다 — 뜻으로 14등인 개체가
+#    자산이 많으면 1위로 올라왔다(실측: 하정우 1등인데 채원빈이 화면 1위).
+#    이름 일치(2)를 뜻 상위(1)보다 앞에 두는 이유는 **이름이 더 확실한 신호**라서다.
+#    ⚠️ 관련도로 정렬하는 것이 아니라 관련도 상위를 **앞자리로 승급**시키는 것이라, 099 가 막은
+#    "관련도순은 커서를 못 만든다" 제약에 걸리지 않는다. 정렬 키 개수도 그대로다.
 _ENTITY_FIRST_TIER_SQL = """
-       CASE WHEN %(first_types)s::text[] IS NULL THEN 0
-            WHEN EXISTS (
+       CASE WHEN %(first_types)s::text[] IS NOT NULL AND EXISTS (
                  SELECT 1
                    FROM unnest(%(first_types)s::text[], %(first_uids)s::text[]) AS fs(t, u)
-                  WHERE fs.t = n.entity_type AND fs.u = n.entity_uid) THEN 1
+                  WHERE fs.t = n.entity_type AND fs.u = n.entity_uid) THEN 2
+            WHEN %(semantic_types)s::text[] IS NOT NULL AND EXISTS (
+                 SELECT 1
+                   FROM unnest(%(semantic_types)s::text[], %(semantic_uids)s::text[]) AS sm(t, u)
+                  WHERE sm.t = n.entity_type AND sm.u = n.entity_uid) THEN 1
             ELSE 0 END                               AS prio_tier
 """
 
@@ -663,6 +672,22 @@ def _allow_params(uid_allow: set[tuple[str, str]] | None) -> dict[str, Any]:
     return {"allow_types": [etype for etype, _ in pairs], "allow_uids": [uid for _, uid in pairs]}
 
 
+def _semantic_params(uid_semantic: set[tuple[str, str]] | None) -> dict[str, Any]:
+    """**뜻으로 앞세울** 개체 집합을 두 배열로 편다(순서 전용 · ``_first_params`` 와 같은 모양).
+
+    Args:
+        uid_semantic: 뜻으로 상위인 ``(entity_type, entity_uid)`` 집합. ``None`` 이면 없음.
+
+    Returns:
+        ``{"semantic_types": […] 또는 None, "semantic_uids": […] 또는 None}``. 짝이 유지되도록
+        **정렬**한다(같은 집합이면 같은 바인딩 · 헌법 3조).
+    """
+    if uid_semantic is None:
+        return {"semantic_types": None, "semantic_uids": None}
+    pairs = sorted((str(etype), str(uid)) for etype, uid in uid_semantic)
+    return {"semantic_types": [t for t, _ in pairs], "semantic_uids": [u for _, u in pairs]}
+
+
 def _first_params(uid_first: set[tuple[str, str]] | None) -> dict[str, Any]:
     """**앞세울 개체** 집합을 (타입, 표기) 두 배열로 편다(099 G7 · 순서 전용).
 
@@ -711,6 +736,7 @@ def list_entities(
     after_type: str | None = None,
     uid_allow: set[tuple[str, str]] | None = None,
     uid_first: set[tuple[str, str]] | None = None,
+    uid_semantic: set[tuple[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
     """노출 개체(멀티모달 메타) **목록**을 구성 자산 수 내림차순으로 조회한다(읽기 전용 · 095 FR-1).
 
@@ -740,6 +766,9 @@ def list_entities(
         uid_allow: 허용할 개체 ``(entity_type, entity_uid)`` 집합 — 검색(집합 판정)이 고른 개체만
             남기는 화이트리스트다(099 G4). 🔴 **``None`` 과 빈 집합은 다른 값이다**: ``None`` 이면
             필터를 걸지 않아 **종전과 완전히 같고**, 빈 집합이면 **0건**이다(검색했는데 매칭이 없음).
+        uid_semantic: 뜻으로 상위인 개체 집합(순서만 바꾼다 · 거르지 않는다). 이름 일치
+            (``uid_first``)보다 한 단 아래 티어다 — 이름이 더 확실한 신호라서다.
+            ``None``·빈 집합이면 앞세울 것이 없다(둘의 뜻이 같다 · 거르기가 아니므로).
         uid_first: **맨 앞에 둘** 개체 집합(099 G7 · 순서만 바꾼다 · 거르지 않는다). 이름으로 찾아도
             그 개체가 7위·15위에 있던 결함을 푸는 자리다. 🔴 누가 우선인지의 **판정 규칙은 호출부**
             (화면)에 있다 — 코어는 "이 짝들을 앞세워라"만 안다(093 책무 경계).
@@ -777,6 +806,7 @@ def list_entities(
         **_area_params(area_names),
         **_allow_params(uid_allow),
         **_first_params(uid_first),
+        **_semantic_params(uid_semantic),
     }
     sql = _LIST_ENTITIES_SQL.format(
         area_filter=_ENTITY_AREA_FILTER_SQL.format(alias="n"),
@@ -815,6 +845,7 @@ def count_entities(
     statuses: list[str] | None = None,
     uid_allow: set[tuple[str, str]] | None = None,
     uid_first: set[tuple[str, str]] | None = None,
+    uid_semantic: set[tuple[str, str]] | None = None,
 ) -> int:
     """지금 걸린 조건으로 **노출 개체가 모두 몇 개인지** 센다(읽기 전용 · 099 FR-006).
 
@@ -830,6 +861,8 @@ def count_entities(
         statuses: 소속 엣지 상태. ``None`` 이면 active+proposed(목록 기본과 같다).
         uid_allow: 개체 화이트리스트 — **목록과 같은 값을 줘야 한다**(099 G4). 총계와 목록이 다른
             모수를 말하면 "N건 중 M건"이 거짓말이 된다. ``None`` = 필터 없음 · 빈 집합 = 0건.
+        uid_semantic: 목록에서 뜻으로 앞세울 개체 집합. 🔴 총계는 이 값에 영향받지 않는다 —
+            순서 인자를 받는 것은 호출부가 목록·총계에 같은 인자 묶음을 그대로 넘기게 하기 위해서다.
         uid_first: 목록에서 **맨 앞에 둘** 개체 집합(099 G7). 🔴 **총계는 이 값에 영향을 받지 않는다**
             — 순서를 바꿀 뿐 대상을 늘리거나 줄이지 않기 때문이다(줄을 어떻게 세우든 사람 수는 같다).
             그래도 인자로 받는 이유는 호출부가 목록·총계에 **같은 인자 묶음**을 그대로 넘겨
