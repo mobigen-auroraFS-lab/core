@@ -20,6 +20,7 @@ import 할 수 있어야 하기 때문이다.
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from typing import Any
@@ -62,6 +63,8 @@ _SYNC_SQL = _ASSET_SELECT + "WHERE a.status = 'registered'\nORDER BY a.asset_id\
 # 파라미터 순서는 (channel, asset_id) — 서브쿼리의 channel 이 먼저 바인딩된다.
 _ASSET_ONE_SQL = _ASSET_SELECT + "WHERE a.asset_id = %s AND a.status = 'registered'\n"
 
+
+_LOG = logging.getLogger(__name__)
 
 def parse_vector(value: Any) -> list[float]:
     """pgvector 가 돌려준 값을 float 리스트로 정규화한다(순수).
@@ -817,8 +820,11 @@ def ensure_index(
         return "created"
     live_props = _live_properties(client, index)
     if live_props is None:
-        # 🔴 매핑을 못 읽었으면 **아무것도 하지 않는다**(101 G4). 빈 dict 로 취급하면 전 필드를
-        #    「빠졌다」고 보고 통째로 밀어넣게 된다 — 읽지도 못한 색인에 쓰기를 거는 셈이다.
+        # 🔴 응답에 매핑이 없으면 **아무것도 하지 않는다**(101 G4). 빈 dict 로 취급하면 전 필드를
+        #    「빠졌다」고 보고 통째로 밀어넣게 된다 — 확인도 못 한 색인에 쓰기를 거는 셈이다.
+        #    ⚠️ 상태는 'exists' 지만 **확인한 것이 아니라 확인을 못 한 것**이라 로그로 구분한다
+        #    — 이 모듈의 원칙이 "가장 나쁜 상태가 조용하면 안 된다"이므로.
+        _LOG.warning("색인 매핑을 확인하지 못해 보강·판정을 건너뛴다: index=%s", index)
         return "exists"
     missing = _missing_properties(live_props, body["mappings"]["properties"])
     if missing:
@@ -1174,7 +1180,9 @@ def sync_all(
 
     Returns:
         ``(인덱스 상태, 색인 건수, 오류 목록)``. 상태는 ``ensure_index`` 의 값 — ``created``·
-        ``recreated``·``updated``·``exists``·``analysis-stale``(분석기가 코드와 달라 ``recreate`` 필요).
+        ``recreated``·``updated``·``exists``·``mapping-stale``(필드 타입이 코드와 달라
+        ``recreate`` 필요 — 벡터가 ``knn_vector`` 가 아니면 뜻으로 찾기가 전부 실패한다)·
+        ``analysis-stale``(분석기가 코드와 달라 ``recreate`` 필요).
     """
     if bulk_fn is None:
         from opensearchpy import helpers

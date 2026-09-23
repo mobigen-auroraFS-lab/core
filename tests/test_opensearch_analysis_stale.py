@@ -175,6 +175,18 @@ class TestMappingStale(unittest.TestCase):
         client = _FakeClient(existing=True, live_props=props)
         self.assertEqual(sync.ensure_index(client, "assets", dim=8), "updated")
 
+    def test_응답에_매핑이_없으면_보강도_건너뛴다(self) -> None:
+        """🔴 빈 dict 로 취급하면 전 필드를 「빠졌다」고 보고 통째로 밀어넣는다 —
+        확인도 못 한 색인에 쓰기를 거는 셈이다. 상태는 ``exists`` 지만 로그로 구분한다."""
+        from tests.test_opensearch_sync import _FakeClient
+
+        client = _FakeClient(existing=True)
+        client.indices.get_mapping = lambda index: {}   # 응답이 비었다
+        with self.assertLogs(sync.__name__, level="WARNING") as cm:
+            self.assertEqual(sync.ensure_index(client, "assets", dim=8), "exists")
+        self.assertTrue(any("확인하지 못해" in m for m in cm.output))
+        self.assertEqual(client.indices.put_mappings, [], "쓰기가 일어나면 안 된다")
+
     def test_매핑_조회_실패는_예외를_올린다(self) -> None:
         """분석기와 같은 원칙 — 조회 실패는 삼키지 않는다(2026-09-23 정정)."""
         from tests.test_opensearch_sync import _FakeClient
