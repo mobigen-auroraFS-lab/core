@@ -61,6 +61,7 @@ __all__ = [
     "build_knn_body",
     "cut_rows",
     "embed_query",
+    "ensure_search_pipeline",
     "fuse_hybrid",
     "gate_signal",
     "get_client",
@@ -72,6 +73,7 @@ __all__ = [
     "passes_cutoff",
     "rerank_reorder",
     "search_assets_os",
+    "search_pipeline_body",
 ]
 
 _LOG = logging.getLogger(__name__)
@@ -83,6 +85,79 @@ _LOG = logging.getLogger(__name__)
 # 쓰는 단위 게이트는 opensearch-py·임베더 미설치여도 import 가능해야 한다(020 동형).
 # 실제 OS 동작 검증은 G4(실OS e2e). 여기 IO 는 가짜 msearch 클라이언트로 액션 조립을 단위 검증한다.
 # ──────────────────────────────────────────────────────────────────────────
+
+
+def search_pipeline_body(weights: tuple[float, float]) -> dict[str, Any]:
+    """검색 정규화 파이프라인 본문을 만든다(순수·결정적).
+
+    BM25(낱말)·kNN(뜻) 점수를 **min-max 정규화 후 가중평균**으로 섞는 설정이다. 파일 검색은
+    이 섞기를 **검색 엔진에 맡긴다**(통합 검색은 파이썬에서 섞는다 — ``file_search`` 머리말 표).
+
+    Args:
+        weights: ``(BM25 가중치, kNN 가중치)``. 🔴 **순서가 질의 본문의 서브쿼리 순서와 같아야
+            한다** — 뒤집히면 순위가 조용히 어긋난다. 정본은 설정 ``OPENSEARCH_FUSION_WEIGHTS``.
+
+    Returns:
+        ``PUT _search/pipeline/<이름>`` 에 그대로 넣는 dict.
+    """
+    w_bm25, w_knn = weights
+    return {
+        "description": "021 하이브리드 검색 정규화 융합(min-max + 가중평균) — BM25 ⊕ kNN",
+        "phase_results_processors": [
+            {
+                "normalization-processor": {
+                    "normalization": {"technique": "min_max"},
+                    "combination": {
+                        "technique": "arithmetic_mean",
+                        "parameters": {"weights": [float(w_bm25), float(w_knn)]},
+                    },
+                }
+            }
+        ],
+    }
+
+
+def ensure_search_pipeline(
+    client: Any, name: str, *, weights: tuple[float, float] = (0.5, 0.5)
+) -> str:
+    """검색 파이프라인이 없으면 등록한다(멱등 · ``ensure_index`` 와 같은 규약).
+
+    🔴 **왜 필요한가**(101 G2): 파일 검색이 이 파이프라인을 쓰는데 **만드는 코드가 없었다.**
+    027 이 재색인 도구에서 등록을 지웠고(그때는 쓰는 곳이 없었다) 그 뒤 파일 검색이 생기며
+    필요가 되살아났는데 **쓰는 쪽만 남았다.** 빈 환경에서 ``/file-search`` 가
+    ``Pipeline assets-hybrid is not defined`` 로 500 을 낸다(2026-09-22 실측).
+
+    ⚠️ **있으면 덮어쓰지 않는다** — 재색인을 돌릴 때마다 덮어쓰면 운영 중 순위가 흔들린다.
+    가중치를 바꾸려면 지우고 다시 만든다.
+
+    🔴 **파이프라인이 하나도 없으면 `get()` 이 404 를 던진다**(2026-09-23 실측 · OpenSearch 3.8.0).
+    빈 환경이 바로 그 상태라 — **이 함수가 가장 필요한 순간** — 404 를 「없음」으로 받지 않으면
+    등록 자체가 실패한다. 처음 확인할 때는 이미 파이프라인이 하나 있어서 못 잡았고, T023 빈 환경
+    재현 시험에서 드러났다.
+
+    🟢 **실환경 확인**(같은 날): `client.search_pipeline` 은 `SearchPipelineClient` 이고,
+    `get()`(id 없이)이 전체 dict 를 주며 그 키에 이름이 보인다 — 하나 이상 있을 때는 멱등 판정이
+    성립한다. `put(id=, body=)` 는 `{'acknowledged': True}` 를 준다.
+    (021 당시 주석의 「best-effort · 실 OS 에서 확정 검증」 유보를 여기서 해소한다.)
+
+    Args:
+        client: OpenSearch 클라이언트.
+        name: 파이프라인 이름(정본은 설정 ``OPENSEARCH_SEARCH_PIPELINE``).
+        weights: ``(BM25, kNN)`` 가중치. 정본은 설정 ``OPENSEARCH_FUSION_WEIGHTS``.
+
+    Returns:
+        ``'created'``(새로 만듦) 또는 ``'exists'``(이미 있어 손대지 않음).
+    """
+    try:
+        existing = client.search_pipeline.get() or {}
+    except Exception as exc:  # noqa: BLE001 — 404(하나도 없음)만 '없음'으로 받는다
+        if getattr(exc, "status_code", None) != 404:
+            raise
+        existing = {}
+    if name in existing:
+        return "exists"
+    client.search_pipeline.put(id=name, body=search_pipeline_body(weights))
+    return "created"
 
 
 def embed_query(query: str, *, channel: str) -> list[float]:

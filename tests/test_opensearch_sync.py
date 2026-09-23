@@ -555,14 +555,16 @@ class TestEnsureIndex(unittest.TestCase):
         (_idx, put), = client.indices.put_mappings
         self.assertEqual(set(put["properties"]), {"file_size"})
 
-    def test_analysis_unreadable_skips_check(self) -> None:
-        # 설정을 **못 읽었으면** 어긋남을 단정하지 않는다 — 헛울림보다 침묵을 택한다.
-        # ⚠️ 2026-09-23(101 G4) 정정: 예전엔 빈 dict 로 「못 읽음」을 흉내 냈는데 그건 틀린
-        #    전제였다. 자동 생성된 색인이 바로 빈 dict 라 아래 테스트와 구분되지 않았다.
+    def test_settings_query_failure_propagates(self) -> None:
+        # 🔴 설정 **조회가 실패하면 예외를 올린다** — 삼키면 "읽지도 못했는데 정상"이 된다.
+        # ⚠️ 2026-09-23(101 G4) 정정 2회: ① 예전엔 빈 dict 로 「못 읽음」을 흉내 냈는데 자동
+        #    생성된 색인이 바로 그 모양이라 구분이 안 됐다. ② 그것을 고치며 예외를 삼키게
+        #    했는데, 그게 또 다른 조용한 실패였다. 권한·네트워크 문제는 사람이 알아야 한다.
         from src.search.opensearch_sync import ensure_index
 
         client = _FakeClient(existing=True, settings_unreadable=True)
-        self.assertEqual(ensure_index(client, "assets", dim=8), "exists")
+        with self.assertRaises(RuntimeError):
+            ensure_index(client, "assets", dim=8)
 
     def test_analysis_missing_is_stale(self) -> None:
         # 🔴 101 G4 의 핵심 — 읽었는데 분석기가 **없으면** 어긋남이다.

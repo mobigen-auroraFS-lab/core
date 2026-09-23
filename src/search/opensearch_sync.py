@@ -652,7 +652,7 @@ def _mapping_stale(live: Mapping[str, Any] | None, wanted: Mapping[str, Any]) ->
     남는 필드는 코드가 정본이 아니므로 건드리지 않는다).
 
     Args:
-        live: 지금 색인의 ``mappings.properties``. **``None`` 이면 읽기 실패**(판단 보류).
+        live: 지금 색인의 ``mappings.properties``. **``None`` 이면 응답에 매핑이 없다**(판단 보류).
         wanted: 코드가 정본으로 삼는 ``mappings.properties``.
 
     Returns:
@@ -685,12 +685,13 @@ def _live_properties(client: Any, index: str) -> dict[str, Any] | None:
         client: OpenSearch 클라이언트.
         index: 색인(또는 별칭) 이름.
 
+    ⚠️ **조회 실패(권한·네트워크)는 삼키지 않는다** — 예외를 그대로 올린다(2026-09-23 정정).
+
     Returns:
-        ``mappings.properties`` dict. 읽지 못하면 빈 dict(그때는 보강을 건너뛴다).
+        ``mappings.properties`` dict. **응답에 매핑이 없으면 ``None``**(그때는 보강·판정을 건너뛴다).
     """
-    try:
-        got = client.indices.get_mapping(index=index) or {}
-    except Exception:  # noqa: BLE001 — 읽기 실패는 '어긋남'이 아니라 '판단 보류'다(101 G4)
+    got = client.indices.get_mapping(index=index) or {}
+    if not got:
         return None
     entry = got.get(index) or (next(iter(got.values()), {}) if got else {})
     return ((entry or {}).get("mappings") or {}).get("properties") or {}
@@ -748,22 +749,24 @@ def _live_analysis(client: Any, index: str) -> dict[str, Any] | None:
 
     ⚠️ 매핑과 같이 응답은 **실제 색인 이름**으로 키가 잡힌다 — 정확히 일치하는 키가 없으면 첫 항목을 쓴다.
 
-    🔴 **돌려주는 값 둘을 구분한다**(101 G4): ``None`` = 읽지 못했다(권한·네트워크·색인 부재),
-    ``{}`` = 읽었는데 분석기가 없다. 앞은 판단 보류, 뒤는 어긋남이다 — **자동 생성된 색인이
+    🔴 **돌려주는 값 둘을 구분한다**(101 G4): ``None`` = **응답에 설정 자체가 없다**,
+    ``{}`` = 읽었는데 분석기만 없다. 앞은 판단 보류, 뒤는 어긋남이다 — **자동 생성된 색인이
     바로 뒤의 모양**이라 둘을 뭉뚱그리면 가장 나쁜 상태를 놓친다(``_analysis_stale`` 참조).
+
+    ⚠️ **조회 실패(권한·네트워크)는 삼키지 않는다** — 예외를 그대로 올린다. 삼키면 "읽지도
+    못했는데 정상"으로 보여 이 모듈이 막으려는 바로 그 조용한 실패가 된다(2026-09-23 정정).
 
     Args:
         client: OpenSearch 클라이언트.
         index: 색인(또는 별칭) 이름.
 
     Returns:
-        분석기 설정 dict. 분석기가 없으면 빈 dict. **읽지 못하면 ``None``.**
+        분석기 설정 dict. 분석기만 없으면 빈 dict. **설정 자체가 없으면 ``None``.**
     """
-    try:
-        got = client.indices.get_settings(index=index) or {}
-    except Exception:  # noqa: BLE001 — 읽기 실패는 '어긋남'이 아니라 '판단 보류'다
+    got = client.indices.get_settings(index=index) or {}
+    if not got:
         return None
-    entry = got.get(index) or (next(iter(got.values()), {}) if got else {})
+    entry = got.get(index) or next(iter(got.values()), {})
     settings = ((entry or {}).get("settings") or {}).get("index") or {}
     return settings.get("analysis") or {}
 

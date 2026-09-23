@@ -38,8 +38,11 @@ class TestAnalysisStale(unittest.TestCase):
         """
         self.assertTrue(sync._analysis_stale({}, _wanted()))
 
-    def test_못_읽었으면_보류한다(self) -> None:
-        """늑대소년 방지 — 권한·네트워크로 못 읽은 것까지 어긋남이라 하면 경보가 무의미해진다."""
+    def test_설정_자체가_없으면_보류한다(self) -> None:
+        """응답에 설정이 없으면 판단할 근거가 없다 — 보류(``None``).
+
+        ⚠️ 조회가 **실패**한 경우는 여기 오지 않는다 — 예외가 그대로 올라간다(2026-09-23 정정).
+        """
         self.assertFalse(sync._analysis_stale(None, _wanted()))
 
     def test_다르면_어긋남이다(self) -> None:
@@ -79,9 +82,18 @@ class _Client:
 class TestLiveAnalysisDistinguishesFailure(unittest.TestCase):
     """읽기 실패는 ``None``, 설정이 없는 것은 ``{}`` — 부르는 쪽이 갈라 볼 수 있어야 한다."""
 
-    def test_읽기_실패는_None(self) -> None:
-        got = sync._live_analysis(_Client(None, raises=True), "assets")
-        self.assertIsNone(got)
+    def test_조회_실패는_예외를_올린다(self) -> None:
+        """🔴 삼키면 "읽지도 못했는데 정상"이 된다 — 이 모듈이 막으려는 조용한 실패다.
+
+        2026-09-23 정정: 처음엔 예외를 삼켜 ``None`` 을 돌려줬는데, 그러면 재색인 도구가
+        조용히 지나간다. 권한·네트워크 문제는 **사람이 알아야** 한다.
+        """
+        with self.assertRaises(RuntimeError):
+            sync._live_analysis(_Client(None, raises=True), "assets")
+
+    def test_응답이_비면_None(self) -> None:
+        """색인이 없는 등으로 응답 자체가 비면 판단할 근거가 없다 — 보류."""
+        self.assertIsNone(sync._live_analysis(_Client({}), "assets"))
 
     def test_분석기가_없으면_빈_dict(self) -> None:
         """🔴 자동 생성된 색인이 바로 이 모양이다 — settings 는 읽히는데 analysis 만 없다."""
@@ -163,12 +175,13 @@ class TestMappingStale(unittest.TestCase):
         client = _FakeClient(existing=True, live_props=props)
         self.assertEqual(sync.ensure_index(client, "assets", dim=8), "updated")
 
-    def test_매핑을_못_읽으면_보류한다(self) -> None:
-        """분석기와 같은 원칙 — 읽기 실패는 어긋남이 아니다."""
+    def test_매핑_조회_실패는_예외를_올린다(self) -> None:
+        """분석기와 같은 원칙 — 조회 실패는 삼키지 않는다(2026-09-23 정정)."""
         from tests.test_opensearch_sync import _FakeClient
 
         client = _FakeClient(existing=True, mapping_unreadable=True)
-        self.assertEqual(sync.ensure_index(client, "assets", dim=8), "exists")
+        with self.assertRaises(RuntimeError):
+            sync.ensure_index(client, "assets", dim=8)
 
 if __name__ == "__main__":
     unittest.main()
