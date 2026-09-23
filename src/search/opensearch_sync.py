@@ -638,7 +638,44 @@ def _missing_properties(
     return out
 
 
-def _live_properties(client: Any, index: str) -> dict[str, Any]:
+def _mapping_stale(live: Mapping[str, Any] | None, wanted: Mapping[str, Any]) -> bool:
+    """이미 있는 필드의 **정의가 코드와 다른지**(순수 · 101 G4 · 2026-09-23).
+
+    빠진 필드는 덧붙일 수 있지만 **이미 있는 필드의 타입은 엔진이 바꿔 주지 않는다** — 색인을
+    다시 만들어야 한다. 그래서 `_missing_properties`(고칠 수 있는 것)와 성격이 다르고 따로 본다.
+
+    🔴 **왜 필요한가**: 색인이 없는데 문서가 먼저 들어가면 엔진이 값 모양만 보고 자동 생성하는데,
+    1536차원 벡터가 ``float`` 으로 잡힌다. 그 색인은 **벡터 검색이 전부 죽는데** 종전 판정은
+    ``updated`` 였다(2026-09-22 실측). 검색을 해봐야만 알 수 있던 것을 **그 자리에서** 알린다.
+
+    ⚠️ **양쪽에 다 있는 필드만** 본다 — 한쪽에만 있는 것은 여기 소관이 아니다(빠진 필드는 보강,
+    남는 필드는 코드가 정본이 아니므로 건드리지 않는다).
+
+    Args:
+        live: 지금 색인의 ``mappings.properties``. **``None`` 이면 읽기 실패**(판단 보류).
+        wanted: 코드가 정본으로 삼는 ``mappings.properties``.
+
+    Returns:
+        같은 이름의 필드가 **다르게 정의돼 있으면** True.
+    """
+    if live is None:
+        return False
+    for name, want in wanted.items():
+        got = live.get(name)
+        if not isinstance(got, Mapping) or not isinstance(want, Mapping):
+            continue  # 빠진 필드는 보강 소관
+        want_type, got_type = want.get("type"), got.get("type")
+        if want_type is None or got_type is None:
+            continue  # 객체 필드(하위 properties)는 보강으로 고쳐진다 — 여기 소관이 아니다
+        if got_type != want_type:
+            return True
+        # 같은 knn_vector 라도 차원이 다르면 못 고친다(1536D 정본 · 헌법)
+        if want_type == "knn_vector" and got.get("dimension") != want.get("dimension"):
+            return True
+    return False
+
+
+def _live_properties(client: Any, index: str) -> dict[str, Any] | None:
     """지금 색인의 속성 정의를 읽는다.
 
     ⚠️ 응답은 **실제 색인 이름**으로 키가 잡힌다 — 별칭으로 물으면 요청한 이름과 다르다. 그래서
@@ -651,7 +688,10 @@ def _live_properties(client: Any, index: str) -> dict[str, Any]:
     Returns:
         ``mappings.properties`` dict. 읽지 못하면 빈 dict(그때는 보강을 건너뛴다).
     """
-    got = client.indices.get_mapping(index=index) or {}
+    try:
+        got = client.indices.get_mapping(index=index) or {}
+    except Exception:  # noqa: BLE001 — 읽기 실패는 '어긋남'이 아니라 '판단 보류'다(101 G4)
+        return None
     entry = got.get(index) or (next(iter(got.values()), {}) if got else {})
     return ((entry or {}).get("mappings") or {}).get("properties") or {}
 
@@ -677,7 +717,7 @@ def _normalize_settings(value: Any) -> Any:
     return str(value)
 
 
-def _analysis_stale(live: Mapping[str, Any], wanted: Mapping[str, Any]) -> bool:
+def _analysis_stale(live: Mapping[str, Any] | None, wanted: Mapping[str, Any]) -> bool:
     """지금 색인의 분석기 설정이 코드 정본과 **다른지**(순수).
 
     분석기(토크나이저·필터·analyzer)는 매핑처럼 덧붙여 고칠 수 없다 — 색인을 다시 만들어야 바뀐다.
@@ -685,31 +725,44 @@ def _analysis_stale(live: Mapping[str, Any], wanted: Mapping[str, Any]) -> bool:
     문서가 계속 들어가고, 검색 결과가 "고쳤는데 그대로" 가 된다(096 조사 필터가 바로 그 경우).
     그래서 두 정의를 통째로 비교한다 — 코드가 정본이므로 어느 쪽에 더 있어도 어긋남이다.
 
+    🔴 **「비었다」와 「못 읽었다」를 가른다**(101 G4 · 2026-09-23). 예전엔 둘 다 보류(False)였는데,
+    **자동 생성된 색인은 분석기가 애초에 없다** — 즉 가장 나쁜 상태가 가장 조용했다. 실측: 벡터가
+    ``float`` 으로 잡힌 색인에 복구 도구를 돌려도 ``updated`` 로만 보고했다(경고 통로가 있는데도).
+    코드 정본에는 분석기가 반드시 있으므로 **살아 있는 색인에 없다는 것 자체가 이상 신호**다.
+
     Args:
-        live: 지금 색인의 ``settings.index.analysis``. 읽지 못했으면 빈 dict.
+        live: 지금 색인의 ``settings.index.analysis``. **``None`` 이면 읽기 실패**(판단 보류),
+            ``{}`` 면 **읽었는데 분석기가 없다**(어긋남).
         wanted: 코드가 정본으로 삼는 ``settings.analysis``.
 
     Returns:
-        다르면 True. ``live`` 가 비어 있으면(읽기 실패) 판단을 보류하고 False 를 준다.
+        다르면 True. ``live`` 가 ``None``(읽기 실패)일 때만 판단을 보류하고 False 를 준다.
     """
-    if not live:
+    if live is None:
         return False
     return _normalize_settings(live) != _normalize_settings(wanted)
 
 
-def _live_analysis(client: Any, index: str) -> dict[str, Any]:
+def _live_analysis(client: Any, index: str) -> dict[str, Any] | None:
     """지금 색인의 분석기 설정(``settings.index.analysis``)을 읽는다.
 
     ⚠️ 매핑과 같이 응답은 **실제 색인 이름**으로 키가 잡힌다 — 정확히 일치하는 키가 없으면 첫 항목을 쓴다.
+
+    🔴 **돌려주는 값 둘을 구분한다**(101 G4): ``None`` = 읽지 못했다(권한·네트워크·색인 부재),
+    ``{}`` = 읽었는데 분석기가 없다. 앞은 판단 보류, 뒤는 어긋남이다 — **자동 생성된 색인이
+    바로 뒤의 모양**이라 둘을 뭉뚱그리면 가장 나쁜 상태를 놓친다(``_analysis_stale`` 참조).
 
     Args:
         client: OpenSearch 클라이언트.
         index: 색인(또는 별칭) 이름.
 
     Returns:
-        분석기 설정 dict. 읽지 못하면 빈 dict(그때는 어긋남 판단을 건너뛴다).
+        분석기 설정 dict. 분석기가 없으면 빈 dict. **읽지 못하면 ``None``.**
     """
-    got = client.indices.get_settings(index=index) or {}
+    try:
+        got = client.indices.get_settings(index=index) or {}
+    except Exception:  # noqa: BLE001 — 읽기 실패는 '어긋남'이 아니라 '판단 보류'다
+        return None
     entry = got.get(index) or (next(iter(got.values()), {}) if got else {})
     settings = ((entry or {}).get("settings") or {}).get("index") or {}
     return settings.get("analysis") or {}
@@ -742,8 +795,13 @@ def ensure_index(
 
     Returns:
         ``'created'``(신규) · ``'recreated'``(삭제 후 재생성) · ``'updated'``(빠진 필드 보강) ·
-        ``'exists'``(손댈 것 없음) · ``'analysis-stale'``(**분석기 설정이 코드와 다르다** — 빠진 필드는
-        보강했지만 이 색인에 넣는 문서는 옛 분석기로 쪼개진다. ``recreate`` 로 다시 만들어야 반영된다).
+        ``'exists'``(손댈 것 없음) · ``'mapping-stale'``(🔴 **이미 있는 필드의 정의가 코드와 다르다** —
+        대표 사례는 1536D 벡터가 ``float`` 으로 잡힌 자동 생성 색인이고, 그 색인은 **벡터 검색이 전부
+        죽는다**. 타입 변경은 엔진이 허용하지 않아 ``recreate`` + 재색인뿐이다) ·
+        ``'analysis-stale'``(**분석기 설정이 코드와 다르다** — 빠진 필드는 보강했지만 이 색인에 넣는
+        문서는 옛 분석기로 쪼개진다. ``recreate`` 로 다시 만들어야 반영된다).
+
+        ⚠️ 둘 다 어긋나면 **``mapping-stale`` 이 우선**한다(더 심한 쪽).
     """
     body = build_index_body(dim=dim, nori_user_words=nori_user_words)
     exists = client.indices.exists(index=index)
@@ -754,12 +812,18 @@ def ensure_index(
     if not exists:
         client.indices.create(index=index, body=body)
         return "created"
-    missing = _missing_properties(
-        _live_properties(client, index), body["mappings"]["properties"]
-    )
+    live_props = _live_properties(client, index)
+    if live_props is None:
+        # 🔴 매핑을 못 읽었으면 **아무것도 하지 않는다**(101 G4). 빈 dict 로 취급하면 전 필드를
+        #    「빠졌다」고 보고 통째로 밀어넣게 된다 — 읽지도 못한 색인에 쓰기를 거는 셈이다.
+        return "exists"
+    missing = _missing_properties(live_props, body["mappings"]["properties"])
     if missing:
         client.indices.put_mapping(index=index, body={"properties": missing})
-    # 분석기 어긋남은 보강으로 못 고친다 — 고칠 수 있는 것(빠진 필드)은 고친 뒤 상태로 알린다.
+    # 🔴 고칠 수 있는 것(빠진 필드)은 먼저 고치고, 못 고치는 어긋남을 상태로 알린다.
+    #    매핑을 분석기보다 먼저 본다 — 벡터 타입이 틀리면 검색이 아예 죽으므로 더 심하다.
+    if _mapping_stale(live_props, body["mappings"]["properties"]):
+        return "mapping-stale"
     if _analysis_stale(_live_analysis(client, index), body["settings"]["analysis"]):
         return "analysis-stale"
     return "updated" if missing else "exists"
