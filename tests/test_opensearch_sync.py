@@ -305,8 +305,15 @@ class _FakeIndices:
         existing: bool = False,
         live_props: dict | None = None,
         live_analysis: dict | None = None,
+        settings_unreadable: bool = False,
+        mapping_unreadable: bool = False,
     ) -> None:
         self._existing = existing
+        self._mapping_unreadable = mapping_unreadable
+        # 🔴 「못 읽었다」와 「비었다」는 다르다(101 G4) — 전자만 판단 보류다.
+        #    예전엔 빈 dict 로 「못 읽음」을 흉내 냈는데, 자동 생성된 색인이 정확히 그 모양이라
+        #    가장 나쁜 상태가 가장 조용해졌다. 실패는 예외로 흉내 낸다.
+        self._settings_unreadable = settings_unreadable
         self.created: list[tuple[str, dict]] = []
         self.deleted: list[str] = []
         self.refreshed: list[str] = []
@@ -340,6 +347,8 @@ class _FakeIndices:
 
     def get_mapping(self, index: str) -> dict:
         # 실제 응답은 **실 색인 이름**으로 키가 잡힌다 — 별칭 대비로 다른 이름을 쓴다.
+        if self._mapping_unreadable:
+            raise RuntimeError("매핑을 읽지 못했다(권한·네트워크)")
         return {f"{index}-000001": {"mappings": {"properties": self.live_props}}}
 
     def put_mapping(self, index: str, body: dict) -> None:
@@ -347,6 +356,8 @@ class _FakeIndices:
 
     def get_settings(self, index: str) -> dict:
         # 매핑과 같이 실 색인 이름으로 키가 잡힌 응답 모양.
+        if self._settings_unreadable:
+            raise RuntimeError("설정을 읽지 못했다(권한·네트워크)")
         return {f"{index}-000001": {"settings": {"index": {"analysis": self.live_analysis}}}}
 
 
@@ -358,8 +369,16 @@ class _FakeClient:
         existing: bool = False,
         live_props: dict | None = None,
         live_analysis: dict | None = None,
+        settings_unreadable: bool = False,
+        mapping_unreadable: bool = False,
     ) -> None:
-        self.indices = _FakeIndices(existing, live_props, live_analysis)
+        self.indices = _FakeIndices(
+            existing,
+            live_props,
+            live_analysis,
+            settings_unreadable=settings_unreadable,
+            mapping_unreadable=mapping_unreadable,
+        )
         self.indexed: list[dict] = []
         self.bulk_calls: list[dict] = []
 
@@ -536,12 +555,25 @@ class TestEnsureIndex(unittest.TestCase):
         (_idx, put), = client.indices.put_mappings
         self.assertEqual(set(put["properties"]), {"file_size"})
 
-    def test_analysis_unreadable_skips_check(self) -> None:
-        # 설정을 못 읽었으면(빈 dict) 어긋남을 단정하지 않는다 — 헛울림보다 침묵을 택한다.
+    def test_settings_query_failure_propagates(self) -> None:
+        # 🔴 설정 **조회가 실패하면 예외를 올린다** — 삼키면 "읽지도 못했는데 정상"이 된다.
+        # ⚠️ 2026-09-23(101 G4) 정정 2회: ① 예전엔 빈 dict 로 「못 읽음」을 흉내 냈는데 자동
+        #    생성된 색인이 바로 그 모양이라 구분이 안 됐다. ② 그것을 고치며 예외를 삼키게
+        #    했는데, 그게 또 다른 조용한 실패였다. 권한·네트워크 문제는 사람이 알아야 한다.
+        from src.search.opensearch_sync import ensure_index
+
+        client = _FakeClient(existing=True, settings_unreadable=True)
+        with self.assertRaises(RuntimeError):
+            ensure_index(client, "assets", dim=8)
+
+    def test_analysis_missing_is_stale(self) -> None:
+        # 🔴 101 G4 의 핵심 — 읽었는데 분석기가 **없으면** 어긋남이다.
+        #    코드 정본에는 분석기가 반드시 있으므로, 없다는 사실 자체가 이상 신호다.
+        #    실측(2026-09-22): 자동 생성된 색인이 이 모양인데 'updated' 로만 보고됐다.
         from src.search.opensearch_sync import ensure_index
 
         client = _FakeClient(existing=True, live_analysis={})
-        self.assertEqual(ensure_index(client, "assets", dim=8), "exists")
+        self.assertEqual(ensure_index(client, "assets", dim=8), "analysis-stale")
 
     def test_settings_normalized_before_compare(self) -> None:
         # 엔진은 설정을 문자열로 돌려준다("1"·"true") — 값이 같으면 어긋남이 아니어야 한다.
