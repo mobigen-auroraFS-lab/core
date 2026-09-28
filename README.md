@@ -1,140 +1,239 @@
 # dataplatform-core
 
-멀티모달(텍스트·이미지·영상·오디오) 데이터 통합 플랫폼의 **공유 코어 라이브러리**입니다.
-파일에서 추출한 메타데이터와 청크 임베딩을 PostgreSQL + pgvector 에 적재하고, 자산 간 관계(graph)와
-하이브리드 검색(BM25 + kNN)을 위한 규약·계약·순수 로직과 **DB 스키마 정본**을 소유합니다.
+멀티모달(텍스트·이미지·영상·오디오) 데이터 통합 플랫폼의 공유 라이브러리입니다.
 
-> 국책과제 **RS-2025-02215256** 산출물.
+## 이 레포지토리는 무엇인가
 
-## 세 레포의 관계
+플랫폼은 저장소 세 개로 나뉘어 있습니다. 이 레포는 그중 **세 저장소가 함께 쓰는 코드와
+데이터베이스 스키마**를 담당합니다. 검색 순위를 매기는 방식이나 자산의 상태값처럼 셋이
+같은 답을 내야 하는 것들을 여기 한 곳에 둡니다.
 
-이 플랫폼은 세 레포로 나뉩니다. 이 레포는 그중 **코어(라이브러리)** 입니다.
-
-| 레포 | 파이썬 패키지 | 역할 |
-|---|---|---|
-| **dataplatform-core**(이 레포) | `src.*` | 규약·계약·순수 로직 + DB 스키마 정본(`migrations/`) |
-| dataplatform-pipeline | `processing.*` | 실행 오케스트레이션(수집·분류·추출·임베딩·적재·색인·관계 생성) |
-| dataplatform-service | `service.*` | HTTP API(검색·자산 상세·다운로드·관계 검토 serving) |
-
-**이 레포에는 실행 진입점이 없습니다.** 라이브러리이므로 CLI·Airflow·HTTP 계층은 위 두 레포에 있습니다.
-여기서 유효한 명령은 테스트·마이그레이션·시드입니다.
-
-## 요구사항
-
-| 항목 | 버전 |
+| 저장소 | 하는 일 |
 |---|---|
-| Python | **3.13 이상** |
-| PostgreSQL | **17** + `pgvector` 확장 |
-| OpenSearch | `analysis-nori`(한국어 형태소) 플러그인 · kNN 사용 시 k-NN 플러그인 |
+| **core** (이 레포) | 공통 코드 · 데이터베이스 스키마 |
+| [pipeline](https://github.com/mobigen-auroraFS-lab/pipeline) | 파일 수집 · 분류 · 메타데이터 추출 · 색인 · 자산 간 관계 생성 |
+| [service](https://github.com/mobigen-auroraFS-lab/service) | 웹 화면이 사용하는 HTTP API |
 
-임베딩 차원은 **1536D 로 고정**돼 있습니다(`src/config/embedding_constants.py`).
+**이 레포에는 실행 파일이 없습니다.** 라이브러리이므로 다른 두 레포가 설치해서 함수를
+불러 쓰는 형태입니다. 직접 실행하는 것은 테스트와 데이터베이스 마이그레이션뿐입니다.
 
-## 설치
+패키지 이름은 `meta-extract`, 코드에서 불러 쓸 때의 이름은 `src` 입니다.
 
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[migrate]" -c constraints.txt    # [migrate] = alembic (마이그레이션용)
-```
-
-`constraints.txt` 는 `pyproject.toml` 의 추상 선언(`>=`)으로부터 **해소된 정확 버전**을 고정합니다.
-재현성이 필요하면 위처럼 `-c constraints.txt` 를 함께 쓰십시오.
-
-## 환경변수
-
-템플릿이 있습니다 — 복사해서 값만 채우면 됩니다:
-
-```bash
-cp .env.example .env.dev      # .env.dev 는 커밋되지 않습니다(.gitignore)
-```
-
-### 설정을 주는 두 가지 방법
-
-| 방법 | 어디에 | 우선순위 |
-|---|---|---|
-| **A. `.env.<환경>` 파일** | **실행하는 디렉터리** → 없으면 레포 루트 순으로 찾습니다 | 낮음 |
-| **B. 환경변수 직접 주입** | 배포·컨테이너·CI(`export` · `env_file:` · `env:`) | **높음**(A 를 덮어씁니다) |
-
-방법 B 로 파일 값을 그대로 올리려면:
-
-```bash
-set -a; . ./.env.dev; set +a
-```
-
-> `--env dev` 는 `.env.dev` 를, `--env prod` 는 `.env.prod` 를 찾습니다.
-
-### 🔴 필수 — 없으면 기동 시점에 실패합니다
-
-설정 로더가 다음 11개를 **필수로 요구**합니다(미설정 시 `ValueError: 필수 환경변수 누락: <이름>` 으로
-즉시 중단 — 잘못된 설정으로 조용히 도는 것을 막기 위한 fail-fast 입니다).
-
-```dotenv
-META_MODEL=              # 온프레미스 LLM 모델 이름
-ENCODING=utf-8
-CHUNK_SIZE=1000          # 텍스트 청킹
-OVERLAP_SIZE=100
-SUMMARY_MAX_CHARS=500
-TOP_K_KEYWORDS=10
-TEXT_EMBED_MODEL=        # 텍스트 임베딩 모델
-TEXT_EMBED_CHUNK_SIZE=512
-TEXT_EMBED_NORMALIZE=true
-OPENAI_BASE_URL=         # OpenAI 호환 엔드포인트(온프레미스 LLM 서버)
-OPENAI_API_KEY=          # 위 엔드포인트용 키(온프레미스면 임의값도 가능)
-```
-
-> `OPENAI_*` 라는 이름은 **OpenAI 호환 프로토콜**을 뜻합니다 — 외부 OpenAI 서비스가 아니라
-> 온프레미스 LLM 서버를 가리킵니다(설계 제약: 의료 데이터는 외부 LLM 호출 금지).
-
-> **백엔드(HTTP API)는 이 중 5개를 요구하지 않습니다.** `ENCODING`·`CHUNK_SIZE`·`OVERLAP_SIZE`·
-> `SUMMARY_MAX_CHARS`·`TOP_K_KEYWORDS` 는 적재(요약·청킹)만 읽는 값이라, 백엔드는 설정을 **서빙 역할**로
-> 초기화합니다 — `init_settings(env, role="serving")` 또는 `bootstrap_env(env, repo_root=<자기 루트>, role="serving")`.
-> 없으면 자리값이 들어가고 기동합니다. 파이프라인(적재)은 종전과 같이 11개 전부 필수입니다.
-
-### 그 외
-
-| 변수 | 용도 |
-|---|---|
-| `POSTGRES_HOST` · `POSTGRES_PORT` · `POSTGRES_DB` · `POSTGRES_USER` · `POSTGRES_PASSWORD` | PostgreSQL 접속 |
-| `OPENSEARCH_HOST` · `OPENSEARCH_PORT` | OpenSearch 접속(색인·검색) |
-| `LLM_BASE_URL` · `LLM_MODEL` | 온프레미스 LLM 엔드포인트(zero-shot 보조) |
-| `EMBEDDING_API_URL` | 원격 임베딩 서버(선택 — 미설정 시 로컬 모델 로드) |
-
-## 스키마 생성과 시드
-
-```bash
-alembic -c alembic.ini upgrade head          # ① DB 스키마 생성
-python -m scripts.seed_topic_registry --env dev --apply   # ② 닫힌 주제 분류체계 시드
-```
-
-> ⚠️ **②를 생략하면 관계 생성 결과가 0건이 됩니다.** 관계 제안은 닫힌 주제 어휘(taxonomy)를
-> 전제로 동작하므로, 어휘가 비어 있으면 후보가 만들어지지 않습니다.
-> `--apply` 없이 실행하면 dry-run(DB 미접촉)으로 무엇이 적재될지만 보여줍니다.
-
-## 테스트
-
-```bash
-python -m unittest discover -s tests     # 순수 단위 테스트(실 DB·모델 불필요 — 해당 테스트는 자동 skip)
-```
-
-실 DB 통합 테스트는 환경변수 게이트로만 실행됩니다(`RUN_DB_E2E=1`, `RUN_OS_E2E=1`).
-
-## 구조
+## 디렉터리 구조
 
 ```
 src/
-  config/       설정·상수(임베딩 차원 등)
-  database/     PostgreSQL 풀·트랜잭션·ID(UUIDv7)·lineage
-  domain/       닫힌 어휘(DB CHECK 와 동기)
-  embedders/    임베딩 어댑터(SentenceTransformer·CLIP·원격)
-  file/         파일 식별·해시
-  llm/          LLM 단일 seam + 요약기(text/image/video)
-  registry/     레지스트리
-  relations/    자산 간 관계 — 후보 생성·제안·저장·품질 + 주제 시드
-  search/       하이브리드 검색(BM25 + kNN 융합)·색인 동기
-  topic/        자산 자기주제 조회
-migrations/     DB 스키마 정본(alembic + 손작성 SQL)
-scripts/        시드·게이트·측정 도구
-tests/          단위 테스트
+  config/          # 설정 읽기, 환경변수 검증, 임베딩 차원 같은 상수
+  database/        # PostgreSQL 연결·트랜잭션, 자산 ID 생성, 처리 이력 기록
+  domain/          # 자산 상태값 어휘. DB 제약조건과 짝을 이룹니다
+  embedders/       # 텍스트·이미지·영상을 벡터로 바꾸는 코드
+  file/            # 파일 종류 판별, 해시 계산, 경로 규칙
+  llm/             # LLM 호출 창구와 요약 생성. 모든 LLM 호출이 여기를 지납니다
+  mm_classify/     # 사용자가 정의한 분류 기준으로 자산을 판정
+  mm_meta/         # 여러 자산에 공통으로 등장하는 개체를 묶는 로직
+  registry/        # 접근 등급, 추가 메타데이터 필드 관리
+  relations/       # 자산 사이의 관계를 찾고 저장. 관계 조회도 여기를 거칩니다
+  search/          # 검색 질의 조립, 키워드·벡터 결과 합치기, 색인 정의
+  topic/           # 자산에 붙은 주제 조회
+
+migrations/        # 데이터베이스 스키마 변경 이력 (alembic)
+scripts/           # 시드 데이터 적재, 코드 검사 도구
+tests/             # 단위 테스트
+constraints.txt    # 의존성 버전 고정 파일
 ```
+
+`llm/` 과 `relations/` 는 우회할 수 없게 만들어 두었습니다. LLM 호출은 전부
+`llm/client.py` 를 지나야 하고, 관계 조회는 `relations/graph_query.py` 를 거쳐야 합니다.
+관계는 양방향으로 저장되기 때문에 한쪽 방향만 조회하면 결과의 절반이 빠집니다.
+
+## 사용 환경
+
+### 하드웨어
+
+이 레포는 라이브러리라 자체 서버가 없습니다. 아래는 코어를 설치해 쓰는 장비 기준이며,
+실제 운영 사양은 pipeline 레포 README 를 참고하십시오. 그쪽이 가장 무겁습니다.
+
+| 구분 | 최소 | 권장 |
+|---|---|---|
+| CPU | 2 코어 | 4 코어 |
+| 메모리 | 4 GB | 8 GB |
+| GPU | 불필요 | 불필요 |
+
+PyTorch 는 CPU 버전으로 동작합니다. 임베딩과 LLM 은 별도 서버에 요청하는 구성이 기본이라
+이 장비에는 GPU 가 필요 없습니다.
+
+디스크는 데이터 양에 비례합니다. 아래는 자산 20,505건(원본 33GB)을 적재한 뒤 잰 값입니다.
+
+| 항목 | 자산 1건당 | 1만 건 | 10만 건 |
+|---|---|---|---|
+| 원본 파일 | 1.6 MB | 16 GB | 160 GB |
+| PostgreSQL | 66 KB | 0.7 GB | 6.6 GB |
+| OpenSearch 색인 | 6.8 KB | 70 MB | 0.7 GB |
+
+원본 파일 크기는 데이터 종류에 따라 크게 달라집니다. 영상이 많으면 몇 배가 됩니다.
+
+### 소프트웨어
+
+| 항목 | 요구 버전 | 개발 확인 |
+|---|---|---|
+| Python | 3.13 이상 | 3.13.13 |
+| PostgreSQL | 17 + pgvector 확장 | 17.9 · pgvector 0.8.2 |
+| OpenSearch | 3.x | 3.6.0 |
+| PyTorch | — | 2.11.0 |
+| opensearch-py | — | 3.2.0 |
+| psycopg | — | 3.3.3 |
+| sentence-transformers | — | 5.4.1 |
+| alembic | — | 1.18.4 |
+
+OpenSearch 에는 플러그인 세 개가 필요합니다.
+
+| 플러그인 | 용도 |
+|---|---|
+| `analysis-nori` | 한국어 형태소 분석 |
+| `opensearch-knn` | 벡터 검색 |
+| `opensearch-neural-search` | 키워드 검색과 벡터 검색 결과 합치기 |
+
+외부 서비스로 LLM 서버와 임베딩 서버가 필요합니다. 둘 다 OpenAI 호환 방식으로 호출합니다.
+설정 이름에 `OPENAI_` 가 들어가지만 외부 OpenAI 서비스가 아니라 **직접 운영하는 서버**를
+가리킵니다.
+
+## 설치 방법
+
+가져다 쓸 때는 태그를 지정해 설치합니다.
+
+```bash
+pip install "meta-extract @ git+https://github.com/mobigen-auroraFS-lab/core.git@v0.7.0"
+```
+
+데이터베이스 마이그레이션까지 돌리려면 `[migrate]` 를 붙입니다.
+
+```bash
+pip install "meta-extract[migrate] @ git+https://github.com/mobigen-auroraFS-lab/core.git@v0.7.0"
+```
+
+이 레포를 직접 고칠 때는 내려받아 설치합니다.
+
+```bash
+git clone https://github.com/mobigen-auroraFS-lab/core.git
+cd core
+pip install -e ".[migrate]" -c constraints.txt
+```
+
+`constraints.txt` 는 의존성 버전을 정확한 값으로 고정한 파일입니다. 같은 환경을 다시
+만들어야 하는 경우(자동 빌드, 서버 배포)에 붙입니다.
+
+## 실행 및 운영 방법
+
+### 설정
+
+`.env.dev` 또는 `.env.prod` 파일에 설정을 적거나 환경변수로 넘깁니다. 필수 항목이 빠지면
+시작할 때 `필수 환경변수 누락: <이름>` 으로 멈춥니다.
+
+```dotenv
+META_MODEL=                 # LLM 모델 이름
+OPENAI_BASE_URL=            # LLM 서버 주소
+OPENAI_API_KEY=             # LLM 서버 인증 키
+TEXT_EMBED_MODEL=           # 텍스트 임베딩 모델 이름
+TEXT_EMBED_CHUNK_SIZE=512
+TEXT_EMBED_NORMALIZE=true
+ENCODING=utf-8              # 아래 5개는 적재 과정에서만 씁니다
+CHUNK_SIZE=1000
+OVERLAP_SIZE=100
+SUMMARY_MAX_CHARS=500
+TOP_K_KEYWORDS=10
+```
+
+service 레포는 파일을 적재하지 않으므로 아래 5개를 요구하지 않습니다.
+
+이 밖에 데이터베이스 접속 정보(`POSTGRES_HOST`·`POSTGRES_PORT`·`POSTGRES_DB`·
+`POSTGRES_USER`·`POSTGRES_PASSWORD`), 검색 엔진 주소(`OPENSEARCH_URL`), 임베딩 서버
+설정(`EMBED_API_BASE_URL`·`EMBED_API_MODEL`·`EMBED_API_KEY`)이 필요합니다.
+
+### 데이터베이스 준비
+
+처음 한 번, 그리고 스키마가 바뀔 때마다 실행합니다.
+
+```bash
+alembic -c alembic.ini upgrade head
+alembic -c alembic.ini current                            # 현재 적용된 버전 확인
+python -m scripts.seed_topic_registry --env dev --apply   # 주제 분류 기초 데이터
+```
+
+마지막 줄을 빠뜨리면 자산 간 관계가 하나도 만들어지지 않습니다. 오류는 나지 않습니다.
+
+### 검색 색인
+
+색인의 형태(어떤 필드를 어떻게 분석할지)는 이 레포가 정의합니다. 실제로 색인을 만드는 것은
+pipeline 레포의 재색인 도구이고, 그 결과를 아래 값 중 하나로 알려줍니다.
+
+| 결과 | 뜻 | 할 일 |
+|---|---|---|
+| `created` | 새로 만들었습니다 | — |
+| `recreated` | 지우고 다시 만들었습니다 | — |
+| `updated` | 빠진 필드를 추가했습니다 | — |
+| `exists` | 이미 올바른 상태입니다 | — |
+| `mapping-stale` | 필드 형식이 코드와 다릅니다 | `--recreate` 로 다시 만드십시오 |
+| `analysis-stale` | 분석기 설정이 코드와 다릅니다 | `--recreate` 로 다시 만드십시오 |
+
+`mapping-stale` 은 벡터 검색이 동작하지 않는 상태입니다. 색인이 없는데 문서가 먼저
+들어가면 검색 엔진이 색인을 임의로 만드는데, 이때 1536개짜리 벡터를 일반 숫자 배열로
+잘못 인식합니다.
+
+### 테스트와 코드 검사
+
+```bash
+python -m unittest discover -s tests   # 데이터베이스가 필요한 테스트는 자동으로 건너뜁니다
+python scripts/policy_gate.py          # 코드 규칙 검사
+python scripts/test_integrity.py       # 테스트를 약화시킨 변경 검사
+python scripts/args_gate.py            # 함수 인자 설명 누락 검사
+ruff check src tests
+```
+
+### 배포
+
+공개 API 가 바뀌면 `CHANGELOG.md` 에 적고 새 태그를 붙입니다. pipeline 과 service 는 코어
+태그가 올라간 뒤에 맞춰 올립니다.
+
+## 실행 예제
+
+```bash
+$ alembic -c alembic.ini current
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+v306_entity_embedding (head)
+
+$ python -m scripts.seed_topic_registry --env dev
+[dry-run] 주제 N건 · 하위주제 M건 적재 예정 — 실행하려면 --apply
+
+$ python -m unittest discover -s tests
+Ran 2521 tests in 0.7s
+OK (skipped=29)
+```
+
+라이브러리로 쓰는 예입니다. service 레포가 파일 검색에서 이렇게 호출합니다.
+
+```python
+from src.config.bootstrap import bootstrap_env
+from src.search.opensearch_sync import get_client
+from src.search.file_search import search_files
+from src.search.search_filters import parse_search_filters
+
+bootstrap_env("dev", repo_root=".", role="serving")
+client = get_client()
+
+result = search_files(
+    client, "assets",
+    query="김치",
+    query_vector=embed("김치"),
+    filters=parse_search_filters(topic=["음식"], modality=["video"]),
+    sort="relevance", from_=0, size=20,
+)
+
+print(result["total"])
+print([f["value"] for f in result["facets"]["topic"]])
+```
+
+검색어를 벡터로 바꾸는 일(`embed`)은 호출하는 쪽에서 합니다. 이때 **문서를 색인할 때 쓴
+것과 같은 모델**이어야 합니다. 다르면 오류 없이 엉뚱한 결과가 나옵니다.
 
 ## 공개 API — 파이프라인·백엔드가 쓰는 계약면
 
@@ -194,48 +293,26 @@ tests/          단위 테스트
 > 표에 없는 이름이 필요하면 코어에 **함수 이름 · 도메인 용어 인자 · 반환 레코드** 로 요청하십시오.
 > 응답 페이징 모양·화면 문구·페이지 번호는 코어가 받지 않습니다(그 부분은 호출하는 레포의 몫입니다).
 
-## 설계 제약
+## 자주 겪는 문제
 
-- **학습 기반 방식을 쓰지 않습니다** — 학습·파인튜닝·지도학습·능동학습 없음. 사전학습 모델은 **추론 전용**으로만 사용합니다.
-- **LLM 호출은 단일 seam(`src/llm/client.py`)을 경유**하며 `temperature=0` 입니다. 결정 재현성이 요구사항입니다.
-- 임베딩 차원 **1536D 고정** · DB 는 **PostgreSQL + pgvector** 고정.
-- 코드·주석·로그는 한국어로 작성합니다.
+| 증상 | 원인 |
+|---|---|
+| `필수 환경변수 누락: META_MODEL` | `.env` 파일을 읽지 못했습니다 |
+| 관계가 하나도 안 생김 | 주제 분류 기초 데이터를 넣지 않았습니다 |
+| 검색 결과가 비어 있음 | 색인이 없거나 `analysis-nori` 플러그인이 설치되지 않았습니다 |
+| 벡터 검색만 안 됨 | 색인이 잘못 만들어졌습니다. `--recreate` 로 다시 만드십시오 |
 
-## 그래프 조회 주의
+## 제3자 오픈소스
 
-관계 엣지는 **대칭 저장**됩니다. 조회는 반드시 `src/relations/graph_query.py` 를 경유하십시오 —
-`WHERE src_node = X` 같은 단방향 쿼리는 dst 쪽으로 접힌 대칭 엣지를 누락합니다.
+전체 목록과 라이선스 전문은 `NOTICE` 파일에 있습니다.
 
-## 트러블슈팅
+| 구성요소 | 라이선스 |
+|---|---|
+| PyTorch | BSD 3-Clause |
+| OpenSearch 클라이언트 · sentence-transformers · Transformers | Apache License 2.0 |
+| Alembic | MIT |
+| psycopg | LGPL 3.0 |
 
-### `ValueError: 필수 환경변수 누락: META_MODEL`
-
-설정이 **하나도** 로드되지 않았다는 뜻입니다. 값이 틀린 게 아니라 대개 `.env` 파일을 못 찾은 것입니다.
-
-1. `.env.dev` 가 **실행하는 디렉터리** 또는 레포 루트에 있는지 확인하십시오(`cp .env.example .env.dev`).
-2. `--env dev` 로 실행했는지 확인하십시오 — `--env prod` 는 `.env.prod` 를 찾습니다.
-3. 그래도 안 되면 환경변수를 직접 주입하십시오: `set -a; . ./.env.dev; set +a`
-   (§환경변수 › 방법 B — 설치 방식과 무관하게 항상 동작합니다).
-
-### 관계 생성 결과가 0건입니다
-
-닫힌 주제 분류체계(taxonomy) 시드를 적재하지 않았을 때 나타납니다. 관계 제안은 그 어휘를
-전제로 후보를 만들기 때문에 어휘가 비어 있으면 후보가 0이 됩니다.
-
-```bash
-python -m scripts.seed_topic_registry --env dev --apply
-```
-
-### 검색 결과가 비어 있습니다
-
-적재는 됐어도 OpenSearch 색인이 없으면 검색은 빈 결과입니다. `OPENSEARCH_SYNC_ENABLED=true` 인지,
-`analysis-nori` 플러그인이 설치돼 있는지, 그리고 인덱스가 존재하는지 확인하십시오.
-
-## 이 레포에 대해
-
-이 레포는 이 프로젝트의 **공개 개발 레포**입니다 — 소스는 여기서 직접 개발합니다(2026-08-06 이후). 코드·DB 스키마·
-테스트와 "어떻게 돌리나"(이 README)만 담고, **왜 이렇게 설계했나**(기획·설계 문서·설계 변경 이력·결정 기록)는
-별도 비공개 문서 레포에 있습니다. 그래서 커밋 메시지는 짧고, 근거는 `근거: 설계이력 YYYY-MM-DD` 한 줄로 그 문서를 가리킵니다.
-
-- 파이프라인·백엔드 레포는 이 레포의 git 태그(`vMAJOR.MINOR.PATCH`)를 기준으로 맞춥니다. 공개 API 변경은 `CHANGELOG.md` 에만 적습니다.
-- 문의는 과제 담당자에게 해주십시오.
+psycopg 는 LGPL 입니다. 파이썬에서 불러 쓰는 것은 이 소프트웨어의 라이선스에 영향을 주지
+않지만, 사용 사실을 `NOTICE` 에 밝혀야 합니다. psycopg 자체를 고쳐서 배포할 때는 그
+수정본을 같은 라이선스로 공개해야 합니다.
