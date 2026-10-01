@@ -37,6 +37,10 @@ from src.relations.schema import MM_MEMBER_KIND_CODE
 # 이웃마다 자산을 다시 조회해야 한다.
 # 정렬에 edge_id 를 2차 키로 둔 이유: 신뢰도가 같은 엣지들의 순서가 실행 계획에 따라 흔들리면
 # 같은 질의가 매번 다른 순서를 낸다.
+# 질의 자산의 노드 id 를 먼저 구해 src_node·dst_node 와 직접 비교한다 — 두 별칭에 걸친 OR
+# (sn.asset_id = X OR dn.asset_id = X)은 src/dst 인덱스를 못 타 graph_edge 를 전부 훑었다
+# (2026-10-01 실측 0.13~0.2초 → 0.002초). 스칼라 서브쿼리는 uq_node_asset(asset_id 고유 ·
+# node_kind='asset')이 1행 이하를 보장하고, 양방향 매칭(ADR 2026-05-28)은 그대로다.
 _FETCH_RELATIONS_SQL = """
 SELECT ge.edge_id, rk.kind_code, rk.is_symmetric,
        ge.confidence, ge.reason, ge.topic, ge.status,
@@ -49,7 +53,8 @@ JOIN node sn ON sn.node_id = ge.src_node AND sn.node_kind = 'asset'
 JOIN node dn ON dn.node_id = ge.dst_node AND dn.node_kind = 'asset'
 JOIN asset sa ON sa.asset_id = sn.asset_id
 JOIN asset da ON da.asset_id = dn.asset_id
-WHERE (sn.asset_id = %s OR dn.asset_id = %s)
+WHERE (ge.src_node = (SELECT node_id FROM node WHERE asset_id = %s AND node_kind = 'asset')
+    OR ge.dst_node = (SELECT node_id FROM node WHERE asset_id = %s AND node_kind = 'asset'))
   AND ge.status = ANY(%s)
 ORDER BY ge.confidence DESC NULLS LAST, ge.edge_id
 """
