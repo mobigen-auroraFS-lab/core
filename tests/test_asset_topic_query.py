@@ -91,9 +91,11 @@ class TestFindSameTopicGroups(unittest.TestCase):
         target = {"topic_ko": "스포츠·레저", "subtopic_ko": "농구"}
         cand_rows = [
             {"asset_id": "019f-1", "topic_ko": "스포츠·레저", "subtopic_ko": "농구",
+             "sub_count": 2, "topic_count": 2,
              "fs_path": "/d/019f-1__wikipedia_농구_5166.txt", "modality": "text",
              "already_linked": True},
             {"asset_id": "019f-2", "topic_ko": "스포츠·레저", "subtopic_ko": "농구",
+             "sub_count": 2, "topic_count": 2,
              "fs_path": "/d/019f-2__Kim_Tae-sul_(농구).JPG", "modality": "image",
              "already_linked": False},
         ]
@@ -116,7 +118,7 @@ class TestFindSameTopicGroups(unittest.TestCase):
         self.assertIsInstance(asset0["asset_id"], str)
         # subtopic 있는 대상 → 후보 쿼리에 subtopic 필터가 걸려야(같은 쌍 매칭).
         cand_sql = " ".join(cur.execute.call_args_list[1][0][0].split()).lower()
-        self.assertIn("subtopic_ko", cand_sql)
+        self.assertIn("at.subtopic_ko = %s", cand_sql)
 
     def test_topic_only_match_when_target_subtopic_none(self) -> None:
         from src.topic.asset_topic_query import find_same_topic_groups
@@ -124,8 +126,10 @@ class TestFindSameTopicGroups(unittest.TestCase):
         target = {"topic_ko": "음식·요리", "subtopic_ko": None}
         cand_rows = [
             {"asset_id": "b1", "topic_ko": "음식·요리", "subtopic_ko": "제빵",
+             "sub_count": 1, "topic_count": 2,
              "fs_path": "/d/b1__bread.jpg", "modality": "image", "already_linked": False},
             {"asset_id": "b2", "topic_ko": "음식·요리", "subtopic_ko": None,
+             "sub_count": 1, "topic_count": 2,
              "fs_path": "/d/b2__food.txt", "modality": "text", "already_linked": True},
         ]
         conn, cur = _mock_conn_seq(fetchone_val=target, fetchall_val=cand_rows)
@@ -139,6 +143,99 @@ class TestFindSameTopicGroups(unittest.TestCase):
         cand_sql = " ".join(cur.execute.call_args_list[1][0][0].split())
         self.assertNotIn("at.subtopic_ko = %s", cand_sql)
 
+
+class TestFindSameTopicGroupsSqlCut(unittest.TestCase):
+    """SQL 에서 하위주제별 상위 n 건만 자른다(2026-10-01) — 계약 fixture 없이도 돈다."""
+
+    def test_counts_come_from_sql_not_returned_rows(self) -> None:
+        """SQL 이 8건만 돌려줘도 개수는 자르기 전 값이다(화면의 '더 있음' 근거)."""
+        from src.topic.asset_topic_query import find_same_topic_groups
+
+        target = {"topic_ko": "역사·문화유산", "subtopic_ko": "유적·유물"}
+        cand_rows = [
+            {"asset_id": f"a{i}", "topic_ko": "역사·문화유산", "subtopic_ko": "유적·유물",
+             "sub_count": 10614, "topic_count": 10614,
+             "fs_path": f"/d/a{i}__x.jpg", "modality": "image", "already_linked": False}
+            for i in range(8)
+        ]
+        conn, _ = _mock_conn_seq(fetchone_val=target, fetchall_val=cand_rows)
+        out = find_same_topic_groups(conn, "TARGET")
+        self.assertEqual(out[0]["asset_count"], 10614)
+        self.assertEqual(out[0]["subtopics"][0]["asset_count"], 10614)
+        self.assertEqual(len(out[0]["subtopics"][0]["assets"]), 8)
+
+    def test_sql_cuts_per_subtopic_and_binds_limit_last(self) -> None:
+        """자르기는 SQL 에서 하고, n 은 마지막 바인딩이다(전 행 회수 회귀 방지)."""
+        from src.topic.asset_topic_query import find_same_topic_groups
+
+        conn, cur = _mock_conn_seq(fetchone_val={"topic_ko": "T", "subtopic_ko": "S"},
+                                   fetchall_val=[])
+        find_same_topic_groups(conn, "TARGET", max_assets_per_subtopic=8)
+        sql, params = cur.execute.call_args_list[1][0]
+        compact = " ".join(sql.split())
+        self.assertIn("row_number() OVER (PARTITION BY NULLIF(at.subtopic_ko, '') "
+                      "ORDER BY at.asset_id)", compact)
+        self.assertIn("WHERE at.rn <= %s", compact)
+        self.assertEqual(params, ("TARGET", "T", "S", "TARGET", "TARGET", 8))
+
+    def test_zero_limit_keeps_bucket_with_no_assets(self) -> None:
+        """n = 0 이면 버킷은 남고 자산만 빈다 — SQL 에서 자르지 않는다(종전처럼 전부 읽는다)."""
+        from src.topic.asset_topic_query import find_same_topic_groups
+
+        rows = [{"asset_id": "a1", "topic_ko": "T", "subtopic_ko": "S", "sub_count": 3,
+                 "topic_count": 3, "fs_path": "/d/a1__x.txt", "modality": "text",
+                 "already_linked": False}]
+        conn, cur = _mock_conn_seq(fetchone_val={"topic_ko": "T", "subtopic_ko": "S"},
+                                   fetchall_val=rows)
+        out = find_same_topic_groups(conn, "TARGET", max_assets_per_subtopic=0)
+        self.assertEqual(out[0]["subtopics"][0]["asset_count"], 3)
+        self.assertEqual(out[0]["subtopics"][0]["assets"], [])
+        sql, params = cur.execute.call_args_list[1][0]
+        self.assertNotIn("at.rn <= %s", " ".join(sql.split()))
+        self.assertEqual(params, ("TARGET", "T", "S", "TARGET", "TARGET"))
+
+    def test_negative_limit_follows_python_slice_like_before(self) -> None:
+        """n < 0 은 종전 파이썬 슬라이스 규칙(``[:-1]`` = 마지막 제외)을 그대로 따른다."""
+        from src.topic.asset_topic_query import find_same_topic_groups
+
+        rows = [{"asset_id": f"a{i}", "topic_ko": "T", "subtopic_ko": "S", "sub_count": 3,
+                 "topic_count": 3, "fs_path": f"/d/a{i}__x.txt", "modality": "text",
+                 "already_linked": False} for i in range(3)]
+        conn, cur = _mock_conn_seq(fetchone_val={"topic_ko": "T", "subtopic_ko": "S"},
+                                   fetchall_val=rows)
+        out = find_same_topic_groups(conn, "TARGET", max_assets_per_subtopic=-1)
+        assets = out[0]["subtopics"][0]["assets"]
+        self.assertEqual([x["asset_id"] for x in assets], ["a0", "a1"])
+        self.assertNotIn("at.rn <= %s", " ".join(cur.execute.call_args_list[1][0][0].split()))
+
+    def test_topic_only_path_binds_without_subtopic(self) -> None:
+        """대상에 하위주제가 없으면 같은 쌍 필터 없이 바인딩한다(topic 단독 매칭)."""
+        from src.topic.asset_topic_query import find_same_topic_groups
+
+        conn, cur = _mock_conn_seq(fetchone_val={"topic_ko": "T", "subtopic_ko": None},
+                                   fetchall_val=[])
+        find_same_topic_groups(conn, "TARGET", max_assets_per_subtopic=8)
+        sql, params = cur.execute.call_args_list[1][0]
+        compact = " ".join(sql.split())
+        self.assertNotIn("at.subtopic_ko = %s", compact)
+        self.assertIn("WHERE at.rn <= %s", compact)
+        self.assertEqual(params, ("TARGET", "T", "TARGET", "TARGET", 8))
+
+    def test_empty_and_null_subtopic_share_one_bucket(self) -> None:
+        """''·NULL 하위주제는 한 버킷(None)이다 — SQL 열쇠와 파이썬 묶음이 같은 규칙을 쓴다."""
+        from src.topic.asset_topic_query import find_same_topic_groups
+
+        rows = [{"asset_id": aid, "topic_ko": "T", "subtopic_ko": sub, "sub_count": 2,
+                 "topic_count": 2, "fs_path": f"/d/{aid}__x.txt", "modality": "text",
+                 "already_linked": False} for aid, sub in (("a1", ""), ("a2", None))]
+        conn, cur = _mock_conn_seq(fetchone_val={"topic_ko": "T", "subtopic_ko": None},
+                                   fetchall_val=rows)
+        out = find_same_topic_groups(conn, "TARGET")
+        self.assertEqual([s["subtopic_ko"] for s in out[0]["subtopics"]], [None])
+        self.assertEqual(len(out[0]["subtopics"][0]["assets"]), 2)
+        compact = " ".join(cur.execute.call_args_list[1][0][0].split())
+        self.assertIn("NULLIF(at.subtopic_ko, '') AS subtopic_ko", compact)
+        self.assertIn("PARTITION BY NULLIF(at.subtopic_ko, '')", compact)
 
 # ── 068 G4: 닫힌 subtopic 조회 + LLM 선택 (T301) ──────────────────────────────
 # subtopic 도 topic 처럼 부모 topic 의 **닫힌 시드 목록**에서 LLM 이 고른다(058 열린 어휘 canonicalize

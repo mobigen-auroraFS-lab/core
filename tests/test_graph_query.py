@@ -41,8 +41,14 @@ class TestGraphQuerySQL(unittest.TestCase):
         sql = cur.execute.call_args[0][0]
         compact = " ".join(sql.split())  # 줄바꿈·들여쓰기 정규화로 견고한 부분문자열 검사
 
-        # ① 대칭 엣지 누락 방지를 위한 양방향 매칭(src/dst 어느 쪽이든 X면 매칭)
-        self.assertIn("sn.asset_id = %s OR dn.asset_id = %s", compact)
+        # ① 대칭 엣지 누락 방지를 위한 양방향 매칭(src/dst 어느 쪽이든 X 의 노드면 매칭).
+        #    2026-10-01 노드 id 비교로 표현만 바뀌었다(ADR 2026-05-28 의 뜻은 그대로).
+        self.assertIn("ge.src_node = (SELECT node_id FROM node "
+                      "WHERE asset_id = %s AND node_kind = 'asset')", compact)
+        self.assertIn("OR ge.dst_node = (SELECT node_id FROM node "
+                      "WHERE asset_id = %s AND node_kind = 'asset')", compact)
+        # 두 테이블에 걸친 OR(인덱스 못 탐)로 되돌아가지 않게
+        self.assertNotIn("sn.asset_id = %s OR dn.asset_id = %s", compact)
         # ② is_symmetric·kind_code 는 relation_kind 에만 있으므로 반드시 조인
         self.assertIn("JOIN relation_kind", compact)
         # 양 끝점 asset 해소를 위한 node 역조인(asset 노드만)
@@ -710,7 +716,13 @@ class TestMmMetaDoesNotDisturbSymmetricQueries(unittest.TestCase):
 
         compact = " ".join(_FETCH_RELATIONS_SQL.split())
         # ADR 2026-05-28 의 핵심 두 줄이 그대로 있는가(양방향 매칭 · 양끝 asset 노드 조인).
-        self.assertIn("sn.asset_id = %s OR dn.asset_id = %s", compact)
+        #    2026-10-01 노드 id 비교로 표현만 바뀌었다 — 양방향 매칭의 뜻은 그대로다.
+        self.assertIn("ge.src_node = (SELECT node_id FROM node "
+                      "WHERE asset_id = %s AND node_kind = 'asset')", compact)
+        self.assertIn("OR ge.dst_node = (SELECT node_id FROM node "
+                      "WHERE asset_id = %s AND node_kind = 'asset')", compact)
+        # 두 테이블에 걸친 OR(인덱스 못 탐)로 되돌아가지 않게
+        self.assertNotIn("sn.asset_id = %s OR dn.asset_id = %s", compact)
         self.assertIn("JOIN node dn ON dn.node_id = ge.dst_node AND dn.node_kind = 'asset'",
                       compact)
 

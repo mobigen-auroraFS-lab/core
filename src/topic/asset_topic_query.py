@@ -104,40 +104,63 @@ def find_same_topic_groups(
     topic_ko = str(target["topic_ko"])
     target_sub = target.get("subtopic_ko")  # None 이면 topic 단독 매칭
 
-    # 2) 같은 주제(subtopic 있으면 같은 쌍)의 다른 자산 + already_linked(양방향 EXISTS).
-    #    바인딩 순서 = SQL 텍스트상 %s 등장 순서: EXISTS 의 대상 asset_id 2개 → 제외 대상 →
-    #    topic_ko → (subtopic 있으면) subtopic_ko.
+    # 2) 같은 주제(subtopic 있으면 같은 쌍)의 다른 자산 — **하위주제별 상위 n 건만** SQL 에서 자른다.
+    #    종전에는 전부 읽고 파이썬에서 잘랐다. 큰 주제(1만 건)에서 행마다 EXISTS 가 돌아 상세가
+    #    1초 걸렸다(2026-10-01 실측). 잘리기 전 개수(``sub_count``·``topic_count``)는 윈도 함수로
+    #    함께 받는다 — 화면의 "더 있음" 근거.
+    #    하위주제 열쇠는 ``NULLIF(.., '')`` — 종전 파이썬 ``r.get("subtopic_ko") or None`` 과 같게
+    #    ''·NULL 을 한 버킷으로 묶는다.
+    #    CTE 안의 ``JOIN asset`` 은 종전과 같은 행 집합(자산이 있는 주제 행)을 세기 위해 둔다.
+    #    바깥 별칭도 ``at``(= cand)로 둔다 — 공유 상수 ``_ALREADY_LINKED_EXISTS`` 가 ``at.asset_id``
+    #    를 참조한다.
+    #    n ≤ 0 은 비정상 입력이라 SQL 에서 자르지 않고 종전처럼 전부 읽는다 — 파이썬 슬라이스 규칙
+    #    (``[:0]`` 빈 목록 · ``[:-1]`` 마지막 제외)이 그대로 적용되게. 응답 동치가 성능보다 먼저다.
+    #    바인딩 순서 = SQL 텍스트상 %s 등장 순서: 제외 대상 → topic_ko → (subtopic) → EXISTS 대상 2개
+    #    → (n > 0 이면) n.
+    sub_where = "              AND at.subtopic_ko = %s\n" if target_sub is not None else ""
+    cut_where = "        WHERE at.rn <= %s\n" if max_assets_per_subtopic > 0 else ""
     sql = f"""
-        SELECT at.asset_id, at.topic_ko, at.subtopic_ko,
+        WITH cand AS (
+            SELECT at.asset_id, at.topic_ko,
+                   NULLIF(at.subtopic_ko, '') AS subtopic_ko,
+                   row_number() OVER (PARTITION BY NULLIF(at.subtopic_ko, '')
+                                      ORDER BY at.asset_id) AS rn,
+                   count(*) OVER (PARTITION BY NULLIF(at.subtopic_ko, '')) AS sub_count,
+                   count(*) OVER () AS topic_count
+            FROM asset_topic at
+            JOIN asset a ON a.asset_id = at.asset_id
+            WHERE at.asset_id <> %s
+              AND at.topic_ko = %s
+{sub_where}        )
+        SELECT at.asset_id, at.topic_ko, at.subtopic_ko, at.sub_count, at.topic_count,
                a.fs_path, a.modality,
 {_ALREADY_LINKED_EXISTS}
-        FROM asset_topic at
+        FROM cand at
         JOIN asset a ON a.asset_id = at.asset_id
-        WHERE at.asset_id <> %s
-          AND at.topic_ko = %s
-    """
-    params: list[Any] = [asset_id, asset_id, asset_id, topic_ko]
+{cut_where}    """
+    params: list[Any] = [asset_id, topic_ko]
     if target_sub is not None:
-        sql += "          AND at.subtopic_ko = %s\n"
         params.append(target_sub)
+    params += [asset_id, asset_id]
+    if max_assets_per_subtopic > 0:
+        params.append(max_assets_per_subtopic)
 
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(sql, tuple(params))
         rows = cur.fetchall()
 
-    # 3) topic → {assets(상위 distinct 집합), subs: subtopic_ko → {asset_id → 표시필드}}.
+    # 3) topic → {asset_count, subs: subtopic_ko → {asset_count, assets: {asset_id → 표시필드}}}.
+    #    개수는 SQL 이 센 **잘리기 전** 값을 쓴다(종전 len(bucket)·len(g["assets"]) 와 같은 값).
     groups: dict[str, dict] = {}
     for r in rows:
         tk = str(r["topic_ko"]) if r["topic_ko"] is not None else None
         if not tk:
             continue
         sub = r.get("subtopic_ko") or None
-        aid = str(r["asset_id"])
-        g = groups.setdefault(tk, {"assets": set(), "subs": {}})
-        g["assets"].add(aid)  # 상위 distinct(하위 걸침 무관 1회)
-        bucket = g["subs"].setdefault(sub, {})
-        bucket.setdefault(
-            aid,
+        g = groups.setdefault(tk, {"asset_count": int(r["topic_count"]), "subs": {}})
+        bucket = g["subs"].setdefault(sub, {"asset_count": int(r["sub_count"]), "assets": {}})
+        bucket["assets"].setdefault(
+            str(r["asset_id"]),
             {
                 "file_name": display_file_name(r.get("fs_path")),
                 "modality": r.get("modality"),
@@ -148,8 +171,8 @@ def find_same_topic_groups(
     out: list[dict] = []
     for tk, g in groups.items():
         subtopics = []
-        for sub, bucket in g["subs"].items():
-            ordered = sorted(bucket.items(), key=lambda kv: kv[0])  # asset_id asc(결정적)
+        for sub, b in g["subs"].items():
+            ordered = sorted(b["assets"].items(), key=lambda kv: kv[0])  # asset_id asc(결정적)
             assets = [
                 {
                     "asset_id": aid,
@@ -160,7 +183,7 @@ def find_same_topic_groups(
                 for aid, e in ordered[:max_assets_per_subtopic]
             ]
             subtopics.append(
-                {"subtopic_ko": sub, "asset_count": len(bucket), "assets": assets}
+                {"subtopic_ko": sub, "asset_count": b["asset_count"], "assets": assets}
             )
         # 하위주제 정렬: 이름있는 것 먼저(asset_count desc → subtopic_ko asc), None(기타)은 마지막·절단.
         subtopics.sort(
@@ -169,7 +192,7 @@ def find_same_topic_groups(
         out.append(
             {
                 "topic_ko": tk,
-                "asset_count": len(g["assets"]),
+                "asset_count": g["asset_count"],
                 "subtopics": subtopics[:max_subtopics_per_topic],
             }
         )
