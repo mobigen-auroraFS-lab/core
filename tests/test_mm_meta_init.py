@@ -84,6 +84,19 @@ class TestPackageExports(unittest.TestCase):
         self.assertNotIn("fetch_known_entity_names", mm_meta.__all__)
         self.assertFalse(hasattr(mm_meta, "fetch_known_entity_names"))
 
+    def test_갈래_증분_재판정_API가_재수출된다(self) -> None:
+        # spec 104 — 증분 재판정 API 를 패키지 공개 창구에도 싣는다. 파이프 갈래 배치(run_entity_label)
+        # 는 이 창구가 아니라 `src.mm_meta.entity_label` 을 **직접** import 한다 — 이 재수출은 그 밖의
+        # 소비자(스크립트·다른 배치 등 · 2026-10-07 현재 이 이름들을 패키지로 부르는 곳은 없다)용이다.
+        # 창구에서 빠지면 그런 소비자가 내부 경로로 새거나 사유 상수를 자기 문자열로 복제해 갈린다.
+        for name in ("REASON_HASH_CHANGED", "REASON_HASH_NULL", "REASON_MIXED", "REASON_NEW",
+                     "REASON_PROMPT_VERSION", "REASON_SKILL_VERSION", "LabelState", "LabelWork",
+                     "fetch_label_state", "label_material_hash", "select_label_work"):
+            with self.subTest(name=name):
+                self.assertIn(name, mm_meta.__all__)
+        self.assertIs(mm_meta.select_label_work, __import__(
+            "src.mm_meta.entity_label", fromlist=["select_label_work"]).select_label_work)
+
     def test_판정_영속_규칙_API가_그대로_있다(self) -> None:
         # 회귀 가드 — 설명 추가가 기존 창구를 밀어내지 않았는지 본다(헌법 8조).
         for name in ("judge_asset_entities", "apply_rules", "upsert_entity_edges",
