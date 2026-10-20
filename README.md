@@ -256,7 +256,7 @@ pipeline 과 service 가 불러 쓰는 이름입니다.
 | 수치 | `src.domain.numeric` | `safe_float` |
 | 권한 | `src.registry.access_tier` | `project_ext_meta` · `principal_clearance` |
 | 권한 | `src.registry.ext_meta_field_registry` | `fetch_access_tiers` · `validate_ext_meta` |
-| 그래프 읽기 | `src.relations.graph_query` | `fetch_relations_for_asset` · `fetch_active_relations_for_asset` · `mm_meta_of_asset` · `mm_meta_bundle` · `list_entities` · `count_entities` · `count_entities_by_type` · `count_entities_by_area` · `assets_of_entities` |
+| 그래프 읽기 | `src.relations.graph_query` | `fetch_relations_for_asset` · `fetch_active_relations_for_asset` · `mm_meta_of_asset` · `mm_meta_bundle` · `list_entities` · `count_entities` · `count_entities_by_type` · `count_entities_by_area` · `count_entity_facets` · `assets_of_entities` |
 | 관계 정책 | `src.relations.approval_policy` | `TIER_ORDER` · `tier_rank` |
 | 관계 검토 | `src.relations.review` | `list_edges_for_review` · `list_relation_kinds` · `bulk_review` · `revise_edge` · `promote_relation_kind` |
 | 검색 | `src.search.search_service` | `search_hybrid` |

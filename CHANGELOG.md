@@ -11,6 +11,11 @@
 | **MINOR** | 공개 API **추가** — 기존 호출은 그대로 동작 |
 | **PATCH** | 공개 API 무변경 — 내부 수정·버그 수정 |
 
+## [Unreleased] — 2026-10-20 (107 개체 칩 건수를 한 질의로)
+
+### 추가 (MINOR — 기존 호출 무변경)
+- `relations.graph_query.count_entity_facets(conn, *, entity_type=None, area_names=None, modalities=None, min_bundle_size, modality_codes, statuses=None) -> dict[str, Any]` — 개체 칩 세 축(종류 · 갈래 · 자료 유형)의 노출 개체 수를 **질의 한 번**으로 센다. 반환 `{"types", "areas", "modalities"}` 는 축마다 기존 `count_entities_by_type` · `count_entities_by_area`(순서 포함) · 자료 유형 허용목록을 준 `count_entities` 와 같은 수이고, 기존 함수는 바뀌지 않는다.
+
 ## [Unreleased] — 2026-09-17 (099 G7 커서 **조건 지문** · 개체 목록 **이름 우선 티어**)
 
 > 🔴 **깨는 변경 둘**(MAJOR). 둘 다 **실측 결함을 막는 장치**이며, 소비 레포(백엔드)는 같은 브랜치에서

@@ -668,6 +668,89 @@ SELECT lab.name, lab.skill, lab.skill_code, COALESCE(hit.n, 0) AS n
  ORDER BY n DESC, lab.skill_code, lab.ord
 """
 
+# 개체 칩 세 축(종류 · 갈래 · 자료 유형)의 건수를 한 질의로 센다(``count_entity_facets``) — 노출 개체(``base``)를
+#    한 번 만들어 세 축이 나눠 쓴다. ``base`` 는 ``_EXPOSED_ENTITIES_SQL`` 에서 조건을 뺀 것과 같은 정의여야 한다
+#    (갈라지면 기존 함수와 수가 달라진다).
+# 🔴 조건이 없으면 ``{amatch}`` · ``{scope_where}`` 를 비운다(``%(x)s IS NULL OR …`` 로 한 문장에 담지 않는다) — 같은
+#    연결에서 반복 실행하면 재사용 계획(값을 모른 채 세운 계획)이 그 조건을 걷어내지 못해 크게 느려진다.
+# 🔴 ``MATERIALIZED`` — PostgreSQL(12 이상)은 두 곳 이상에서 참조하는 CTE 를 기본으로 한 번만 계산하고, 한 곳에서만
+#    참조하는 CTE 는 그 자리에 펼친다. ``base`` · ``scoped`` 는 앞의 경우라 명시로 고정해 둔 것이고, 한 곳에서만
+#    참조하는 ``have`` · ``amatch`` 는 지우면 펼쳐진다 — ``have`` 는 개체별 자료 유형 판정이 칩마다 반복되고,
+#    ``amatch`` 는 플래너가 명단 크기를 잘못 짐작해 갈래 칩이 느려질 수 있다.
+# 순서는 축마다 ``ord`` 로 받는다. 종류 · 갈래는 기존 함수의 ``ORDER BY`` 와 같은 키로 매긴 ``row_number()`` 다 —
+#    DB 문자열 비교 규칙으로 매겨야 기존 순서와 같다(파이썬 정렬과 갈릴 수 있다). 자료 유형은 ``modality_codes``
+#    순서(``WITH ORDINALITY``).
+# 설계 배경: `specs/107-entity-facets`
+_ENTITY_FACETS_SQL = """
+WITH base AS MATERIALIZED (
+    SELECT n.node_id, n.entity_type, n.entity_uid
+      FROM node n
+      JOIN graph_edge ge    ON ge.dst_node = n.node_id
+      JOIN relation_kind rk ON rk.relation_kind_id = ge.relation_kind_id
+     WHERE n.node_kind = 'entity' AND rk.kind_code = %(kind)s AND ge.status = ANY(%(statuses)s)
+     GROUP BY n.node_id, n.entity_type, n.entity_uid
+    HAVING COUNT(DISTINCT ge.src_node) >= %(minsize)s
+),
+{amatch}scoped AS MATERIALIZED (
+    SELECT b.* FROM base b
+     WHERE TRUE {scope_where}
+),
+have AS MATERIALIZED (
+    SELECT s.node_id, ARRAY_AGG(DISTINCT a.modality::text) AS mods
+      FROM scoped s
+      JOIN graph_edge ge    ON ge.dst_node = s.node_id
+      JOIN relation_kind rk ON rk.relation_kind_id = ge.relation_kind_id
+      JOIN node sn          ON sn.node_id = ge.src_node
+      JOIN asset a          ON a.asset_id = sn.asset_id
+     WHERE rk.kind_code = %(kind)s AND ge.status = ANY(%(statuses)s)
+       AND a.modality = ANY(%(have_codes)s)
+     GROUP BY s.node_id
+),
+lab AS (
+    SELECT s.skill_code, s.name AS skill, (lb->>'code') AS code, (lb->>'name') AS name, ord
+      FROM mm_skill s, LATERAL jsonb_array_elements(s.labels) WITH ORDINALITY AS t(lb, ord)
+     WHERE s.status = 'active' AND s.skill_code <> ALL(%(reserved)s)
+),
+hit AS (
+    SELECT el.skill_code, el.label_code, COUNT(*) AS n
+      FROM entity_mm_skill_label el
+     WHERE EXISTS (SELECT 1 FROM scoped x
+                    WHERE x.entity_type = el.entity_type AND x.entity_uid = el.entity_uid)
+     GROUP BY 1, 2
+)
+SELECT 'type' AS axis, b.entity_type AS name, NULL::text AS skill, NULL::text AS skill_code,
+       COUNT(*) AS n, row_number() OVER (ORDER BY b.entity_type) AS ord
+  FROM base b GROUP BY b.entity_type
+UNION ALL
+SELECT 'area', lab.name, lab.skill, lab.skill_code, COALESCE(hit.n, 0),
+       row_number() OVER (ORDER BY COALESCE(hit.n, 0) DESC, lab.skill_code, lab.ord)
+  FROM lab LEFT JOIN hit ON hit.skill_code = lab.skill_code AND hit.label_code = lab.code
+ WHERE lab.code <> 'unassigned'
+UNION ALL
+SELECT 'modality', c.code, NULL, NULL,
+       (SELECT COUNT(*) FROM have h WHERE h.mods @> {picked_expr}), c.ord
+  FROM unnest(%(codes)s::text[]) WITH ORDINALITY AS c(code, ord)
+"""
+
+# 갈래 명단(``{amatch}`` 자리) — 고른 갈래 이름을 모두 가진 노출 개체의 ``node_id``(``_ENTITY_AREA_FILTER_SQL`` 과
+#    같은 집합: 가진 고른 이름의 고유 수 = ``area_n``). ``node_id`` 로 묶는다 — (종류, 표기, 이름) 짝으로 묶으면 한글
+#    열 정렬 비용이 붙는다. 개체마다 ``node_id`` 는 하나(``uq_node_entity``)라 결과는 같다.
+# 끝의 쉼표는 뒤따르는 ``scoped`` CTE 와 잇는 구분자다(조각이 빠지면 쉼표도 함께 빠진다).
+_ENTITY_FACETS_AREA_MATCH_SQL = """\
+amatch AS MATERIALIZED (
+    SELECT b.node_id
+      FROM base b
+      JOIN entity_mm_skill_label el
+        ON el.entity_type = b.entity_type AND el.entity_uid = b.entity_uid
+      JOIN mm_skill es ON es.skill_code = el.skill_code
+      CROSS JOIN LATERAL jsonb_array_elements(es.labels) AS elb
+     WHERE (elb->>'code') = el.label_code
+       AND (elb->>'name') = ANY(%(areas)s)
+     GROUP BY b.node_id
+    HAVING COUNT(DISTINCT (elb->>'name')) = %(area_n)s
+),
+"""
+
 _ASSETS_OF_ENTITIES_SQL = """
 WITH picked AS ({exposed})
 SELECT DISTINCT a.asset_id::text AS asset_id, a.modality, a.fs_path,
@@ -1010,6 +1093,90 @@ def count_entities_by_area(
          "count": int(r["n"])}
         for r in rows
     ]
+
+
+def count_entity_facets(
+    conn: Connection[Any],
+    *,
+    entity_type: str | None = None,
+    area_names: list[str] | None = None,
+    modalities: list[str] | None = None,
+    min_bundle_size: int,
+    modality_codes: list[str],
+    statuses: list[str] | None = None,
+) -> dict[str, Any]:
+    """개체 칩 세 축(종류 · 갈래 · 자료 유형)의 노출 개체 수를 한 질의로 센다(읽기 전용).
+
+    노출 개체 집합을 한 번 만들어 세 축이 나눠 쓴다. 축마다 기존 호출과 **같은 수**다 — 종류는
+    ``count_entities_by_type``, 갈래는 ``count_entities_by_area``(순서 포함), 자료 유형 ``m`` 은
+    「고른 유형 ∪ {m}」을 모두 가진 개체만 허용목록으로 준 ``count_entities``.
+
+    Args:
+        entity_type: 고른 종류. ``None`` 이면 종류 조건 없음. 갈래 · 자료 유형 칩에만 걸린다
+            (종류 칩은 갈아타는 축이라 늘 조건 없이 센다).
+        area_names: 이미 고른 갈래들(AND). ``None`` · 빈 목록 · 공백 이름뿐이면 갈래 조건 없음.
+            갈래 · 자료 유형 칩에 걸린다.
+        modalities: 이미 고른 자료 유형들. ``None`` · 빈 목록이면 없음. 자료 유형 칩에만 걸리고
+            갈래 칩에는 걸지 않는다(기존 응답과 같게). ``modality_codes`` 밖의 유형이어도 조건으로 건다.
+        min_bundle_size: 노출 임계(구성 자산 수 하한). 목록과 같은 값을 준다.
+        modality_codes: 칩으로 셀 자료 유형 코드들 — 화면 정책이라 호출자가 준다. 반환
+            ``modalities`` 의 키와 순서가 된다.
+        statuses: 소속 엣지 상태. ``None`` 이면 active+proposed.
+
+    Returns:
+        ``{"types": {종류: 개체 수}, "areas": [{name, skill, skill_code, count}], "modalities":
+        {코드: 개체 수}}``. ``types`` 는 종류 이름순(DB 정렬 규칙)이고 개체가 없는 종류는 키가 없다.
+        ``areas`` 는 0건 갈래도 담고 개체 수 내림차순 → 스킬 코드 → 라벨 순서다. ``modalities`` 는
+        ``modality_codes`` 순서이고 0건도 담는다.
+    """
+    from src.mm_classify.model import NON_CLASSIFY_SKILL_CODES  # 순환 import 회피(model 은 순수)
+
+    params: dict[str, Any] = {
+        "kind": MM_MEMBER_KIND_CODE,
+        "statuses": _wanted_statuses(statuses),
+        "minsize": int(min_bundle_size),
+        "reserved": sorted(NON_CLASSIFY_SKILL_CODES),
+        "codes": list(modality_codes),
+    }
+    scope_where = ""
+    # ``None`` 만 「조건 없음」이다 — 빈 문자열도 조건으로 건다(기존 함수의 ``IS NULL OR`` 와 같은 판정).
+    if entity_type is not None:
+        scope_where += " AND b.entity_type = %(etype)s"
+        params["etype"] = entity_type
+    amatch = ""
+    # 빈 목록 · 공백 이름 정규화는 기존 함수와 같은 ``_area_params`` 에 맡긴다(판정이 갈리면 칩 수가 갈린다).
+    area = _area_params(area_names)
+    if area["areas"] is not None:
+        scope_where += " AND b.node_id IN (SELECT node_id FROM amatch)"
+        amatch = _ENTITY_FACETS_AREA_MATCH_SQL
+        params.update(area)
+    # 정렬 · 고유로 묶는다 — 같은 고름이면 같은 바인딩이 된다(순서 · 중복이 달라도 같은 질의).
+    picked = sorted({str(m) for m in (modalities or [])})
+    if picked:
+        picked_expr = "(%(picked)s::text[] || c.code)"
+        params["picked"] = picked
+    else:
+        picked_expr = "ARRAY[c.code]"
+    # ``have`` 가 모을 유형 = 칩 유형 ∪ 고른 유형. 고른 유형이 칩 목록 밖이어도 모아야 「고른 유형을 모두
+    # 가진 개체」 판정이 기존 허용목록과 같다(칩 유형만 모으면 그 칩들이 모두 0 이 된다).
+    params["have_codes"] = sorted({str(c) for c in modality_codes} | set(picked))
+    sql = _ENTITY_FACETS_SQL.format(amatch=amatch, scope_where=scope_where, picked_expr=picked_expr)
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(sql, params)
+        rows = cur.fetchall()
+    # UNION ALL 은 행 순서를 보장하지 않는다 — 축마다 SQL 이 준 ``ord`` 로 다시 줄 세운다.
+    type_rows = sorted((r for r in rows if r["axis"] == "type"), key=lambda r: int(r["ord"]))
+    area_rows = sorted((r for r in rows if r["axis"] == "area"), key=lambda r: int(r["ord"]))
+    mod_rows = sorted((r for r in rows if r["axis"] == "modality"), key=lambda r: int(r["ord"]))
+    return {
+        "types": {str(r["name"]): int(r["n"]) for r in type_rows},
+        "areas": [
+            {"name": str(r["name"]), "skill": str(r["skill"]), "skill_code": str(r["skill_code"]),
+             "count": int(r["n"])}
+            for r in area_rows
+        ],
+        "modalities": {str(r["name"]): int(r["n"]) for r in mod_rows},
+    }
 
 
 def assets_of_entities(
