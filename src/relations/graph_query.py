@@ -518,17 +518,60 @@ _ENTITY_KEYSET_SQL = """
                              AND ent.entity_type > %(after_type)s::text))))))
 """
 
-# ⚠️ 본문을 CTE(``ent``)로 감싸는 이유: ``confirmed_count`` 는 ``HAVING COUNT(DISTINCT ge.src_node)``
-#    **집계**라 같은 질의의 ``WHERE`` 에서 비교할 수 없다(SQL 규칙 — "집계 함수는 WHERE 에 올 수 없다").
-#    한 겹 감싸면 바깥에서는 그냥 컬럼이라 이어읽기 조건을 걸 수 있다. PG12+ 는 한 번만 쓰이는
-#    비재귀 CTE 를 인라인하므로 최적화 장벽도 생기지 않는다.
+# 개체 목록 — **한 쪽을 먼저 고르고, 카드 재료는 그 쪽에만 만든다**.
+#   ① ``ent``  : 정렬·이어읽기·자르기에 필요한 값만(종류·표기·구성 자산 수·우선 티어). 노출 조건
+#                (종류·갈래·허용목록·상태·임계)은 여기서 건다.
+#   ② ``page`` : ``ent`` 에 이어읽기 조건·정렬·``LIMIT`` 을 걸어 한 쪽만 고른다.
+#   ③ 바깥     : 고른 개체에만 이름·출처·설명·전체 건수·배열 4종·갈래를 집계한다.
+# 왜 쪽을 먼저 고르나: 배열 집계·갈래 부분질의·전체 건수 부분질의를 노출 개체 전부에 돌린 뒤 자르면
+#    화면에 안 나갈 개체 몫까지 계산한다. 정렬 키는 싸고 비싼 것은 카드 재료다.
+# ⚠️ ①을 CTE 로 감싸는 이유: ``confirmed_count`` 는 ``HAVING COUNT(DISTINCT ge.src_node)`` **집계**라
+#    같은 질의의 ``WHERE`` 에서 비교할 수 없다(SQL 규칙 — "집계 함수는 WHERE 에 올 수 없다"). 한 겹
+#    감싸면 ②에서는 그냥 컬럼이라 이어읽기 조건을 걸 수 있다.
+# 🔴 ①에는 자산 조인이 없다. 전제는 "소속 엣지의 출발점은 늘 자산 노드"다 — 소속 엣지를 만드는 곳은
+#    ``src/mm_meta/persist.py`` 한 곳(출발점 = ``ensure_asset_node``)이고, 자산 노드는 자산 행을 외래키로
+#    가리켜 자산 조인이 행을 빼지 않는다. 이 전제는 ``scripts/verify_relation_invariants.py`` 의
+#    ``소속_엣지_방향_위반`` 검사가 센다. 덕분에 노출 정의가 ``_EXPOSED_ENTITIES_SQL`` 과 같아진다.
+#    ③의 ``confirmed_count`` 는 ①의 값을 그대로 내보낸다 — 화면에 찍히는 건수와 정렬·커서 키가
+#    어떤 경우에도 한 값이어야 이어읽기가 중복·누락 없이 이어진다.
+# ③에서 종류·갈래·허용목록 조건을 다시 걸지 않는 이유: 셋 다 개체 단위 조건이라 ②가 고른 개체는 이미
+#    만족하고, 개체가 가진 엣지 집합을 바꾸지 않는다. 소속 종류·상태 조건은 엣지 단위라 ③에서도 건다
+#    — 빼면 배열이 거절된 소속까지 모은다.
+# ③이 같은 4단 키로 다시 정렬하는 이유: ②의 순서는 조인·집계를 거치면 보장되지 않는다.
+# ③의 ``GROUP BY`` 에 ``node_id`` 를 함께 묶는 이유: 전체 건수 부분질의가 이 컬럼을 참조한다. 그룹이
+#    쪼개질 위험은 없다 — ``uq_node_entity(entity_type, entity_uid)`` 가 개체마다 node_id 1개를 보장한다.
+#    ``p.prio_tier``·``p.confirmed_count`` 는 CTE 열이라 함께 묶어야 한다(PG 는 CTE 열의 함수 종속을
+#    알아보지 못한다). ``page`` 는 개체마다 한 행이라 그룹이 늘지 않는다.
+# 설계 배경: `specs/106-entity-list-speed`
 _LIST_ENTITIES_SQL = """
 WITH ent AS (
+SELECT n.node_id, n.entity_type, n.entity_uid,
+       COUNT(DISTINCT ge.src_node) AS confirmed_count,
+{first_tier}
+  FROM node n
+  JOIN graph_edge ge    ON ge.dst_node = n.node_id
+  JOIN relation_kind rk ON rk.relation_kind_id = ge.relation_kind_id
+ WHERE n.node_kind = 'entity'
+   AND rk.kind_code = %(kind)s
+   AND ge.status = ANY(%(statuses)s)
+   AND (%(etype)s::text IS NULL OR n.entity_type = %(etype)s)
+   AND {area_filter}
+   AND {allow_filter}
+ GROUP BY n.node_id, n.entity_type, n.entity_uid
+HAVING COUNT(DISTINCT ge.src_node) >= %(minsize)s
+),
+page AS (
+SELECT ent.* FROM ent
+ WHERE {keyset}
+ ORDER BY ent.prio_tier DESC, ent.confirmed_count DESC,
+          ent.entity_uid ASC, ent.entity_type ASC
+ LIMIT %(limit)s
+)
 SELECT n.entity_type, n.entity_uid, n.node_id,
        COALESCE(n.canonical->>'name', n.entity_uid) AS name,
        COALESCE(n.canonical->>'source', 'auto')     AS source,
        n.canonical->>'description'                  AS description,
-       COUNT(DISTINCT ge.src_node)                  AS confirmed_count,
+       p.confirmed_count                            AS confirmed_count,
        -- 이 개체에 묶인 **전량**(종류·갈래 필터와 무관). 화면이 "이 갈래 5건 / 전체 6건"을 함께 보인다
        -- (2026-08-27 개념 감사 — 자산 라벨로 좁히면 한 개체가 갈래마다 쪼개져 카드 5건·상세 6건이 됐다).
        (SELECT COUNT(DISTINCT ge2.src_node)
@@ -555,8 +598,9 @@ SELECT n.entity_type, n.entity_uid, n.node_id,
            AND el.entity_uid = n.entity_uid
            AND (elb->>'code') = el.label_code
            AND el.label_code <> 'unassigned')          AS areas,
-{first_tier}
-  FROM node n
+       p.prio_tier
+  FROM page p
+  JOIN node n          ON n.node_id = p.node_id
   JOIN graph_edge ge    ON ge.dst_node = n.node_id
   JOIN relation_kind rk ON rk.relation_kind_id = ge.relation_kind_id
   JOIN node sn          ON sn.node_id = ge.src_node
@@ -570,22 +614,11 @@ SELECT n.entity_type, n.entity_uid, n.node_id,
          WHERE l.skill_code = ANY(%(form_skills)s)
            AND (lb->>'code') = l.label_code
        ) fl ON fl.asset_id = sn.asset_id
- WHERE n.node_kind = 'entity'
-   AND rk.kind_code = %(kind)s
+ WHERE rk.kind_code = %(kind)s
    AND ge.status = ANY(%(statuses)s)
-   AND (%(etype)s::text IS NULL OR n.entity_type = %(etype)s)
-   AND {area_filter}
-   AND {allow_filter}
- -- node_id 를 함께 묶는다: 전체 건수 서브쿼리가 이 컬럼을 참조한다. 그룹이 쪼개질 위험은 없다 —
- -- uq_node_entity(entity_type, entity_uid) 가 개체마다 node_id 1개를 보장한다.
- GROUP BY n.node_id, n.entity_type, n.entity_uid, n.canonical
-HAVING COUNT(DISTINCT ge.src_node) >= %(minsize)s
-)
-SELECT * FROM ent
- WHERE {keyset}
- ORDER BY ent.prio_tier DESC, ent.confirmed_count DESC,
-          ent.entity_uid ASC, ent.entity_type ASC
- LIMIT %(limit)s
+ GROUP BY n.node_id, n.entity_type, n.entity_uid, n.canonical, p.prio_tier, p.confirmed_count
+ ORDER BY p.prio_tier DESC, p.confirmed_count DESC,
+          n.entity_uid ASC, n.entity_type ASC
 """
 
 # 모수 총계(``scope_total`` — "좁히기를 지우면 N건") — **행을 조립하지 않는다**.

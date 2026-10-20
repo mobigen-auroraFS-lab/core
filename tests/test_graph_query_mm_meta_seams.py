@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import re
 import unittest
 from unittest.mock import MagicMock
 
@@ -91,6 +92,48 @@ class TestListEntities(unittest.TestCase):
         gq.list_entities(conn, min_bundle_size=3, limit=5, statuses=["active"])
         _sql, p = _sql_and_params(cur)
         self.assertEqual(p["statuses"], ["active"])
+
+    def test_page_is_cut_before_card_aggregates(self) -> None:
+        """한 쪽(``LIMIT``)을 먼저 고르고, 카드 재료(배열·갈래·전체 건수)는 그 쪽의 개체에만 만든다.
+
+        노출 개체 전부의 카드 재료를 만든 뒤 자르면 화면에 안 나갈 개체 몫까지 계산해 목록이 느려진다.
+        쪽 고르기(①)에는 자산 조인이 없고 노출 조건은 거기서 걸며, 표시 건수는 ①의 값을 그대로 쓴다.
+        설계 배경: `specs/106-entity-list-speed`
+        """
+        conn, cur = _conn_returning([])
+        gq.list_entities(conn, min_bundle_size=3, limit=30)
+        sql, _p = _sql_and_params(cur)
+        limit_mark = "LIMIT %(limit)s"
+        # 자르기 표지가 실제로 하나 있어야 아래 앞뒤 비교가 뜻을 갖는다 — 없거나 여럿이면 엉뚱한 구간을 본다.
+        self.assertEqual(sql.count(limit_mark), 1, "쪽을 자르는 LIMIT 이 하나가 아니다")
+        # 갈래 부분질의는 출력 열 쪽을 개체 상관 조건까지 붙여 집는다. 같은 FROM 이 갈래 '조건' 조각
+        # (``_ENTITY_AREA_FILTER_SQL``)에도 있고, 그 조각은 쪽 고르기 쪽에 있는 것이 맞다.
+        markers = {
+            "배열 집계": "ARRAY_AGG",
+            "갈래 부분질의": ("FROM entity_mm_skill_label el JOIN mm_skill es ON es.skill_code = "
+                         "el.skill_code CROSS JOIN LATERAL jsonb_array_elements(es.labels) AS elb "
+                         "WHERE el.entity_type = n.entity_type"),
+            "전체 건수 부분질의": "FROM graph_edge ge2",
+        }
+        for label, mark in markers.items():
+            self.assertIn(mark, sql, f"{label} 표지를 찾지 못했다 — 위치 비교 전에 표지부터 맞춘다")
+            self.assertLess(sql.index(limit_mark), sql.index(mark),
+                            f"{label}: 쪽을 자르기(LIMIT) 전에 있다 — 화면에 안 나갈 개체까지 계산한다")
+        head, tail = sql.split(limit_mark, 1)
+        # 쪽 고르기 구간에는 어떤 별칭으로도 자산 표 조인이 없어야 한다(``asset_topic`` 등은 \b 로 제외).
+        self.assertIsNone(re.search(r"\bJOIN asset\b", head), "쪽 고르기 구간에 자산 조인이 있다")
+        self.assertIn("JOIN asset a", tail)  # 모달리티 배열은 바깥에서 자산을 조인해 만든다
+        # 노출 조건(갈래·허용목록)은 쪽을 고르기 전에 걸려야 한다 — 빠지면 노출 개체가 늘어난다.
+        self.assertIn("%(areas)s::text[] IS NULL", head)
+        self.assertIn("%(allow_types)s::text[] IS NULL", head)
+        # 카드 재료는 고른 쪽(page)에서만 읽고, 표시 건수는 쪽 고르기의 값을 그대로 쓴다
+        # (표시 건수와 정렬·커서 키가 갈라지면 이어읽기가 조용히 중복·누락된다).
+        self.assertIn("FROM page p JOIN node n", tail)
+        self.assertIn("p.confirmed_count AS confirmed_count", tail)
+        # 조인·집계 뒤에는 순서가 보장되지 않으므로 바깥이 같은 4단 키로 다시 정렬해야 한다.
+        outer_order = ("ORDER BY p.prio_tier DESC, p.confirmed_count DESC, "
+                       "n.entity_uid ASC, n.entity_type ASC")
+        self.assertTrue(sql.endswith(outer_order), f"바깥 정렬이 끝에 없다: …{sql[-160:]}")
 
 
 class TestCounts(unittest.TestCase):
