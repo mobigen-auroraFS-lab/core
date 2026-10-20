@@ -4,6 +4,7 @@ RUN_DB_E2E 게이트(실 PostgreSQL 필요 · LLM 0 · 쓰기 0). 데모(`routes
 `demo/mm-meta-reference`)의 SQL 을 **글자 그대로** 여기 옮겨 두고, 같은 파라미터로 코어 seam 과 비교한다 —
 정식화의 조건 "응답 JSON == 데모 응답"(spec 095 SC-01)을 코어 층에서 먼저 증명한다. 데모 SQL 사본은 이
 테스트에만 존재한다(코어 코드에는 사본을 두지 않는다).
+개체 칩 한 질의(``count_entity_facets``)가 기존 세 호출과 같은 결과를 내는지도 여기서 대조한다.
 """
 
 from __future__ import annotations
@@ -212,6 +213,24 @@ SELECT l.asset_id::text, n.name
 """
 
 
+# 개체별 보유 자료 유형 — 백엔드 자료 유형 허용목록(캐시 질의)과 같은 정의: 소속 엣지 · 상태 active+proposed ·
+# 구성 자산의 자료 유형. 노출 임계 · 종류 · 갈래는 걸지 않는다(허용목록을 받는 ``count_entities`` 가 건다).
+_ENTITY_MODALITIES_SQL = """
+SELECT n.entity_type, n.entity_uid, ARRAY_AGG(DISTINCT a.modality) AS modalities
+  FROM node n
+  JOIN graph_edge ge    ON ge.dst_node = n.node_id
+  JOIN relation_kind rk ON rk.relation_kind_id = ge.relation_kind_id
+  JOIN node sn          ON sn.node_id = ge.src_node
+  JOIN asset a          ON a.asset_id = sn.asset_id
+ WHERE n.node_kind = 'entity' AND rk.kind_code = 'mm_member'
+   AND ge.status IN ('active', 'proposed')
+ GROUP BY n.node_id, n.entity_type, n.entity_uid
+"""
+
+# 화면이 칩으로 세는 자료 유형(백엔드 화면 정책과 같은 값).
+_FACET_MODALITY_CODES = ["text", "image", "video", "audio"]
+
+
 def _demo_shape(r) -> dict:
     """데모 `list_mm_meta._query` 의 파이썬 정형(원문 그대로)."""
     return {
@@ -346,6 +365,92 @@ class TestMmMetaSeamsParityWithDemo(unittest.TestCase):
                     (ent["entity_type"], ent["entity_uid"])).fetchone()
                 bundle = mm_meta_bundle(conn, entity_type=ent["entity_type"], entity_uid=ent["entity_uid"])
                 self.assertEqual(bundle["description"], (desc[0] if desc else None) or None)
+
+
+@unittest.skipUnless(_RUN_DB_E2E, "RUN_DB_E2E 미설정 — 실 DB e2e skip")
+class TestEntityFacetsParityWithSeparateCalls(unittest.TestCase):
+    """``count_entity_facets`` == 기존 세 호출(종류별 · 갈래별 · 자료 유형 허용목록을 준 개수) — 실 dev DB.
+
+    자료 유형 칩 ``m`` 의 기존 값은 「고른 유형 ∪ {m}」을 모두 가진 개체를 허용목록으로 준 ``count_entities`` 다.
+    설계 배경: `specs/107-entity-facets`
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from dotenv import load_dotenv
+
+        from src.config.settings import init_settings
+        from src.database.postgres_util import PostgresUtil
+
+        dp = Path(__file__).resolve().parents[1] / ".env.dev"
+        if dp.is_file():
+            load_dotenv(dotenv_path=dp, override=False)
+        init_settings("dev")
+        cls.db = PostgresUtil()
+        cls.db.__enter__()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.db.__exit__(None, None, None)
+
+    def test_entity_facets_equal_separate_calls(self) -> None:
+        from src.relations.graph_query import (
+            count_entities,
+            count_entities_by_area,
+            count_entities_by_type,
+            count_entity_facets,
+        )
+
+        with self.db.transaction() as conn:
+            mods_of = {(str(t), str(u)): frozenset(str(m) for m in (ms or []) if m)
+                       for t, u, ms in conn.execute(_ENTITY_MODALITIES_SQL).fetchall()}
+
+            def allow(want: set[str]) -> set[tuple[str, str]]:
+                return {key for key, have in mods_of.items() if want <= have}
+
+            # 조건 값은 DB 에서 고른다 — 가장 큰 종류 · 가장 큰 갈래 · 그 갈래와 함께 붙은 다음 갈래 · 가장 흔한 자료 유형.
+            types = count_entities_by_type(conn, min_bundle_size=3)
+            self.assertTrue(types, "노출 개체가 0건 — dev DB 에 개체가 없다")
+            etype = max(types, key=lambda t: (types[t], t))
+            areas = [a["name"] for a in count_entities_by_area(conn, min_bundle_size=3) if a["count"] > 0]
+            self.assertTrue(areas, "갈래가 붙은 노출 개체가 0건")
+            area1 = areas[0]
+            with_area1 = [a["name"] for a in count_entities_by_area(conn, area_names=[area1], min_bundle_size=3)
+                          if a["count"] > 0 and a["name"] != area1]
+            self.assertTrue(with_area1, f"「{area1}」 와 함께 붙은 다른 갈래가 없다")
+            area2 = with_area1[0]
+            mod1 = max(_FACET_MODALITY_CODES,
+                       key=lambda m: (count_entities(conn, min_bundle_size=3, uid_allow=allow({m})), m))
+            others = [c for c in _FACET_MODALITY_CODES if c != mod1]
+
+            cases = [  # (이름, 종류, 갈래, 고른 자료 유형, 칩 자료 유형)
+                ("조건 없음", None, None, [], _FACET_MODALITY_CODES),
+                ("종류 하나", etype, None, [], _FACET_MODALITY_CODES),
+                ("갈래 하나", None, [area1], [], _FACET_MODALITY_CODES),
+                ("갈래 둘", None, [area1, area2], [], _FACET_MODALITY_CODES),
+                ("자료 유형 하나", None, None, [mod1], _FACET_MODALITY_CODES),
+                ("갈래+자료 유형", None, [area1], [mod1], _FACET_MODALITY_CODES),
+                ("고른 유형이 칩 목록 밖", None, None, [mod1], others),
+            ]
+            for minsize in (2, 3):
+                for name, et, ar, picked, codes in cases:
+                    with self.subTest(case=name, minsize=minsize):
+                        separate = {
+                            "types": count_entities_by_type(conn, min_bundle_size=minsize),
+                            "areas": count_entities_by_area(conn, entity_type=et, area_names=ar,
+                                                            min_bundle_size=minsize),
+                            "modalities": {
+                                m: count_entities(conn, entity_type=et, area_names=ar, min_bundle_size=minsize,
+                                                  uid_allow=allow({*picked, m}))
+                                for m in codes},
+                        }
+                        facets = count_entity_facets(conn, entity_type=et, area_names=ar, modalities=picked,
+                                                     min_bundle_size=minsize, modality_codes=codes)
+                        self.assertEqual(facets, separate)
+                        self.assertEqual(list(facets["types"]), list(separate["types"]))  # 종류 순서까지
+                        self.assertEqual(list(facets["modalities"]), list(codes))
+                        self.assertGreater(sum(separate["modalities"].values()), 0,
+                                           "자료 유형 칩이 모두 0 — 대조가 무의미하다(조건 값을 다시 고를 것)")
 
 
 if __name__ == "__main__":
