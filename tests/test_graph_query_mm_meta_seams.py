@@ -121,6 +121,59 @@ class TestCounts(unittest.TestCase):
         self.assertEqual((p["areas"], p["area_n"]), (["한식"], 1))
         self.assertEqual(out[1], {"name": "음료", "skill": "음식", "skill_code": "food_content", "count": 0})
 
+    def test_count_by_area_counts_by_semi_join_without_distinct_sort(self) -> None:
+        """갈래 건수(``hit``)는 ``EXISTS`` 반조인으로 세고, 중복 제거(``DISTINCT``) 정렬로 돌아가지 않는다.
+
+        한글 열(종류·표기)을 DISTINCT 로 정렬하면 DB 문자열 비교 규칙(en_US.utf8 등)에서 라벨 행 전부를
+        한글로 비교해 칩 응답이 초 단위로 느려진다. 라벨 행은 ``entity_mm_skill_label`` 기본키
+        ``(entity_type, entity_uid, skill_code, label_code)`` 로 이미 유일하므로 DISTINCT 는 결과를 바꾸지 않는다.
+        별칭을 바꿔 되살려도 잡히도록 ``hit`` 구간 전체에서 ``DISTINCT`` 가 없음을 본다.
+        """
+        conn, cur = _conn_returning([])
+        gq.count_entities_by_area(conn, min_bundle_size=3)
+        sql, _p = _sql_and_params(cur)
+        self.assertIn(") SELECT lab.name", sql)  # 아래 자르기의 끝 표지 — 없으면 hit 구간을 잘못 자른다
+        hit = sql.split("hit AS (", 1)[1].split(") SELECT lab.name", 1)[0]
+        self.assertIn("EXISTS (SELECT 1 FROM ex", hit)
+        self.assertNotIn("DISTINCT", hit)
+
+    def test_area_filter_is_uncorrelated_in_list_not_per_entity_subquery(self) -> None:
+        """갈래 조건은 고른 갈래를 모두 가진 개체 명단을 한 번 만들어 ``IN`` 으로 거른다(개체마다 돌지 않는다).
+
+        조건이 바깥 개체 노드를 참조하면(상관 부분질의) 개체 노드마다 부분질의가 한 번씩 돌아 갈래를 고른
+        요청이 초 단위로 느려진다. 명단은 (종류, 표기, 갈래 이름) 짝을 먼저 중복 제거한 뒤 ``COUNT(*)`` 로
+        세는데, 짝이 유일하면 행 수가 곧 서로 다른 이름 수라 ``COUNT(DISTINCT 이름)`` 과 같은 뜻이다.
+        """
+        conn, cur = _conn_returning([{"n": 0}])
+        gq.count_entities(conn, entity_type="장소", area_names=["여행·명소"], min_bundle_size=3)
+        sql, p = _sql_and_params(cur)
+        self.assertIn("n.entity_uid) IN (", sql)
+        self.assertIn("HAVING COUNT(*) = %(area_n)s", sql)
+        # 바깥 개체를 참조하는 상관 조건. ⚠️ list_entities 는 출력 열(areas)용 상관 부분질의가 따로 있어
+        #    이 문자열을 정당하게 가진다 — 이 단언을 그 함수로 넓히지 않는다.
+        self.assertNotIn("el.entity_uid = n.entity_uid", sql)
+        self.assertNotIn("COUNT(DISTINCT (elb->>'name'))", sql)       # 이름 중복 제거 집계로 회귀
+        self.assertEqual((p["areas"], p["area_n"]), (["여행·명소"], 1))  # 바인딩은 종전 그대로
+
+    def test_area_filter_fragment_is_shared_by_all_four_seams(self) -> None:
+        """갈래 조건을 쓰는 네 seam 이 모두 같은 조각(``_ENTITY_AREA_FILTER_SQL``)을 끼운다.
+
+        한 함수만 인라인 SQL 로 갈라지면 위 가드가 그 함수의 회귀(개체마다 도는 부분질의)를 놓친다.
+        """
+        fragment = " ".join(gq._ENTITY_AREA_FILTER_SQL.format(alias="n").split())
+        calls = {
+            "list_entities": lambda c: gq.list_entities(c, area_names=["여행·명소"], min_bundle_size=3, limit=30),
+            "count_entities": lambda c: gq.count_entities(c, area_names=["여행·명소"], min_bundle_size=3),
+            "count_entities_by_area": lambda c: gq.count_entities_by_area(c, area_names=["여행·명소"], min_bundle_size=3),
+            "assets_of_entities": lambda c: gq.assets_of_entities(c, area_names=["여행·명소"], min_bundle_size=3),
+        }
+        for name, call in calls.items():
+            with self.subTest(seam=name):
+                conn, cur = _conn_returning([{"n": 0}] if name == "count_entities" else [])
+                call(conn)
+                sql, _p = _sql_and_params(cur)
+                self.assertIn(fragment, sql)
+
 
 class TestAssetsOfEntities(unittest.TestCase):
     def test_sql_and_shaping(self) -> None:

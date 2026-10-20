@@ -408,23 +408,30 @@ def mm_meta_bundle(
 #
 # "노출 개체" 의 정의는 네 함수가 같다: node_kind='entity' · 소속(mm_member) 엣지 · 상태 active+proposed(기본)
 # · 구성 자산(DISTINCT src) 수 ≥ ``min_bundle_size``. 임계값 자체는 호출자가 준다(화면 정책 — 목록은 3,
-# 갈래 필터 시 2 처럼 갈릴 수 있다 · spec 095 §6). 조건식은 데모와 글자까지 같게 두어 응답이 바뀌지 않는다.
+# 갈래 필터 시 2 처럼 갈릴 수 있다 · spec 095 §6). 조건식의 모양은 속도 때문에 데모와 달라졌어도 결과는
+# 데모와 같다 — 실 DB e2e 테스트가 데모 SQL 과 결과를 대조해 지킨다.
 # ══════════════════════════════════════════════════════════════════════════════
 
 # 갈래(개체 라벨) AND 필터 — "고른 갈래 이름을 **모두** 가진 개체". 라벨 이름의 정본은 ``mm_skill.labels`` 다
-# (코드→이름 표를 소비자가 들고 있지 않게). 이름이 스킬마다 겹칠 수 있어 COUNT(DISTINCT 이름) 으로 센다.
+# (코드→이름 표를 소비자가 들고 있지 않게). 이름이 스킬마다 겹칠 수 있어 (종류, 표기, 이름) 짝을 먼저 중복
+# 제거한 뒤 개수로 센다 — 짝이 유일하면 행 수가 곧 서로 다른 이름 수라 COUNT(DISTINCT 이름) 과 같은 뜻이다.
+# ⚠️ 바깥 개체(``{alias}``)를 참조하지 않는 명단으로 둔다 — 참조하면 개체 노드마다 부분질의가 한 번씩 돌아
+#    갈래를 고른 요청(목록·개수·칩·묶음)이 모두 초 단위로 느려진다. 명단의 DISTINCT 는 고른 갈래의 라벨 행만
+#    다루지만, 플래너가 정렬로 집계하면 아래 hit 와 같은 한글 정렬 비용이 붙는다(큰 갈래에서 수백 ms).
+# ⚠️ 이 조각은 WHERE 의 AND 로만 붙인다(NOT 안·SELECT 목록 금지) — 바깥 표기(``entity_uid``)는 NULL 을 허용하고
+#    그때 IN 이 NULL 이 되는데, AND 에서는 거짓과 같아 상관 EXISTS 와 결과가 같다. 다른 자리에서는 이 동치가 깨진다.
+# 설계 배경: `specs/105-entity-area-count-speed`
 _ENTITY_AREA_FILTER_SQL = """
-      (%(areas)s::text[] IS NULL OR EXISTS (
-            SELECT 1
-              FROM entity_mm_skill_label el
-              JOIN mm_skill es ON es.skill_code = el.skill_code
-              CROSS JOIN LATERAL jsonb_array_elements(es.labels) AS elb
-             WHERE el.entity_type = {alias}.entity_type
-               AND el.entity_uid = {alias}.entity_uid
-               AND (elb->>'code') = el.label_code
-               AND (elb->>'name') = ANY(%(areas)s)
-             GROUP BY el.entity_type, el.entity_uid
-            HAVING COUNT(DISTINCT (elb->>'name')) = %(area_n)s))
+      (%(areas)s::text[] IS NULL OR ({alias}.entity_type, {alias}.entity_uid) IN (
+            SELECT t.entity_type, t.entity_uid
+              FROM (SELECT DISTINCT el.entity_type, el.entity_uid, (elb->>'name') AS name
+                      FROM entity_mm_skill_label el
+                      JOIN mm_skill es ON es.skill_code = el.skill_code
+                      CROSS JOIN LATERAL jsonb_array_elements(es.labels) AS elb
+                     WHERE (elb->>'code') = el.label_code
+                       AND (elb->>'name') = ANY(%(areas)s)) t
+             GROUP BY t.entity_type, t.entity_uid
+            HAVING COUNT(*) = %(area_n)s))
 """
 
 # 노출 개체 집합(공통 CTE 본문). ``{type_cond}``·``{area_cond}`` 자리에 조건을 끼운다 — 같은 조각을 축마다
@@ -601,6 +608,11 @@ SELECT t.entity_type, COUNT(*) AS n
 # 갈래(개체 라벨)별 노출 개체 수. **0건 라벨도 돌려준다**(커버리지 갭 신호 — 감추는 것은 화면 몫).
 # ⚠️ LEFT JOIN + COUNT(DISTINCT (a,b)) 는 쓰지 않는다 — 매칭이 없을 때 (NULL,NULL) 복합값이 1로 세어져
 #    0건 라벨이 전부 1건으로 나왔다(2026-08-27 실측 함정). 그래서 hit 를 따로 세고 LEFT JOIN 한다.
+# ⚠️ hit 에서 한글 열(종류·표기)로 중복 제거(SELECT DISTINCT) 정렬을 하지 않는다 — DB 문자열 비교 규칙
+#    (en_US.utf8 등)이 한글 비교에 비싸 라벨 행 전부를 정렬하면 칩 응답이 초 단위로 느려진다.
+#    중복은 원래 생기지 않는다 — 라벨 행은 entity_mm_skill_label 기본키 (entity_type, entity_uid,
+#    skill_code, label_code) 로 유일하고, EXISTS 반조인은 ex 에 같은 개체가 겹쳐도 행을 늘리지 않는다.
+#    설계 배경: `specs/105-entity-area-count-speed`
 _COUNT_BY_AREA_SQL = """
 WITH ex AS ({exposed}),
 lab AS (
@@ -612,11 +624,8 @@ lab AS (
 ),
 hit AS (
     SELECT el.skill_code, el.label_code, COUNT(*) AS n
-      FROM (
-        SELECT DISTINCT el2.skill_code, el2.label_code, el2.entity_type, el2.entity_uid
-          FROM entity_mm_skill_label el2
-          JOIN ex ON ex.entity_type = el2.entity_type AND ex.entity_uid = el2.entity_uid
-      ) el
+      FROM entity_mm_skill_label el
+     WHERE EXISTS (SELECT 1 FROM ex WHERE ex.entity_type = el.entity_type AND ex.entity_uid = el.entity_uid)
      GROUP BY 1, 2
 )
 SELECT lab.name, lab.skill, lab.skill_code, COALESCE(hit.n, 0) AS n
