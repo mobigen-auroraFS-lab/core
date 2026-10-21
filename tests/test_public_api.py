@@ -43,7 +43,7 @@ PUBLIC_API: dict[str, tuple[str, ...]] = {
     "src.registry.access_tier": ("project_ext_meta", "principal_clearance"),
     "src.registry.ext_meta_field_registry": ("fetch_access_tiers", "validate_ext_meta"),
     "src.relations.graph_query": (
-        "fetch_relations_for_asset", "fetch_active_relations_for_asset", "mm_meta_of_asset", "mm_meta_bundle", "list_entities", "count_entities", "count_entities_by_type", "count_entities_by_area", "count_entity_facets", "assets_of_entities",
+        "fetch_relations_for_asset", "fetch_active_relations_for_asset", "mm_meta_of_asset", "mm_meta_bundle", "list_entities", "list_entities_with_total", "count_entities", "count_entities_by_type", "count_entities_by_area", "count_entity_facets", "assets_of_entities",
     ),
     "src.relations.approval_policy": ("TIER_ORDER", "tier_rank"),
     "src.relations.review": (

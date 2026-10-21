@@ -11,6 +11,11 @@
 | **MINOR** | 공개 API **추가** — 기존 호출은 그대로 동작 |
 | **PATCH** | 공개 API 무변경 — 내부 수정·버그 수정 |
 
+## [Unreleased] — 2026-10-21 (113 개체 목록과 총 건수를 한 질의로)
+
+### 추가 (MINOR — 기존 호출 무변경)
+- `relations.graph_query.list_entities_with_total` — `list_entities` 와 같은 인자로 `(쪽 행, 총계)` 를 돌려준다. `list_entities` 한 번 + `count_entities` 한 번과 결과가 같고, 노출 개체 집합을 한 번만 만든다. `list_entities` · `count_entities` 는 그대로다.
+
 ## [Unreleased] — 2026-10-21 (111 파일 검색 크기 필터)
 
 ### 추가 (MINOR — 기존 호출 무변경)
