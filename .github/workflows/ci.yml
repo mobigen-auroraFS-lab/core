@@ -5,6 +5,11 @@
 # 그래서 코어 PR 마다 백엔드 `main` 의 **DB 없는 단위 테스트**를 이 코어 체크아웃에 대해 돌린다.
 # 실패하면 "이 코어 변경이 백엔드를 깬다"는 뜻이고, 소비 레포 PR 을 같은 날 함께 열어야 한다.
 #
+# 백엔드 테스트는 pytest 로 돌린다 — 백엔드 `tests/conftest.py` 가 환경변수로 캐시 · 로그 설정 · 예열 · 기동 접속 시험을 끄고,
+# autouse fixture 로 시험마다 연결 차단기를 초기화한다. unittest 는 conftest 를 읽지 않아 한 시험이 연 차단기가 뒤 시험을 503 으로 줄줄이 깬다.
+# pytest 9 이상 — unittest `subTest` 를 플러그인 없이 하위 시험으로 센다(9.0 에 내장). 백엔드는 pytest 를 의존성에 적지 않아 여기서 설치한다
+# (코어 `constraints.txt` 대상 아님 — 코어 자체 테스트는 unittest).
+#
 # 파이프라인 소비자 스모크는 아직 없다 — 파이프 의존(airflow·opencv·whisper)이 무거워 별도 검토.
 name: ci
 
@@ -69,7 +74,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install --extra-index-url https://download.pytorch.org/whl/cpu -e "./core[migrate]" -c core/constraints.txt
           pip install -e ./service
-      - name: 백엔드 단위 테스트(DB·OS 없음 · 해당 테스트는 자동 skip)
+          pip install "pytest>=9,<10"
+      - name: 백엔드 단위 테스트(DB·OS 없음 · 해당 테스트는 자동 skip · pytest)
         working-directory: service
         env:
           PORTAL_AUTH_DISABLED: "1"
@@ -85,4 +91,4 @@ jobs:
           TEXT_EMBED_NORMALIZE: "true"
           OPENAI_BASE_URL: http://localhost:1
           OPENAI_API_KEY: dummy
-        run: python -m unittest discover -s tests
+        run: python -m pytest -q tests
