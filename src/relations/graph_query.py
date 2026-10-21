@@ -542,9 +542,13 @@ _ENTITY_KEYSET_SQL = """
 #    쪼개질 위험은 없다 — ``uq_node_entity(entity_type, entity_uid)`` 가 개체마다 node_id 1개를 보장한다.
 #    ``p.prio_tier``·``p.confirmed_count`` 는 CTE 열이라 함께 묶어야 한다(PG 는 CTE 열의 함수 종속을
 #    알아보지 못한다). ``page`` 는 개체마다 한 행이라 그룹이 늘지 않는다.
-# 설계 배경: `specs/106-entity-list-speed`
+# ``{ent_mat}`` · ``{cnt_cte}`` · ``{cnt_col}`` 는 ``list_entities_with_total`` 만 채운다(``list_entities`` 는 빈 문자열 —
+#    질의가 글자 하나까지 종전과 같다). 채우면 ①을 한 번만 만들어 두고 그 전체 개수를 바깥 행에 한 칸으로 싣는다
+#    — 총계를 따로 세면 같은 노출 집합을 한 번 더 만든다(spec 113). 총계를 ``page`` 에서 세면 안 된다: 이어읽기
+#    조건 · ``LIMIT`` 뒤라 모수가 아니라 쪽 크기가 나온다.
+# 설계 배경: `specs/106-entity-list-speed` · `specs/113-entity-list-with-total`
 _LIST_ENTITIES_SQL = """
-WITH ent AS (
+WITH ent AS{ent_mat} (
 SELECT n.node_id, n.entity_type, n.entity_uid,
        COUNT(DISTINCT ge.src_node) AS confirmed_count,
 {first_tier}
@@ -566,7 +570,7 @@ SELECT ent.* FROM ent
  ORDER BY ent.prio_tier DESC, ent.confirmed_count DESC,
           ent.entity_uid ASC, ent.entity_type ASC
  LIMIT %(limit)s
-)
+){cnt_cte}
 SELECT n.entity_type, n.entity_uid, n.node_id,
        COALESCE(n.canonical->>'name', n.entity_uid) AS name,
        COALESCE(n.canonical->>'source', 'auto')     AS source,
@@ -598,7 +602,7 @@ SELECT n.entity_type, n.entity_uid, n.node_id,
            AND el.entity_uid = n.entity_uid
            AND (elb->>'code') = el.label_code
            AND el.label_code <> 'unassigned')          AS areas,
-       p.prio_tier
+       p.prio_tier{cnt_col}
   FROM page p
   JOIN node n          ON n.node_id = p.node_id
   JOIN graph_edge ge    ON ge.dst_node = n.node_id
@@ -961,13 +965,123 @@ def list_entities(
         배열 필드는 빈 값을 뺀 **가나다 순**이다(같은 입력이면 같은 순서 · 헌법 3조). ``keywords`` 는 원문
         **전부**다 — 상위 몇 개를 어떤 순서로 보일지는 호출자 몫. id 는 전부 문자열.
     """
+    sql, params = _list_entities_query(
+        entity_type=entity_type, area_names=area_names, min_bundle_size=min_bundle_size, limit=limit,
+        statuses=statuses, form_skill_codes=form_skill_codes,
+        bookmark=(after_tier, after_count, after_uid, after_type),
+        uid_allow=uid_allow, uid_first=uid_first, uid_semantic=uid_semantic, with_total=False)
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(sql, params)
+        rows = cur.fetchall()
+    return [_shape_entity_row(r) for r in rows]
+
+
+def list_entities_with_total(
+    conn: Connection[Any],
+    *,
+    entity_type: str | None = None,
+    area_names: list[str] | None = None,
+    min_bundle_size: int,
+    limit: int,
+    statuses: list[str] | None = None,
+    form_skill_codes: list[str] | None = None,
+    after_tier: int | None = None,
+    after_count: int | None = None,
+    after_uid: str | None = None,
+    after_type: str | None = None,
+    uid_allow: set[tuple[str, str]] | None = None,
+    uid_first: set[tuple[str, str]] | None = None,
+    uid_semantic: set[tuple[str, str]] | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    """개체 목록 한 쪽과 **총계**를 한 질의로 돌려준다(읽기 전용 · spec 113).
+
+    ``list_entities`` 한 번 + ``count_entities`` 한 번과 결과가 같다 — 쪽 행은 모양 · 순서까지 같고, 총계는
+    같은 조건의 모수다(책갈피 · ``limit`` · 우선 티어와 무관). 다른 점은 노출 개체 집합을 **한 번만** 만든다는
+    것이다. 두 함수를 따로 부르면 소속 간선 조인 → 개체별 묶기를 두 번 한다(k8s 실측: 요청마다 9~161ms 더).
+
+    🔴 쪽이 비면 행이 없어 총계를 실을 곳이 없다 — 그때만 같은 조건의 ``count_entities`` 로 따로 센다(질의 두 번 ·
+    결과 0건이거나 끝을 넘긴 이어 받기뿐이라 드물다). 첫 쪽이 비면 0 이라고 단정하지 않는 이유: 바깥 질의의 자산
+    조인이 행을 빼는 경우(소속 엣지 출발점이 자산이 아닌 데이터 오류)에 총계가 조용히 0 으로 거짓말을 한다.
+
+    Args:
+        entity_type: 종류 필터 — ``list_entities`` 와 같다. ``None`` 이면 전체.
+        area_names: 갈래 이름들(모두 가진 개체만) — ``list_entities`` 와 같다.
+        min_bundle_size: 노출 임계(구성 자산 수 하한) — 쪽과 총계에 함께 걸린다.
+        limit: 쪽 크기. 총계에는 영향이 없다.
+        statuses: 소속 엣지 상태 — ``list_entities`` 와 같다(``None`` 이면 active+proposed).
+        form_skill_codes: 형식 축으로 읽을 자산 라벨 스킬 코드 — ``list_entities`` 와 같다.
+        after_tier: 이어읽기 책갈피 ① — ``list_entities`` 와 같다. 네 값은 함께 주거나 함께 생략한다.
+        after_count: 이어읽기 책갈피 ②.
+        after_uid: 이어읽기 책갈피 ③.
+        after_type: 이어읽기 책갈피 ④.
+        uid_allow: 개체 화이트리스트 — 쪽과 총계에 함께 걸린다. ``None`` = 필터 없음 · 빈 집합 = 0건.
+        uid_first: 맨 앞에 둘 개체 집합(순서만 바꾼다) — 총계에는 영향이 없다.
+        uid_semantic: 뜻으로 앞세울 개체 집합(순서만 바꾼다) — 총계에는 영향이 없다.
+
+    Returns:
+        ``(쪽 행, 총계)`` — 쪽 행은 ``list_entities`` 의 반환과 같은 모양, 총계는 0 이상의 정수.
+
+    Raises:
+        ValueError: 책갈피 네 값 중 일부만 준 경우(``list_entities`` 와 같다).
+    """
+    bookmark = (after_tier, after_count, after_uid, after_type)
+    sql, params = _list_entities_query(
+        entity_type=entity_type, area_names=area_names, min_bundle_size=min_bundle_size, limit=limit,
+        statuses=statuses, form_skill_codes=form_skill_codes, bookmark=bookmark,
+        uid_allow=uid_allow, uid_first=uid_first, uid_semantic=uid_semantic, with_total=True)
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(sql, params)
+        rows = cur.fetchall()
+    if rows:
+        total = int(rows[0]["scope_n"])
+    else:
+        total = count_entities(conn, entity_type=entity_type, area_names=area_names,
+                               min_bundle_size=min_bundle_size, statuses=statuses, uid_allow=uid_allow)
+    return [_shape_entity_row(r) for r in rows], total
+
+
+def _list_entities_query(
+    *,
+    entity_type: str | None,
+    area_names: list[str] | None,
+    min_bundle_size: int,
+    limit: int,
+    statuses: list[str] | None,
+    form_skill_codes: list[str] | None,
+    bookmark: tuple[int | None, int | None, str | None, str | None],
+    uid_allow: set[tuple[str, str]] | None,
+    uid_first: set[tuple[str, str]] | None,
+    uid_semantic: set[tuple[str, str]] | None,
+    with_total: bool,
+) -> tuple[str, dict[str, Any]]:
+    """목록 질의와 바인딩을 만든다 — ``list_entities`` · ``list_entities_with_total`` 이 함께 쓴다(두 벌이면 한쪽만 고쳐진다).
+
+    Args:
+        entity_type: 종류 필터(``None`` 이면 전체).
+        area_names: 갈래 이름들(모두 가진 개체만).
+        min_bundle_size: 노출 임계.
+        limit: 쪽 크기.
+        statuses: 소속 엣지 상태(``None`` 이면 active+proposed).
+        form_skill_codes: 형식 축 스킬 코드.
+        bookmark: 이어읽기 책갈피 ``(tier, count, uid, type)`` — 모두 ``None`` 이면 첫 쪽.
+        uid_allow: 개체 화이트리스트(``None`` = 필터 없음 · 빈 집합 = 0건).
+        uid_first: 맨 앞에 둘 개체 집합.
+        uid_semantic: 뜻으로 앞세울 개체 집합.
+        with_total: 참이면 ``ent`` 를 물질화하고 그 전체 개수를 ``scope_n`` 칸으로 싣는다.
+
+    Returns:
+        ``(sql, params)`` — ``cur.execute`` 에 그대로 넘긴다.
+
+    Raises:
+        ValueError: 책갈피 네 값 중 일부만 준 경우.
+    """
     # 네 값은 **함께** 와야 한다 — 하나라도 빠지면 이어읽기 조건이 성립하지 않는다(정렬 키가
     # 넷이라 값도 넷이다. 옛 2·3값 토큰은 호출부의 커서 길이 검사가 400 으로 막는다).
-    bookmark = (after_tier, after_count, after_uid, after_type)
     if any(v is not None for v in bookmark) and any(v is None for v in bookmark):
         raise ValueError(
             "이어읽기 책갈피는 after_tier·after_count·after_uid·after_type 을 함께 줘야 한다"
             "(반쪽이면 중복이 난다)")
+    after_tier, after_count, after_uid, after_type = bookmark
     params = {
         "kind": MM_MEMBER_KIND_CODE,
         "statuses": _wanted_statuses(statuses),
@@ -988,28 +1102,36 @@ def list_entities(
         area_filter=_ENTITY_AREA_FILTER_SQL.format(alias="n"),
         allow_filter=_ENTITY_ALLOW_FILTER_SQL.format(alias="n"),
         first_tier=_ENTITY_FIRST_TIER_SQL.strip("\n"),
-        keyset=_ENTITY_KEYSET_SQL.strip())
-    with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(sql, params)
-        rows = cur.fetchall()
-    return [
-        {
-            "entity_type": str(r["entity_type"]),
-            "entity_uid": str(r["entity_uid"]),
-            "node_id": str(r["node_id"]),
-            "name": str(r["name"]),
-            "source": str(r["source"]),
-            "description": (r["description"] or None),
-            "confirmed_count": int(r["confirmed_count"]),
-            "total_count": int(r["total_count"]),
-            "modalities": _sorted_strs(r["modalities"]),
-            "keywords": _sorted_strs(r["keywords"]),
-            "topics": _sorted_strs(r["topics"]),
-            "forms": _sorted_strs(r["forms"]),
-            "areas": [str(x) for x in (r["areas"] or []) if x],  # SQL 이 이미 이름순
-        }
-        for r in rows
-    ]
+        keyset=_ENTITY_KEYSET_SQL.strip(),
+        # ``ent`` 를 두 곳(page · cnt)에서 읽으면 PG 가 알아서 물질화하지만, 한 번만 만든다는 것이 이 함수의
+        # 존재 이유라 명시한다(기본값이 바뀌어도 두 번 만들지 않게).
+        ent_mat=" MATERIALIZED" if with_total else "",
+        cnt_cte=",\ncnt AS (SELECT COUNT(*) AS n FROM ent)" if with_total else "",
+        cnt_col=",\n       (SELECT c.n FROM cnt c) AS scope_n" if with_total else "")
+    return sql, params
+
+
+def _shape_entity_row(r: dict[str, Any]) -> dict[str, Any]:
+    """목록 질의 한 행 → 반환 모양(id 는 문자열 · 배열은 빈 값을 뺀 가나다 순). 총계 칸(``scope_n``)은 싣지 않는다.
+
+    Args:
+        r: 목록 질의의 한 행(dict).
+    """
+    return {
+        "entity_type": str(r["entity_type"]),
+        "entity_uid": str(r["entity_uid"]),
+        "node_id": str(r["node_id"]),
+        "name": str(r["name"]),
+        "source": str(r["source"]),
+        "description": (r["description"] or None),
+        "confirmed_count": int(r["confirmed_count"]),
+        "total_count": int(r["total_count"]),
+        "modalities": _sorted_strs(r["modalities"]),
+        "keywords": _sorted_strs(r["keywords"]),
+        "topics": _sorted_strs(r["topics"]),
+        "forms": _sorted_strs(r["forms"]),
+        "areas": [str(x) for x in (r["areas"] or []) if x],  # SQL 이 이미 이름순
+    }
 
 
 def count_entities(

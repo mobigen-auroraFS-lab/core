@@ -516,5 +516,97 @@ class TestEntityFacetsMatchClickResults(unittest.TestCase):
             self.assertGreater(zero_type_cases, 0, "눌렀을 때 0 인 종류가 생긴 조건이 없어 키 없음 계약을 못 본다" + hint)
 
 
+@unittest.skipUnless(_RUN_DB_E2E, "RUN_DB_E2E 미설정 — 실 DB e2e skip")
+class TestListWithTotalMatchesListAndCount(unittest.TestCase):
+    """``list_entities_with_total`` == ``list_entities`` + ``count_entities``(같은 조건) — 실 dev DB · 끝까지 넘기며.
+
+    쪽마다 행(순서 · 구성 자산 수 · 카드 재료)과 총계를 대조하고, 끝을 넘긴 책갈피(빈 쪽)의 총계와 0건 조건도 본다.
+    쪽 크기 97 은 동점 무더기 한가운데서 끊기게 일부러 고른 홀수다.
+    설계 배경: `specs/113-entity-list-with-total`
+    """
+
+    maxDiff = None
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from dotenv import load_dotenv
+
+        from src.config.settings import init_settings
+        from src.database.postgres_util import PostgresUtil
+
+        dp = Path(__file__).resolve().parents[1] / ".env.dev"
+        if dp.is_file():
+            load_dotenv(dotenv_path=dp, override=False)
+        init_settings("dev")
+        cls.db = PostgresUtil()
+        cls.db.__enter__()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.db.__exit__(None, None, None)
+
+    def test_pages_and_total_equal_list_plus_count(self) -> None:
+        from src.relations.graph_query import (
+            count_entities,
+            count_entities_by_area,
+            count_entities_by_type,
+            list_entities,
+            list_entities_with_total,
+        )
+
+        with self.db.transaction() as conn:
+            mods_of = {(str(t), str(u)): frozenset(str(m) for m in (ms or []) if m)
+                       for t, u, ms in conn.execute(_ENTITY_MODALITIES_SQL).fetchall()}
+            types = count_entities_by_type(conn, min_bundle_size=3)
+            self.assertTrue(types, "노출 개체가 0건 — dev DB 에 개체가 없다")
+            etype = max(types, key=lambda t: (types[t], t))
+            areas = [a["name"] for a in count_entities_by_area(conn, min_bundle_size=3) if a["count"] > 0]
+            self.assertTrue(areas, "갈래가 붙은 노출 개체가 0건")
+            image = {key for key, have in mods_of.items() if "image" in have}
+            first = set(sorted(image)[:5])  # 앞세울 개체 — 총계는 그대로여야 한다
+
+            cases = [  # (이름, 조건)
+                ("조건 없음", {}),
+                ("종류 하나", {"entity_type": etype}),
+                ("갈래 하나", {"area_names": [areas[0]]}),
+                ("종류+갈래", {"entity_type": etype, "area_names": [areas[0]]}),
+                ("허용 목록(이미지)", {"uid_allow": image}),
+                ("허용 목록+앞세우기", {"uid_allow": image, "uid_first": first, "uid_semantic": set(sorted(image)[5:9])}),
+                ("빈 허용 목록(0건)", {"uid_allow": set()}),
+                ("상태 지정", {"statuses": ["active", "proposed"], "entity_type": etype}),
+                ("상태 active 만", {"statuses": ["active"]}),
+            ]
+            multi_page = 0
+            for name, cond in cases:
+                with self.subTest(case=name):
+                    base = {"min_bundle_size": 3, "limit": 97, "form_skill_codes": ["content_form"], **cond}
+                    count_kw = {k: v for k, v in cond.items()
+                                if k in ("entity_type", "area_names", "uid_allow", "statuses")}
+                    want_total = count_entities(conn, min_bundle_size=3, **count_kw)
+                    bookmark: dict = {}
+                    seen = 0
+                    pages = 0
+                    while True:
+                        want_rows = list_entities(conn, **base, **bookmark)
+                        rows, total = list_entities_with_total(conn, **base, **bookmark)
+                        self.assertEqual(want_rows, rows, f"{name} · {pages + 1}쪽 행이 다르다")
+                        self.assertEqual(want_total, total, f"{name} · {pages + 1}쪽 총계가 다르다")
+                        seen += len(rows)
+                        pages += 1
+                        if len(rows) < base["limit"]:
+                            break
+                        last = rows[-1]
+                        key = (last["entity_type"], last["entity_uid"])
+                        tier = 2 if key in cond.get("uid_first", set()) else 1 if key in cond.get("uid_semantic", set()) else 0
+                        bookmark = {"after_tier": tier, "after_count": last["confirmed_count"],
+                                    "after_uid": last["entity_uid"], "after_type": last["entity_type"]}
+                    self.assertEqual(want_total, seen, f"{name} — 끝까지 넘긴 행 수 ≠ 총계")
+                    multi_page += pages > 1
+                    # 끝을 넘긴 책갈피 — 빈 쪽이라 총계를 따로 센다.
+                    beyond = {"after_tier": -1, "after_count": -1, "after_uid": "", "after_type": ""}
+                    self.assertEqual(([], want_total), list_entities_with_total(conn, **base, **beyond))
+            self.assertGreater(multi_page, 0, "여러 쪽으로 넘어간 조건이 없다 — 이어 받기 쪽 총계를 못 봤다")
+
+
 if __name__ == "__main__":
     unittest.main()
