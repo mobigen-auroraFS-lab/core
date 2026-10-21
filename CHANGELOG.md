@@ -11,6 +11,11 @@
 | **MINOR** | 공개 API **추가** — 기존 호출은 그대로 동작 |
 | **PATCH** | 공개 API 무변경 — 내부 수정·버그 수정 |
 
+## [Unreleased] — 2026-10-21 (111 파일 검색 크기 필터)
+
+### 추가 (MINOR — 기존 호출 무변경)
+- `search.search_filters.SearchFilters.file_size_ranges` · `parse_search_filters(file_size_ranges=...)` — 파일 크기 범위(바이트 `(이상, 미만)` · `None` 은 열린 끝 · 여럿이면 「또는」) 조건. 비어 있으면 검색 절이 생기지 않아 기존 질의가 그대로다. 잘못된 범위는 `ValueError`.
+
 ## [Unreleased] — 2026-10-21 (110 글자 없는 질의는 뜻 검색을 하지 않는다)
 
 ### 추가 (MINOR)

@@ -37,6 +37,12 @@ class SearchFilters:
     # 결과를 버킷으로 나눠 보이던 것을 대신한다(누르면 좁혀지고 건수가 함께 보인다).
     # 여럿이면 「또는」이다(주제·태그와 같은 규칙).
     modalities: tuple[str, ...] = ()
+    # 파일 크기 범위(바이트 ``(이상, 미만)`` · ``None`` 은 열린 끝). 여럿이면 「또는」이다. 🔴 **맨 뒤 · 기본 빈 값**
+    # 이라 자리 인자로 만든 호출과 기존 질의 바디가 그대로다 — 비어 있으면 절 자체가 생기지 않는다(태그 · 모달리티와
+    # 같은 하위 호환). 경계는 이상 · 미만 — 크기 칩을 세는 range 집계(from 포함 · to 미포함)와 같아야 칩 숫자와
+    # 클릭 결과가 맞는다. 구간(1MB · 10MB 같은)은 화면 정책이라 호출자가 정하고 여기서는 범위만 받는다.
+    # 설계 배경: `specs/111-file-size-filter`
+    file_size_ranges: tuple[tuple[int | None, int | None], ...] = ()
 
     @property
     def topic(self) -> str | None:
@@ -58,6 +64,48 @@ class SearchFilters:
             첫 하위주제, 또는 조건이 없으면 ``None``.
         """
         return self.subtopics[0] if self.subtopics else None
+
+
+# 색인 ``file_size`` 는 long 이다 — 이보다 큰 값을 범위 절에 넣으면 검색 엔진이 질의 오류를 낸다.
+_LONG_MAX = 2**63 - 1
+
+
+def _norm_size_ranges(
+    value: Sequence[Sequence[int | None]] | None,
+) -> tuple[tuple[int | None, int | None], ...]:
+    """크기 범위들을 검증 · 정규화한다 — 중복을 없애고 정렬해 같은 조건이면 같은 바디가 되게 한다.
+
+    Args:
+        value: ``(이상, 미만)`` 바이트 범위들. 각 끝은 0 이상 정수 또는 ``None``(열린 끝). ``None`` · 빈
+            목록이면 조건 없음.
+
+    Returns:
+        정렬된 범위 튜플(열린 아래끝이 먼저 · 그다음 아래끝 · 위끝 순).
+
+    Raises:
+        ValueError: 짝이 아니거나, 정수가 아니거나(``bool`` 포함), 음수이거나, 색인의 long 범위를 넘거나(넘기면
+            검색 엔진이 질의 오류를 낸다), 아래끝 ≥ 위끝이거나, 양끝이 모두 열려 있을 때(그런 범위는 조건이 아니다 —
+            조용히 받으면 「걸었는데 안 걸린」 조건이 된다).
+    """
+    out: set[tuple[int | None, int | None]] = set()
+    for item in value or ():
+        try:
+            pair = tuple(item)
+        except TypeError:
+            # 짝이 아닌 값(숫자 하나 등) — 호출부가 입력 오류(422)로 바꿀 수 있게 ValueError 로 올린다.
+            raise ValueError(f"크기 범위는 (이상, 미만) 짝이어야 한다: {item!r}") from None
+        if len(pair) != 2:
+            raise ValueError(f"크기 범위는 (이상, 미만) 짝이어야 한다: {item!r}")
+        lo, hi = pair
+        for end in (lo, hi):
+            if end is not None and (isinstance(end, bool) or not isinstance(end, int) or not 0 <= end <= _LONG_MAX):
+                raise ValueError(f"크기 범위 끝은 0 이상 정수(바이트 · 색인 long 범위 안) 또는 None 이어야 한다: {item!r}")
+        if lo is None and hi is None:
+            raise ValueError(f"크기 범위의 양끝이 모두 열려 있다 — 조건이 아니다: {item!r}")
+        if lo is not None and hi is not None and lo >= hi:
+            raise ValueError(f"크기 범위의 아래끝이 위끝보다 작아야 한다: {item!r}")
+        out.add((lo, hi))
+    return tuple(sorted(out, key=lambda r: (r[0] is not None, r[0] or 0, r[1] is None, r[1] or 0)))
 
 
 def _norm_names(value: str | Sequence[str] | None) -> tuple[str, ...]:
@@ -117,6 +165,7 @@ def parse_search_filters(
     subtopic: str | Sequence[str] | None = None,
     modality: str | Sequence[str] | None = None,
     tag: list[str] | None = None,
+    file_size_ranges: Sequence[Sequence[int | None]] | None = None,
 ) -> SearchFilters | None:
     """API 질의 파라미터를 ``SearchFilters`` 로 파싱한다(순수).
 
@@ -132,13 +181,15 @@ def parse_search_filters(
         tag: 태그 목록(반복 파라미터 ``tag`` · 083). 앞뒤 공백만 자르고 **원문 표기·입력 순서를
             보존**한 채 중복만 없앤다 — 정규화는 절을 만들 때 하고(``filters_to_opensearch_bool``),
             여기 값은 화면에 "선택한 태그"로 되돌려 보여줄 수 있어야 한다.
+        file_size_ranges: 파일 크기 범위들(바이트 ``(이상, 미만)`` · ``None`` 은 열린 끝). 여럿이면 「또는」.
+            중복을 없애고 정렬해 담는다. ``None`` · 빈 목록이면 조건 없음.
 
     Returns:
         ``SearchFilters``. **하나도 지정되지 않았으면 ``None``** — 호출부가 "필터 없음"을
         빈 객체와 구분해 처리한다.
 
     Raises:
-        ValueError: 날짜 문자열이 ISO 형식이 아닐 때.
+        ValueError: 날짜 문자열이 ISO 형식이 아닐 때, 크기 범위가 잘못됐을 때(``_norm_size_ranges``).
     """
     exts = tuple(
         sorted({_norm_ext(x) for x in (file_ext or []) if x and x.strip()})
@@ -153,6 +204,7 @@ def parse_search_filters(
     modalities_v = _norm_names(modality)
     # 083: dict.fromkeys 는 **첫 등장 순서를 보존한 채** 중복을 없앤다(set 은 순서가 흔들린다).
     tags_v = tuple(dict.fromkeys(x.strip() for x in (tag or []) if x and x.strip()))
+    sizes_v = _norm_size_ranges(file_size_ranges)
     # 🔴 "아무 필터도 없음"(None) 판정에 tags 를 **반드시** 포함한다 — 빼먹으면 태그만 지정한
     # 요청이 여기서 None 이 되어 필터가 통째로 사라진다(태그 기능이 조용히 무력화).
     if (
@@ -163,6 +215,7 @@ def parse_search_filters(
         and not subtopics_v
         and not modalities_v
         and not tags_v
+        and not sizes_v
     ):
         return None
     return SearchFilters(
@@ -173,6 +226,7 @@ def parse_search_filters(
         subtopics=subtopics_v,
         modalities=modalities_v,
         tags=tags_v,
+        file_size_ranges=sizes_v,
     )
 
 
@@ -254,6 +308,21 @@ def filters_to_opensearch_bool(filters: SearchFilters | None) -> list[dict[str, 
         tag_keys = sorted({k for k in (normalize_tag_key(t) for t in filters.tags) if k})
         if tag_keys:
             clauses.append({"terms": {"keywords_norm": tag_keys}})
+    # 111 — 크기 범위. **맨 뒤에** 붙여 기존 절 순서를 바꾸지 않는다. 비어 있으면 절이 없다(기존 바디 그대로).
+    # 범위 하나면 range 절 하나, 여럿이면 「또는」(should · 최소 1). 이상 · 미만 — 크기 칩 집계와 같은 경계.
+    # 크기 값이 없는 문서(색인에 ``file_size`` 필드 없음)는 **어느 범위에도 들지 않는다** — 크기 칩의 range 집계도
+    # 같은 문서를 세지 않으므로 칩 숫자와 결과가 맞는다. ``(0, None)`` 은 「크기 값이 있는 문서 전부」다.
+    if filters.file_size_ranges:
+        ranges = []
+        for lo, hi in filters.file_size_ranges:
+            bound: dict[str, int] = {}
+            if lo is not None:
+                bound["gte"] = lo
+            if hi is not None:
+                bound["lt"] = hi
+            ranges.append({"range": {"file_size": bound}})
+        clauses.append(ranges[0] if len(ranges) == 1
+                       else {"bool": {"should": ranges, "minimum_should_match": 1}})
     return clauses
 
 
