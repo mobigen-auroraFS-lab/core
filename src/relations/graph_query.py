@@ -670,17 +670,45 @@ SELECT lab.name, lab.skill, lab.skill_code, COALESCE(hit.n, 0) AS n
 
 # 개체 칩 세 축(종류 · 갈래 · 자료 유형)의 건수를 한 질의로 센다(``count_entity_facets``) — 노출 개체(``base``)를
 #    한 번 만들어 세 축이 나눠 쓴다. ``base`` 는 ``_EXPOSED_ENTITIES_SQL`` 에서 조건을 뺀 것과 같은 정의여야 한다
-#    (갈라지면 기존 함수와 수가 달라진다).
-# 🔴 조건이 없으면 ``{amatch}`` · ``{scope_where}`` 를 비운다(``%(x)s IS NULL OR …`` 로 한 문장에 담지 않는다) — 같은
-#    연결에서 반복 실행하면 재사용 계획(값을 모른 채 세운 계획)이 그 조건을 걷어내지 못해 크게 느려진다.
+#    (갈라지면 칩 숫자와 목록 · 모수가 서로 다른 개체를 센다).
+# 🔴 칩 숫자 = 그 칩을 눌렀을 때 나올 결과 수. 축마다 **자기 축 조건만 빼고(종류) 또는 자기 값을 더해(갈래 · 자료
+#    유형)** 나머지 조건을 모두 적용해 센다 — 화면의 클릭 규칙을 따른 것이다.
+#    · 종류는 하나만 고르는 축이라 누르면 종류가 **바뀐다** → 종류 조건만 빼고 갈래 · 자료 유형은 적용한다. 종류
+#      조건까지 걸면 하나를 고르는 순간 다른 종류가 모두 0 이 되어 갈아탈 칩이 사라진다.
+#    · 갈래 · 자료 유형은 여럿을 AND 로 고르는 축이라 누르면 조건이 **더해진다** → 지금 조건을 모두 적용한 위에
+#      자기 값을 더해 센다.
+#    예: 갈래 「한식」을 고른 채 종류 칩 「인물」에 찍히는 수는 「한식」인 인물 수다(갈래를 무시한 인물 수가 아니다).
+# 범위 CTE 와 축이 읽는 곳:
+#    ``ascoped`` = ``base`` ∩ 갈래 — 종류 칩의 모수. ``scoped`` 에 갈래와 종류를 한꺼번에 걸면 종류 칩이 읽을
+#        「종류만 뺀 범위」가 없어지므로, 갈래까지만 적용한 집합을 따로 둔다.
+#    ``scoped`` = ``ascoped`` ∩ 종류 — 자료 유형을 고르지 않았을 때 갈래 · 자료 유형 칩의 모수.
+#    ``have`` = 개체별 자료 유형. 자료 유형을 골랐으면 ``ascoped`` 에서 모은다 — 종류 칩도 「고른 유형을 모두 가진
+#        개체」에서 세야 하는데, ``scoped`` 에서 모으면 고른 종류 밖의 개체가 빠져 다른 종류 칩이 모두 0 이 된다.
+#        고르지 않았으면 ``scoped`` 에서 모은다.
+#    ``pick`` = ``have`` 중 고른 유형을 모두 가진 개체(자료 유형을 골랐을 때만). 종류 칩 · 갈래 칩이 여기서 센다.
+#        종류 열을 함께 실어 두고, 갈래 칩 · 자료 유형 칩의 종류 조건은 그 열로 건다(``{hit_type}`` · ``{mod_type}``).
+#    자료 유형을 골랐으면 ``scoped`` 는 아무도 읽지 않는다 — PostgreSQL 은 읽지 않는 CTE 를 계산하지 않는다.
+# ⚠️ ``pick`` 을 ``scoped`` 와 맞대지 않는다(``pick`` ∩ ``scoped`` 로 종류를 거르지 않는다) — CTE 끼리 맞대는 반조인은
+#    플래너가 양쪽 행 수를 모두 작게 짐작해 중첩 반복을 고르고, 실제 개체가 많으면 개체 수의 제곱으로 느려진다.
+#    ``pick`` 에 종류 열을 실어 둔 이유다.
+# ⚠️ ``elab`` = 노출 개체(``base``)의 갈래 라벨 행. 갈래 칩(``hit``)은 라벨 표를 직접 읽지 않고 여기서 센다. 지우고
+#    ``hit`` 가 라벨 표를 직접 읽게 하면, 범위(``pick`` · 종류를 건 ``scoped``)를 아주 작게 짐작할 때 플래너가
+#    개체마다 라벨 인덱스를 조회하는 경로를 골라 실제 개체가 많으면 갈래 칩이 크게 느려진다. ``elab`` 을 먼저
+#    만들어 두면 ``hit`` 는 두 집합을 해시로 묶는다(인덱스 경로가 끊긴다).
+# 🔴 조건이 없으면 그 조각을 비운다(``%(x)s IS NULL OR …`` 로 한 문장에 담지 않는다) — 같은 연결에서 반복 실행하면
+#    재사용 계획(값을 모른 채 세운 계획)이 그 조건을 걷어내지 못해 크게 느려진다. 조건별로 채우는 자리:
+#    종류 → ``{type_where}``(``scoped``), 자료 유형도 있으면 ``{hit_type}`` · ``{mod_type}`` 까지.
+#    갈래 → ``{amatch}``(``base`` 뒤 · ``ascoped`` 앞) · ``{area_where}``(``ascoped``).
+#    자료 유형 → ``{pick}`` 을 넣고 ``{have_src}`` 를 ``ascoped`` 로, ``{type_src}`` · ``{hit_src}`` 를 ``pick`` 으로,
+#    ``{picked_expr}`` 를 「고른 유형 ∪ 칩 유형」으로.
 # 🔴 ``MATERIALIZED`` — PostgreSQL(12 이상)은 두 곳 이상에서 참조하는 CTE 를 기본으로 한 번만 계산하고, 한 곳에서만
-#    참조하는 CTE 는 그 자리에 펼친다. ``base`` · ``scoped`` 는 앞의 경우라 명시로 고정해 둔 것이고, 한 곳에서만
-#    참조하는 ``have`` · ``amatch`` 는 지우면 펼쳐진다 — ``have`` 는 개체별 자료 유형 판정이 칩마다 반복되고,
-#    ``amatch`` 는 플래너가 명단 크기를 잘못 짐작해 갈래 칩이 느려질 수 있다.
-# 순서는 축마다 ``ord`` 로 받는다. 종류 · 갈래는 기존 함수의 ``ORDER BY`` 와 같은 키로 매긴 ``row_number()`` 다 —
-#    DB 문자열 비교 규칙으로 매겨야 기존 순서와 같다(파이썬 정렬과 갈릴 수 있다). 자료 유형은 ``modality_codes``
-#    순서(``WITH ORDINALITY``).
-# 설계 배경: `specs/107-entity-facets`
+#    참조하는 CTE 는 그 자리에 펼친다. 참조 수가 조건마다 달라 중간 집합을 모두 명시로 고정한다. 한 곳에서만
+#    참조하는 것을 지우면 펼쳐진다 — ``elab`` 은 위 인덱스 경로로 돌아가고, ``have``(자료 유형을 고르지 않았을 때)는
+#    개체별 자료 유형 판정이 칩마다 반복되고, ``amatch`` 는 플래너가 명단 크기를 잘못 짐작해 갈래 칩이 느려질 수 있다.
+# 순서는 축마다 ``ord`` 로 받는다. 종류 · 갈래는 DB 문자열 비교 규칙으로 매긴 ``row_number()`` 다(파이썬 정렬과
+#    갈릴 수 있다 — 종류는 이름순, 갈래는 개체 수 내림차순 → 스킬 코드 → 라벨 순서). 자료 유형은
+#    ``modality_codes`` 순서(``WITH ORDINALITY``).
+# 설계 배경: `specs/108-entity-facets-own-axis` · `specs/107-entity-facets`
 _ENTITY_FACETS_SQL = """
 WITH base AS MATERIALIZED (
     SELECT n.node_id, n.entity_type, n.entity_uid
@@ -691,36 +719,44 @@ WITH base AS MATERIALIZED (
      GROUP BY n.node_id, n.entity_type, n.entity_uid
     HAVING COUNT(DISTINCT ge.src_node) >= %(minsize)s
 ),
-{amatch}scoped AS MATERIALIZED (
+{amatch}ascoped AS MATERIALIZED (
     SELECT b.* FROM base b
-     WHERE TRUE {scope_where}
+     WHERE TRUE {area_where}
+),
+scoped AS MATERIALIZED (
+    SELECT s.* FROM ascoped s
+     WHERE TRUE {type_where}
 ),
 have AS MATERIALIZED (
-    SELECT s.node_id, ARRAY_AGG(DISTINCT a.modality::text) AS mods
-      FROM scoped s
+    SELECT s.node_id, s.entity_type, ARRAY_AGG(DISTINCT a.modality::text) AS mods
+      FROM {have_src} s
       JOIN graph_edge ge    ON ge.dst_node = s.node_id
       JOIN relation_kind rk ON rk.relation_kind_id = ge.relation_kind_id
       JOIN node sn          ON sn.node_id = ge.src_node
       JOIN asset a          ON a.asset_id = sn.asset_id
      WHERE rk.kind_code = %(kind)s AND ge.status = ANY(%(statuses)s)
        AND a.modality = ANY(%(have_codes)s)
-     GROUP BY s.node_id
+     GROUP BY s.node_id, s.entity_type
 ),
-lab AS (
+{pick}lab AS (
     SELECT s.skill_code, s.name AS skill, (lb->>'code') AS code, (lb->>'name') AS name, ord
       FROM mm_skill s, LATERAL jsonb_array_elements(s.labels) WITH ORDINALITY AS t(lb, ord)
      WHERE s.status = 'active' AND s.skill_code <> ALL(%(reserved)s)
 ),
-hit AS (
-    SELECT el.skill_code, el.label_code, COUNT(*) AS n
+elab AS MATERIALIZED (
+    SELECT el.skill_code, el.label_code, b.node_id
       FROM entity_mm_skill_label el
-     WHERE EXISTS (SELECT 1 FROM scoped x
-                    WHERE x.entity_type = el.entity_type AND x.entity_uid = el.entity_uid)
+      JOIN base b ON b.entity_type = el.entity_type AND b.entity_uid = el.entity_uid
+),
+hit AS (
+    SELECT e.skill_code, e.label_code, COUNT(*) AS n
+      FROM elab e
+     WHERE e.node_id IN (SELECT node_id FROM {hit_src}{hit_type})
      GROUP BY 1, 2
 )
-SELECT 'type' AS axis, b.entity_type AS name, NULL::text AS skill, NULL::text AS skill_code,
-       COUNT(*) AS n, row_number() OVER (ORDER BY b.entity_type) AS ord
-  FROM base b GROUP BY b.entity_type
+SELECT 'type' AS axis, t.entity_type AS name, NULL::text AS skill, NULL::text AS skill_code,
+       COUNT(*) AS n, row_number() OVER (ORDER BY t.entity_type) AS ord
+  FROM {type_src} t GROUP BY t.entity_type
 UNION ALL
 SELECT 'area', lab.name, lab.skill, lab.skill_code, COALESCE(hit.n, 0),
        row_number() OVER (ORDER BY COALESCE(hit.n, 0) DESC, lab.skill_code, lab.ord)
@@ -728,14 +764,14 @@ SELECT 'area', lab.name, lab.skill, lab.skill_code, COALESCE(hit.n, 0),
  WHERE lab.code <> 'unassigned'
 UNION ALL
 SELECT 'modality', c.code, NULL, NULL,
-       (SELECT COUNT(*) FROM have h WHERE h.mods @> {picked_expr}), c.ord
+       (SELECT COUNT(*) FROM have h WHERE h.mods @> {picked_expr}{mod_type}), c.ord
   FROM unnest(%(codes)s::text[]) WITH ORDINALITY AS c(code, ord)
 """
 
 # 갈래 명단(``{amatch}`` 자리) — 고른 갈래 이름을 모두 가진 노출 개체의 ``node_id``(``_ENTITY_AREA_FILTER_SQL`` 과
 #    같은 집합: 가진 고른 이름의 고유 수 = ``area_n``). ``node_id`` 로 묶는다 — (종류, 표기, 이름) 짝으로 묶으면 한글
 #    열 정렬 비용이 붙는다. 개체마다 ``node_id`` 는 하나(``uq_node_entity``)라 결과는 같다.
-# 끝의 쉼표는 뒤따르는 ``scoped`` CTE 와 잇는 구분자다(조각이 빠지면 쉼표도 함께 빠진다).
+# 끝의 쉼표는 뒤따르는 ``ascoped`` CTE 와 잇는 구분자다(조각이 빠지면 쉼표도 함께 빠진다).
 _ENTITY_FACETS_AREA_MATCH_SQL = """\
 amatch AS MATERIALIZED (
     SELECT b.node_id
@@ -748,6 +784,16 @@ amatch AS MATERIALIZED (
        AND (elb->>'name') = ANY(%(areas)s)
      GROUP BY b.node_id
     HAVING COUNT(DISTINCT (elb->>'name')) = %(area_n)s
+),
+"""
+
+# 자료 유형을 고른 개체(``{pick}`` 자리 · 자료 유형을 골랐을 때만) — ``have`` 중 고른 유형을 **모두** 가진 개체.
+#    종류 열을 함께 싣는다: 갈래 칩 · 자료 유형 칩은 이 열로 종류를 거르고, 종류 칩은 이 열로 묶어 센다
+#    (``scoped`` 와 맞대지 않는 이유는 ``_ENTITY_FACETS_SQL`` 위 주석).
+# 끝의 쉼표는 뒤따르는 ``lab`` CTE 와 잇는 구분자다(조각이 빠지면 쉼표도 함께 빠진다).
+_ENTITY_FACETS_PICK_SQL = """\
+pick AS MATERIALIZED (
+    SELECT h.node_id, h.entity_type FROM have h WHERE h.mods @> %(picked)s::text[]
 ),
 """
 
@@ -1107,17 +1153,22 @@ def count_entity_facets(
 ) -> dict[str, Any]:
     """개체 칩 세 축(종류 · 갈래 · 자료 유형)의 노출 개체 수를 한 질의로 센다(읽기 전용).
 
-    노출 개체 집합을 한 번 만들어 세 축이 나눠 쓴다. 축마다 기존 호출과 **같은 수**다 — 종류는
-    ``count_entities_by_type``, 갈래는 ``count_entities_by_area``(순서 포함), 자료 유형 ``m`` 은
-    「고른 유형 ∪ {m}」을 모두 가진 개체만 허용목록으로 준 ``count_entities``.
+    노출 개체 집합을 한 번 만들어 세 축이 나눠 쓴다. 칩 숫자 = **그 칩을 눌렀을 때 나올 결과 수**다 — 종류는
+    종류만 그 값으로 바꾼 결과(갈래 · 자료 유형 조건은 그대로), 갈래 · 자료 유형은 지금 조건에 그 값을 더한
+    결과. 예: 갈래 「한식」을 고른 채 종류 칩 「인물」에 찍히는 수는 「한식」인 인물 수이고, 자료 유형 「이미지」를
+    고른 채 갈래 칩 「역사」에 찍히는 수는 이미지 자료가 있으면서 「역사」인 개체 수다. 눌렀을 때 나올 결과란 그
+    조건으로 부른 ``count_entities``(자료 유형은 「고른 유형 ∪ 칩 유형」을 모두 가진 개체만 허용목록으로 준 것)다.
+    옛 함수와는 수가 다를 수 있다 — ``count_entities_by_type`` 은 종류 칩을 조건 없이 세어 갈래나 자료 유형을
+    골랐을 때, ``count_entities_by_area`` 는 갈래 칩을 자료 유형 없이 세어 자료 유형을 골랐을 때 달라진다.
 
     Args:
-        entity_type: 고른 종류. ``None`` 이면 종류 조건 없음. 갈래 · 자료 유형 칩에만 걸린다
-            (종류 칩은 갈아타는 축이라 늘 조건 없이 센다).
-        area_names: 이미 고른 갈래들(AND). ``None`` · 빈 목록 · 공백 이름뿐이면 갈래 조건 없음.
-            갈래 · 자료 유형 칩에 걸린다.
-        modalities: 이미 고른 자료 유형들. ``None`` · 빈 목록이면 없음. 자료 유형 칩에만 걸리고
-            갈래 칩에는 걸지 않는다(기존 응답과 같게). ``modality_codes`` 밖의 유형이어도 조건으로 건다.
+        entity_type: 고른 종류. ``None`` 이면 종류 조건 없음(빈 문자열은 조건이다). 갈래 · 자료 유형 칩에 걸리고
+            종류 칩에는 걸지 않는다 — 종류 칩은 종류를 바꿨을 때의 수라 자기 조건만 빼고 센다(걸면 하나를
+            고르는 순간 다른 종류가 모두 0 이 되어 갈아탈 칩이 사라진다).
+        area_names: 이미 고른 갈래들(AND). ``None`` · 빈 목록 · 공백 이름뿐이면 갈래 조건 없음. 세 축 모두에
+            걸린다(갈래 칩은 그 위에 자기 갈래를 더해 센다).
+        modalities: 이미 고른 자료 유형들(AND). ``None`` · 빈 목록이면 없음. 세 축 모두에 걸린다(자료 유형 칩은
+            그 위에 자기 유형을 더해 센다). ``modality_codes`` 밖의 유형이어도 조건으로 건다.
         min_bundle_size: 노출 임계(구성 자산 수 하한). 목록과 같은 값을 준다.
         modality_codes: 칩으로 셀 자료 유형 코드들 — 화면 정책이라 호출자가 준다. 반환
             ``modalities`` 의 키와 순서가 된다.
@@ -1138,29 +1189,50 @@ def count_entity_facets(
         "reserved": sorted(NON_CLASSIFY_SKILL_CODES),
         "codes": list(modality_codes),
     }
-    scope_where = ""
+    # 자리마다 무엇이 들어가는지는 ``_ENTITY_FACETS_SQL`` 위 주석(조건별로 채우는 자리)에 있다.
+    type_where = ""
     # ``None`` 만 「조건 없음」이다 — 빈 문자열도 조건으로 건다(기존 함수의 ``IS NULL OR`` 와 같은 판정).
     if entity_type is not None:
-        scope_where += " AND b.entity_type = %(etype)s"
+        type_where = " AND s.entity_type = %(etype)s"
         params["etype"] = entity_type
-    amatch = ""
+    area_where = amatch = ""
     # 빈 목록 · 공백 이름 정규화는 기존 함수와 같은 ``_area_params`` 에 맡긴다(판정이 갈리면 칩 수가 갈린다).
     area = _area_params(area_names)
     if area["areas"] is not None:
-        scope_where += " AND b.node_id IN (SELECT node_id FROM amatch)"
+        area_where = " AND b.node_id IN (SELECT node_id FROM amatch)"
         amatch = _ENTITY_FACETS_AREA_MATCH_SQL
         params.update(area)
     # 정렬 · 고유로 묶는다 — 같은 고름이면 같은 바인딩이 된다(순서 · 중복이 달라도 같은 질의).
     picked = sorted({str(m) for m in (modalities or [])})
     if picked:
-        picked_expr = "(%(picked)s::text[] || c.code)"
         params["picked"] = picked
+        # 종류 · 갈래 칩은 ``pick``(고른 유형을 모두 가진 개체)에서 센다. 종류 조건은 ``pick`` · ``have`` 가 실은 종류
+        # 열로 갈래 칩 · 자료 유형 칩에만 건다 — 종류 칩은 자기 조건을 빼고, ``pick`` 은 ``scoped`` 와 맞대지 않는다.
+        type_filter = entity_type is not None
+        slots = {
+            "have_src": "ascoped",
+            "pick": _ENTITY_FACETS_PICK_SQL,
+            "type_src": "pick",
+            "hit_src": "pick",
+            "hit_type": " WHERE entity_type = %(etype)s" if type_filter else "",
+            "picked_expr": "(%(picked)s::text[] || c.code)",
+            "mod_type": " AND h.entity_type = %(etype)s" if type_filter else "",
+        }
     else:
-        picked_expr = "ARRAY[c.code]"
+        # 종류 칩은 ``ascoped``(갈래만 적용), 갈래 · 자료 유형 칩은 ``scoped``(종류까지 적용)에서 센다.
+        slots = {
+            "have_src": "scoped",
+            "pick": "",
+            "type_src": "ascoped",
+            "hit_src": "scoped",
+            "hit_type": "",
+            "picked_expr": "ARRAY[c.code]",
+            "mod_type": "",
+        }
     # ``have`` 가 모을 유형 = 칩 유형 ∪ 고른 유형. 고른 유형이 칩 목록 밖이어도 모아야 「고른 유형을 모두
     # 가진 개체」 판정이 기존 허용목록과 같다(칩 유형만 모으면 그 칩들이 모두 0 이 된다).
     params["have_codes"] = sorted({str(c) for c in modality_codes} | set(picked))
-    sql = _ENTITY_FACETS_SQL.format(amatch=amatch, scope_where=scope_where, picked_expr=picked_expr)
+    sql = _ENTITY_FACETS_SQL.format(amatch=amatch, area_where=area_where, type_where=type_where, **slots)
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(sql, params)
         rows = cur.fetchall()
