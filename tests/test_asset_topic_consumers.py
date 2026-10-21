@@ -26,16 +26,18 @@ def _mock_conn(fetchall_val):
 
 
 class TestListTopics(unittest.TestCase):
-    """``list_topics`` — (topic_ko, subtopic_ko) 별 distinct 자산 수 + 주제 전체 수(정본 조인)."""
+    """``list_topics`` — (topic_ko, subtopic_ko) 별 자산 수 + 주제 전체 수. DB 가 세고 파이썬은 정규화 · 정렬만 한다.
 
-    def test_groups_by_pair_with_asset_and_topic_counts(self) -> None:
+    가짜 행은 DB 집계 결과 모양(``topic_ko`` · ``subtopic_ko`` · ``asset_count`` · ``topic_asset_count``)이다.
+    """
+
+    def test_db_counts_are_copied_and_sorted(self) -> None:
         from src.topic.asset_topic_query import list_topics
 
-        rows = [
-            {"topic_ko": "요리", "subtopic_ko": "제빵", "asset_id": "a1"},
-            {"topic_ko": "요리", "subtopic_ko": "제빵", "asset_id": "a2"},
-            {"topic_ko": "요리", "subtopic_ko": None, "asset_id": "a3"},
-            {"topic_ko": "스포츠", "subtopic_ko": None, "asset_id": "a4"},
+        rows = [  # DB 가 준 순서는 정렬과 무관하다
+            {"topic_ko": "요리", "subtopic_ko": "제빵", "asset_count": 2, "topic_asset_count": 3},
+            {"topic_ko": "스포츠", "subtopic_ko": None, "asset_count": 1, "topic_asset_count": 1},
+            {"topic_ko": "요리", "subtopic_ko": None, "asset_count": 1, "topic_asset_count": 3},
         ]
         conn, _ = _mock_conn(rows)
         out = list_topics(conn)
@@ -52,18 +54,53 @@ class TestListTopics(unittest.TestCase):
             ],
         )
 
+    def test_counts_are_plain_int_even_when_db_gives_decimal(self) -> None:
+        """``SUM(COUNT(*))`` 는 DB 에서 numeric(파이썬 ``Decimal``)이다 — 응답 숫자 모양이 바뀌지 않게 ``int`` 로 준다."""
+        from decimal import Decimal
+
+        from src.topic.asset_topic_query import list_topics
+
+        rows = [{"topic_ko": "음악", "subtopic_ko": "가요", "asset_count": 5, "topic_asset_count": Decimal("7")},
+                {"topic_ko": "음악", "subtopic_ko": None, "asset_count": Decimal("2"), "topic_asset_count": Decimal("7")}]
+        conn, _ = _mock_conn(rows)
+        out = list_topics(conn)
+        for o in out:
+            self.assertIs(type(o["asset_count"]), int)
+            self.assertIs(type(o["topic_asset_count"]), int)
+        self.assertEqual([(o["asset_count"], o["topic_asset_count"]) for o in out], [(2, 7), (5, 7)])
+
     def test_empty_topic_ko_skipped_and_subtopic_normalized(self) -> None:
         from src.topic.asset_topic_query import list_topics
 
         rows = [
-            {"topic_ko": "", "subtopic_ko": "무시", "asset_id": "x"},   # 빈 topic → 제외
-            {"topic_ko": "음악", "subtopic_ko": "", "asset_id": "m1"},  # "" → None 정규화
+            {"topic_ko": "", "subtopic_ko": "무시", "asset_count": 1, "topic_asset_count": 1},   # 빈 topic → 제외(방어)
+            {"topic_ko": None, "subtopic_ko": "무시", "asset_count": 1, "topic_asset_count": 1},  # NULL topic → 제외(방어)
+            {"topic_ko": "음악", "subtopic_ko": "", "asset_count": 1, "topic_asset_count": 1},    # "" → None 정규화
         ]
         conn, _ = _mock_conn(rows)
         out = list_topics(conn)
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0]["topic_ko"], "음악")
         self.assertIsNone(out[0]["subtopic_ko"])
+
+    def test_sql_counts_in_db_without_distinct_sort(self) -> None:
+        """DB 가 (주제, 하위주제)별로 센다 — 행 전부를 가져오지 않는다. ``asset_topic`` 은 자산당 1행이라 ``COUNT(*)``
+        가 곧 distinct 자산 수이고, ``COUNT(DISTINCT …)`` 는 한글 주제 열을 정렬해 오히려 느리다."""
+        from src.topic.asset_topic_query import list_topics
+
+        conn, cur = _mock_conn([])
+        list_topics(conn)
+        self.assertEqual(cur.execute.call_count, 1)
+        sql = " ".join(cur.execute.call_args[0][0].split()).lower()
+        self.assertIn("count(*) as asset_count", sql)
+        self.assertIn("sum(count(*)) over (partition by at.topic_ko) as topic_asset_count", sql)
+        self.assertIn("group by at.topic_ko, nullif(at.subtopic_ko, '')", sql)
+        self.assertIn("nullif(at.subtopic_ko, '') as subtopic_ko", sql)
+        self.assertIn("join asset a on a.asset_id = at.asset_id", sql)   # 등록 자산과의 조인 유지
+        self.assertIn("coalesce(at.topic_ko, '') <> ''", sql)            # 빈 주제는 DB 에서 뺀다
+        self.assertNotIn("count(distinct", sql)
+        select_list = sql.split(" from ", 1)[0]
+        self.assertNotIn("asset_id", select_list)  # 자산 id 행을 가져오지 않는다(수만 받는다)
 
     def test_sql_no_domain_exclusion(self) -> None:
         # 2026-07-23: 도메인 제외 전면 제거 — 주제 조회 SQL 이 medical 을 배제하지 않는다.
@@ -85,9 +122,9 @@ class TestListTopics(unittest.TestCase):
         from src.topic.asset_topic_query import list_topics
 
         rows = [
-            {"topic_ko": "여행", "subtopic_ko": "국내", "asset_id": "t1"},
-            {"topic_ko": "게임", "subtopic_ko": None, "asset_id": "g1"},
-            {"topic_ko": "게임", "subtopic_ko": "RPG", "asset_id": "g2"},
+            {"topic_ko": "여행", "subtopic_ko": "국내", "asset_count": 1, "topic_asset_count": 1},
+            {"topic_ko": "게임", "subtopic_ko": "RPG", "asset_count": 1, "topic_asset_count": 2},
+            {"topic_ko": "게임", "subtopic_ko": None, "asset_count": 1, "topic_asset_count": 2},
         ]
         conn, _ = _mock_conn(rows)
         out = list_topics(conn)
@@ -96,20 +133,20 @@ class TestListTopics(unittest.TestCase):
             [(o["topic_ko"], o["subtopic_ko"]) for o in out],
             [("게임", None), ("게임", "RPG"), ("여행", "국내")],
         )
-        # 재실행 동일(결정적·헌법 3조).
-        conn2, _ = _mock_conn(rows)
+        # 재실행 동일(결정적·헌법 3조) — DB 가 다른 순서로 줘도 같은 응답.
+        conn2, _ = _mock_conn(list(reversed(rows)))
         self.assertEqual(list_topics(conn2), out)
 
     def test_topic_asset_count_uniform_across_subtopics(self) -> None:
         from src.topic.asset_topic_query import list_topics
 
         rows = [
-            {"topic_ko": "요리", "subtopic_ko": "제빵", "asset_id": "a1"},
-            {"topic_ko": "요리", "subtopic_ko": "한식", "asset_id": "a2"},
+            {"topic_ko": "요리", "subtopic_ko": "제빵", "asset_count": 1, "topic_asset_count": 2},
+            {"topic_ko": "요리", "subtopic_ko": "한식", "asset_count": 1, "topic_asset_count": 2},
         ]
         conn, _ = _mock_conn(rows)
         out = list_topics(conn)
-        # 같은 topic 의 모든 행은 동일한 topic_asset_count(주제 전체 distinct) — 하위주제 합산 아님.
+        # 같은 topic 의 모든 행은 동일한 topic_asset_count(주제 전체 distinct) — DB 값을 그대로 옮긴다.
         self.assertEqual({o["topic_asset_count"] for o in out}, {2})
         self.assertEqual({o["subtopic_ko"] for o in out}, {"제빵", "한식"})
 

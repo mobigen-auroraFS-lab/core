@@ -207,12 +207,20 @@ def find_same_topic_groups(
 # 정본은 자산당 1행(asset_id PK)이라 구 이웃-엣지 투영의 "양끝 자산 중복카운트" 문제가 원천 소거된다.
 # 도메인 제외 없음(2026-07-23 전면 제거) — 의료 특수 트랙 미운용. 후보 자산은 도메인 무관 균일 취급.
 
-# (topic_ko, subtopic_ko) 별 자산 집계용 — 빈 topic_ko 는 조회 단계에서 배제.
+# (topic_ko, subtopic_ko) 별 자산 수와 주제 전체 자산 수를 **DB 에서** 센다 — 자산 행 전부를 파이썬으로 가져와
+#    세면 자산 수만큼 행을 옮기느라 느리다. 빈 topic_ko 는 조회 단계에서 빼고, 빈 subtopic_ko 와 NULL 은 한 묶음이다.
+# 🔴 ``COUNT(*)`` 가 곧 distinct 자산 수인 것은 ``asset_topic`` 이 **자산당 1행**(``asset_id`` 기본키)이기 때문이다.
+#    같은 이유로 주제 전체 수는 하위주제 수의 합(창 함수)과 같다. 이 전제가 바뀌면(자산이 여러 주제에 걸리면) 숫자가
+#    부푼다 — 실 DB 대조 테스트가 날 행을 센 값과 맞춰 본다.
+# ⚠️ ``COUNT(DISTINCT asset_id)`` 로 세지 않는다 — 중복 제거가 한글 주제 열 정렬을 불러 오히려 느려진다.
+# 설계 배경: `specs/109-topics-list-speed`
 _LIST_TOPICS_SQL = """
-SELECT at.topic_ko, at.subtopic_ko, at.asset_id
-FROM asset_topic at
-JOIN asset a ON a.asset_id = at.asset_id
-WHERE COALESCE(at.topic_ko, '') <> ''
+SELECT at.topic_ko, NULLIF(at.subtopic_ko, '') AS subtopic_ko, COUNT(*) AS asset_count,
+       SUM(COUNT(*)) OVER (PARTITION BY at.topic_ko) AS topic_asset_count
+  FROM asset_topic at
+  JOIN asset a ON a.asset_id = at.asset_id
+ WHERE COALESCE(at.topic_ko, '') <> ''
+ GROUP BY at.topic_ko, NULLIF(at.subtopic_ko, '')
 """
 
 # 주제별 자산 페이징용 — subtopic 필터는 호출 시 append.
@@ -240,23 +248,15 @@ def list_topics(conn) -> list[dict]:
         cur.execute(_LIST_TOPICS_SQL)
         rows = cur.fetchall()
 
-    # (topic_ko, subtopic_ko) → distinct 자산 집합. topic_assets: topic_ko → 주제 전체 distinct 자산.
-    groups: dict[tuple[str, Any], set[str]] = {}
-    topic_assets: dict[str, set[str]] = {}
-    for r in rows:
-        topic_ko = r["topic_ko"]
-        if not topic_ko:  # COALESCE 로 조회 단계에서 걸러지지만 방어적 스킵.
-            continue
-        sub = r["subtopic_ko"] or None  # "" 또는 None → None 정규화
-        aid = str(r["asset_id"])
-        groups.setdefault((topic_ko, sub), set()).add(aid)
-        topic_assets.setdefault(topic_ko, set()).add(aid)
-
+    # 수는 DB 가 센다. 여기서는 정규화와 정렬만 한다. 합계(창 함수)는 DB 에서 numeric 이라 ``int`` 로 바꾼다 —
+    # 그대로 두면 응답의 숫자 모양이 달라진다.
     out = [
-        {"topic_ko": ko, "subtopic_ko": sub, "asset_count": len(assets),
-         "topic_asset_count": len(topic_assets[ko])}
-        for (ko, sub), assets in groups.items()
+        {"topic_ko": r["topic_ko"], "subtopic_ko": r["subtopic_ko"] or None,  # "" 또는 None → None
+         "asset_count": int(r["asset_count"]), "topic_asset_count": int(r["topic_asset_count"])}
+        for r in rows
+        if r["topic_ko"]  # 조회 단계에서 걸러지지만 방어적으로 한 번 더
     ]
+    # 정렬은 파이썬으로 한다 — DB 문자열 비교 규칙으로 정렬하면 지금 응답 순서와 갈릴 수 있다.
     out.sort(key=lambda o: (o["topic_ko"], o["subtopic_ko"] or ""))
     return out
 
