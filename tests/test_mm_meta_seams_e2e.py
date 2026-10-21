@@ -4,7 +4,8 @@ RUN_DB_E2E 게이트(실 PostgreSQL 필요 · LLM 0 · 쓰기 0). 데모(`routes
 `demo/mm-meta-reference`)의 SQL 을 **글자 그대로** 여기 옮겨 두고, 같은 파라미터로 코어 seam 과 비교한다 —
 정식화의 조건 "응답 JSON == 데모 응답"(spec 095 SC-01)을 코어 층에서 먼저 증명한다. 데모 SQL 사본은 이
 테스트에만 존재한다(코어 코드에는 사본을 두지 않는다).
-개체 칩 한 질의(``count_entity_facets``)가 기존 세 호출과 같은 결과를 내는지도 여기서 대조한다.
+개체 칩 한 질의(``count_entity_facets``)의 칩 숫자가 그 칩을 눌렀을 때 목록이 세는 결과 수와 같은지도 여기서
+대조한다.
 """
 
 from __future__ import annotations
@@ -230,6 +231,10 @@ SELECT n.entity_type, n.entity_uid, ARRAY_AGG(DISTINCT a.modality) AS modalities
 # 화면이 칩으로 세는 자료 유형(백엔드 화면 정책과 같은 값).
 _FACET_MODALITY_CODES = ["text", "image", "video", "audio"]
 
+# 종류 칩의 기대 범위 · 순서 — 함수가 줄 세우는 열(``node.entity_type``)을 DB 문자열 비교 규칙으로 줄 세운다(파이썬
+# 정렬과 갈릴 수 있어 DB 에 맡긴다). 노출 개체가 없는 종류도 담긴다 — 눌렀을 때 0 이면 칩에 키가 없어야 한다.
+_ENTITY_TYPES_SQL = "SELECT DISTINCT entity_type FROM node WHERE node_kind = 'entity' ORDER BY 1"
+
 
 def _demo_shape(r) -> dict:
     """데모 `list_mm_meta._query` 의 파이썬 정형(원문 그대로)."""
@@ -368,12 +373,19 @@ class TestMmMetaSeamsParityWithDemo(unittest.TestCase):
 
 
 @unittest.skipUnless(_RUN_DB_E2E, "RUN_DB_E2E 미설정 — 실 DB e2e skip")
-class TestEntityFacetsParityWithSeparateCalls(unittest.TestCase):
-    """``count_entity_facets`` == 기존 세 호출(종류별 · 갈래별 · 자료 유형 허용목록을 준 개수) — 실 dev DB.
+class TestEntityFacetsMatchClickResults(unittest.TestCase):
+    """``count_entity_facets`` 의 칩 숫자 == 그 칩을 눌렀을 때 목록이 세는 결과 수(``count_entities``) — 실 dev DB.
 
-    자료 유형 칩 ``m`` 의 기존 값은 「고른 유형 ∪ {m}」을 모두 가진 개체를 허용목록으로 준 ``count_entities`` 다.
-    설계 배경: `specs/107-entity-facets`
+    클릭 규칙은 화면과 같다. 종류 칩 ``t`` 는 종류만 ``t`` 로 **바꾸고** 갈래 · 고른 자료 유형은 그대로 둔 결과,
+    갈래 칩 ``a`` 는 지금 갈래에 ``a`` 를 **더한** 결과, 자료 유형 칩 ``m`` 은 「고른 유형 ∪ {m}」을 모두 가진 개체만
+    허용목록으로 준 결과다. 예: 갈래 「한식」을 고른 채 종류 칩 「인물」의 숫자 = 「한식」인 인물 수. 눌렀을 때 0 인
+    종류는 칩에 키가 없어야 한다(함수 계약).
+    바뀌면 안 되는 부분도 함께 본다 — 갈래 · 자료 유형을 고르지 않았으면 종류 칩 == ``count_entities_by_type``,
+    자료 유형을 고르지 않았으면 갈래 칩 == ``count_entities_by_area``(순서까지).
+    설계 배경: `specs/108-entity-facets-own-axis`
     """
+
+    maxDiff = None  # 어긋나면 어느 칩이 몇으로 갈렸는지 전부 보여야 원인을 가른다
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -393,7 +405,7 @@ class TestEntityFacetsParityWithSeparateCalls(unittest.TestCase):
     def tearDownClass(cls) -> None:
         cls.db.__exit__(None, None, None)
 
-    def test_entity_facets_equal_separate_calls(self) -> None:
+    def test_chip_counts_equal_click_results(self) -> None:
         from src.relations.graph_query import (
             count_entities,
             count_entities_by_area,
@@ -404,9 +416,17 @@ class TestEntityFacetsParityWithSeparateCalls(unittest.TestCase):
         with self.db.transaction() as conn:
             mods_of = {(str(t), str(u)): frozenset(str(m) for m in (ms or []) if m)
                        for t, u, ms in conn.execute(_ENTITY_MODALITIES_SQL).fetchall()}
+            all_types = [str(r[0]) for r in conn.execute(_ENTITY_TYPES_SQL).fetchall()]
 
-            def allow(want: set[str]) -> set[tuple[str, str]]:
+            def allow(want: set[str]) -> set[tuple[str, str]] | None:
+                # 자료 유형을 하나도 고르지 않았으면 허용목록을 주지 않는다 — 목록 화면과 같다(빈 허용목록은 0건이다).
+                if not want:
+                    return None
                 return {key for key, have in mods_of.items() if want <= have}
+
+            def click(e: str | None, a: list[str] | None, want: set[str], *, ms: int) -> int:
+                # 그 조건으로 목록을 띄웠을 때의 총계(화면 「N건」) — 칩 숫자가 맞춰야 할 정답.
+                return count_entities(conn, entity_type=e, area_names=a, min_bundle_size=ms, uid_allow=allow(want))
 
             # 조건 값은 DB 에서 고른다 — 가장 큰 종류 · 가장 큰 갈래 · 그 갈래와 함께 붙은 다음 갈래 · 가장 흔한 자료 유형.
             types = count_entities_by_type(conn, min_bundle_size=3)
@@ -419,9 +439,13 @@ class TestEntityFacetsParityWithSeparateCalls(unittest.TestCase):
                           if a["count"] > 0 and a["name"] != area1]
             self.assertTrue(with_area1, f"「{area1}」 와 함께 붙은 다른 갈래가 없다")
             area2 = with_area1[0]
-            mod1 = max(_FACET_MODALITY_CODES,
-                       key=lambda m: (count_entities(conn, min_bundle_size=3, uid_allow=allow({m})), m))
+            mod1 = max(_FACET_MODALITY_CODES, key=lambda m: (click(None, None, {m}, ms=3), m))
             others = [c for c in _FACET_MODALITY_CODES if c != mod1]
+            # 세 조건을 함께 걸 종류 — 「area1 + mod1」 안에서 가장 많은 종류(0 이면 갈래 · 자료 유형 칩이 모두 0 이라
+            # 종류 조건이 그 두 축에 걸리는지 가려내지 못한다).
+            in_both = {t: click(t, [area1], {mod1}, ms=3) for t in all_types}
+            etype3 = max(in_both, key=lambda t: (in_both[t], t))
+            self.assertGreater(in_both[etype3], 0, f"「{area1}」 + {mod1} 인 노출 개체가 0건")
 
             cases = [  # (이름, 종류, 갈래, 고른 자료 유형, 칩 자료 유형)
                 ("조건 없음", None, None, [], _FACET_MODALITY_CODES),
@@ -430,27 +454,66 @@ class TestEntityFacetsParityWithSeparateCalls(unittest.TestCase):
                 ("갈래 둘", None, [area1, area2], [], _FACET_MODALITY_CODES),
                 ("자료 유형 하나", None, None, [mod1], _FACET_MODALITY_CODES),
                 ("갈래+자료 유형", None, [area1], [mod1], _FACET_MODALITY_CODES),
+                ("종류+갈래", etype3, [area1], [], _FACET_MODALITY_CODES),
+                ("종류+자료 유형", etype3, None, [mod1], _FACET_MODALITY_CODES),
+                ("종류+갈래+자료 유형", etype3, [area1], [mod1], _FACET_MODALITY_CODES),
                 ("고른 유형이 칩 목록 밖", None, None, [mod1], others),
             ]
+            # 대조가 새 뜻을 가려내는지 — 옛 뜻(종류 칩 = 조건 없이 · 갈래 칩 = 자료 유형 없이 센 수)이 클릭 결과와
+            # 갈리는 조건 수, 조건 없이는 보이던 종류가 눌렀을 때 0 이라 키가 빠져야 하는 조건 수. 0 이면 옛 함수로
+            # 돌아가도 이 대조가 통과한다.
+            old_differs = {"types": 0, "areas": 0}
+            zero_type_cases = 0
             for minsize in (2, 3):
+                labels = count_entities_by_area(conn, min_bundle_size=minsize)  # 갈래 칩 전체(0건 포함)
                 for name, et, ar, picked, codes in cases:
                     with self.subTest(case=name, minsize=minsize):
-                        separate = {
-                            "types": count_entities_by_type(conn, min_bundle_size=minsize),
-                            "areas": count_entities_by_area(conn, entity_type=et, area_names=ar,
-                                                            min_bundle_size=minsize),
-                            "modalities": {
-                                m: count_entities(conn, entity_type=et, area_names=ar, min_bundle_size=minsize,
-                                                  uid_allow=allow({*picked, m}))
-                                for m in codes},
-                        }
+                        chosen = set(picked)
+                        clicked = {t: click(t, ar, chosen, ms=minsize) for t in all_types}  # 종류를 바꾼다
+                        want_types = {t: n for t, n in clicked.items() if n}
+                        want_areas = {lb["name"]: click(et, sorted({*(ar or []), lb["name"]}), chosen, ms=minsize)
+                                      for lb in labels}                                       # 갈래를 더한다
+                        want_mods = {m: click(et, ar, {*chosen, m}, ms=minsize) for m in codes}  # 유형을 더한다
                         facets = count_entity_facets(conn, entity_type=et, area_names=ar, modalities=picked,
                                                      min_bundle_size=minsize, modality_codes=codes)
-                        self.assertEqual(facets, separate)
-                        self.assertEqual(list(facets["types"]), list(separate["types"]))  # 종류 순서까지
+                        # 옛 뜻의 값 — 아래 단언보다 먼저 센다(단언이 실패해도 「갈리는 조건」 수는 데이터로 남게).
+                        by_type = count_entities_by_type(conn, min_bundle_size=minsize)
+                        by_area = count_entities_by_area(conn, entity_type=et, area_names=ar, min_bundle_size=minsize)
+                        old_differs["types"] += want_types != by_type
+                        old_differs["areas"] += want_areas != {a["name"]: a["count"] for a in by_area}
+                        zero_type_cases += bool(set(by_type) - set(want_types))
+
+                        # 종류 칩 — 수 · 0 인 종류의 키 없음 · DB 이름순
+                        self.assertEqual(facets["types"], want_types)
+                        self.assertEqual(list(facets["types"]), list(want_types))
+                        # 갈래 칩 — 이름이 겹치면 이름으로 누르는 클릭과 1:1 이 아니어서 대조가 성립하지 않는다
+                        got_areas = {a["name"]: a["count"] for a in facets["areas"]}
+                        self.assertEqual(len(got_areas), len(facets["areas"]), "갈래 칩 이름이 겹친다")
+                        self.assertEqual(got_areas, want_areas)
+                        self.assertEqual({(a["name"], a["skill"], a["skill_code"]) for a in facets["areas"]},
+                                         {(lb["name"], lb["skill"], lb["skill_code"]) for lb in labels})
+                        counts = [a["count"] for a in facets["areas"]]
+                        self.assertEqual(counts, sorted(counts, reverse=True))  # 건수 내림차순
+                        # 자료 유형 칩 — 수 · ``modality_codes`` 순서
+                        self.assertEqual(facets["modalities"], want_mods)
                         self.assertEqual(list(facets["modalities"]), list(codes))
-                        self.assertGreater(sum(separate["modalities"].values()), 0,
+                        self.assertTrue(want_types, "종류 칩이 모두 0 — 대조가 무의미하다(조건 값을 다시 고를 것)")
+                        self.assertGreater(sum(want_mods.values()), 0,
                                            "자료 유형 칩이 모두 0 — 대조가 무의미하다(조건 값을 다시 고를 것)")
+
+                        # 바뀌면 안 되는 부분 — 갈래 · 자료 유형이 없으면 종류 칩, 자료 유형이 없으면 갈래 칩이 옛 값 그대로
+                        if not ar and not picked:
+                            self.assertEqual(facets["types"], by_type)
+                            self.assertEqual(list(facets["types"]), list(by_type))
+                        if not picked:
+                            self.assertEqual(facets["areas"], by_area)  # 순서까지
+
+            # 아래 가드는 데이터 가드다 — 함수가 옛 뜻으로 돌아가면 위 칩 단언이 먼저 실패한다. 칩 단언이 모두 통과했는데
+            # 가드만 실패하면 회귀가 아니라 dev DB 데이터가 바뀐 것이니 조건 값을 고르는 방식을 다시 본다.
+            hint = " — 칩 단언은 통과했으므로 회귀가 아니라 데이터 문제다(조건 값을 다시 고를 것)"
+            self.assertGreater(old_differs["types"], 0, "종류 칩이 옛 뜻과 갈리는 조건이 없다" + hint)
+            self.assertGreater(old_differs["areas"], 0, "갈래 칩이 옛 뜻과 갈리는 조건이 없다" + hint)
+            self.assertGreater(zero_type_cases, 0, "눌렀을 때 0 인 종류가 생긴 조건이 없어 키 없음 계약을 못 본다" + hint)
 
 
 if __name__ == "__main__":
