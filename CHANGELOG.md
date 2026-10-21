@@ -11,6 +11,15 @@
 | **MINOR** | 공개 API **추가** — 기존 호출은 그대로 동작 |
 | **PATCH** | 공개 API 무변경 — 내부 수정·버그 수정 |
 
+## [Unreleased] — 2026-10-21 (110 글자 없는 질의는 뜻 검색을 하지 않는다)
+
+### 추가 (MINOR)
+- `domain.text_norm.has_letter_or_digit` — 글자(유니코드 문자 · 숫자)가 하나라도 있는지 가르는 규칙.
+
+### 변경 (동작 변경 — 인자 · 반환 모양은 그대로)
+- 파일 검색(`search.file_search`) — 기호 · 이모지 · 공백만 있는 질의는 뜻 갈래를 쓰지 않는다(개수 · 칩 · 순위 · 훑기 모두). 단어 · 개체 갈래는 그대로라 이름에 기호가 실제로 든 자료는 계속 찾힌다. 글자가 있는 질의는 바뀌지 않는다.
+- 개체 검색(`search.entity_search_os.match_entity_keys`) — 같은 규칙(글자 없는 질의는 `semantic_keys` 가 비고 `semantic_gate_passed=False`). 게이트 차단 로그는 경고가 아니라 정보 수준.
+
 ## [Unreleased] — 2026-10-21 (109 주제 목록을 DB 에서 센다)
 
 ### 변경 (PATCH — 공개 API · 결과 무변경)

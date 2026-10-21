@@ -131,7 +131,7 @@ from typing import Any
 
 from src.config.filename_util import display_file_name
 from src.domain.numeric import safe_float
-from src.domain.text_norm import normalize_text_key
+from src.domain.text_norm import has_letter_or_digit, normalize_text_key
 from src.search.cursor import decode_cursor, encode_cursor
 from src.search.query_builder import build_word_should
 from src.search.search_filters import SearchFilters, filters_to_opensearch_bool
@@ -324,6 +324,22 @@ def build_semantic_body(
     }
 
 
+def _semantic_branch_applies(query: str | None) -> bool:
+    """이 질의에 뜻 갈래를 쓸지 — 글자(문자 · 숫자)가 하나라도 있어야 쓴다.
+
+    🔴 집합 절(``_scope_clause``)과 뜻 id 를 모으는 쪽(``search_files`` · ``browse_files``)이 **이 함수 하나**로
+    판정한다. 한쪽만 바뀌면 칩과 클릭 결과가 갈린다. 기호 · 이모지의 임베딩은 뜻을 담지 못해 무관한 자료를
+    끌어오므로 끈다(단어 · 개체 갈래는 그대로라 이름에 기호가 실제로 든 자료는 찾힌다).
+
+    Args:
+        query: 검색어.
+
+    Returns:
+        뜻 갈래를 쓰면 ``True``.
+    """
+    return has_letter_or_digit(query)
+
+
 def _semantic_clause(semantic_ids: Sequence[str]) -> dict[str, Any] | None:
     """뜻으로 걸린 자산들을 **id 목록 절**로 만든다.
 
@@ -387,7 +403,10 @@ def _scope_clause(
         ``bool`` 절 — ``should``(단어·뜻·개체) + ``minimum_should_match: 1`` + ``filter``(조건).
     """
     should = [_word_clause(query, operator=operator)]
-    for extra in (_semantic_clause(semantic_ids), _about_clause(query, enabled=about_branch)):
+    # 글자 없는 질의는 뜻 갈래를 넣지 않는다(``_semantic_branch_applies``). 이 절 하나를 개수 · 칩 · 순위 · 훑기
+    # (호출부의 칩 포함)가 모두 쓰므로 여기서 끄면 함께 꺼진다.
+    semantic = _semantic_clause(semantic_ids) if _semantic_branch_applies(query) else None
+    for extra in (semantic, _about_clause(query, enabled=about_branch)):
         if extra is not None:
             should.append(extra)
     return {"bool": {
@@ -968,15 +987,18 @@ def search_files(
     #    맞으므로, 총계를 먼저 알고 그때만 순위를 묻는다(질의 하나를 아끼는 효과도 있다).
     # ① 뜻으로 걸린 자산을 **한 번만** 구해 id 로 굳힌다. 조건마다 벡터 검색을 다시 하면 근사
     #    검색이 다른 답을 주어 칩 건수와 클릭 결과가 어긋난다(실측 `등산` 칩 12 대 클릭 13).
-    semantic = client.search(
-        index=index,
-        body=build_semantic_body(query_vector, min_cosine=min_cosine, cap=semantic_cap),
-    )
-    semantic_ids = [
-        str((h.get("_source") or {}).get("asset_id") or "")
-        for h in ((semantic.get("hits") or {}).get("hits") or [])
-    ]
-    semantic_ids = [a for a in semantic_ids if a]
+    #    글자가 없는 질의는 집합 절이 뜻 갈래를 쓰지 않으므로 벡터 검색 자체를 건너뛴다.
+    semantic_ids: list[str] = []
+    if _semantic_branch_applies(q):
+        semantic = client.search(
+            index=index,
+            body=build_semantic_body(query_vector, min_cosine=min_cosine, cap=semantic_cap),
+        )
+        semantic_ids = [
+            str((h.get("_source") or {}).get("asset_id") or "")
+            for h in ((semantic.get("hits") or {}).get("hits") or [])
+        ]
+        semantic_ids = [a for a in semantic_ids if a]
 
     plan = build_facet_plan(q, semantic_ids, filters=filters, total_cap=total_cap,
                             facet_size=facet_size, axes=axes, operator=operator,
@@ -1161,9 +1183,10 @@ def browse_files(
                           expect_scope=scope) if cursor else None
 
     # ① 뜻으로 걸린 자산을 **한 번만** 구해 id 로 굳힌다(조건마다 다시 하면 집합이 갈린다 · 096).
-    #    질의가 비면 벡터 검색을 돌릴 것이 없다 — 집합은 조건만으로 정해진다.
+    #    질의가 비면 벡터 검색을 돌릴 것이 없다 — 집합은 조건만으로 정해진다. 글자가 없는 질의도 집합 절이
+    #    뜻 갈래를 쓰지 않으므로 건너뛴다.
     semantic_ids: list[str] = []
-    if query.strip() and query_vector is not None:
+    if query.strip() and query_vector is not None and _semantic_branch_applies(query):
         sem = client.search(index=index, body=build_semantic_body(
             query_vector, min_cosine=min_cosine, cap=semantic_cap))
         semantic_ids = [

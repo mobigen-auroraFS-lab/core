@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import unittest
 
-from src.domain.text_norm import normalize_text_key
+from src.domain.text_norm import has_letter_or_digit, normalize_text_key
 
 
 class TestNormalizeTextKey(unittest.TestCase):
@@ -68,6 +68,36 @@ class TestNormalizeTextKey(unittest.TestCase):
     def test_다른_뜻의_값은_섞이지_않는다(self) -> None:
         # 병합이 과하지 않은지(공백만 무시하는 규칙이므로 다른 어휘는 그대로 갈라진다).
         self.assertNotEqual(normalize_text_key("전통음식"), normalize_text_key("전통의상"))
+
+
+class TestHasLetterOrDigit(unittest.TestCase):
+    """뜻 검색을 할 만한 질의인가 — 유니코드 문자 · 숫자가 하나라도 있는가(spec 110).
+
+    기호 · 이모지 · 공백만 있으면 뜻 검색이 무관한 자료를 끌어오므로 그 갈래를 끈다. 한글 · 한자 · 가나 ·
+    전각 숫자처럼 영문 밖의 글자도 글자다.
+    """
+
+    def test_symbols_emoji_and_blank_have_no_text(self) -> None:
+        for q in ("\\", ".", "...", "!?", "()", "~", "%", "-_-", "🔥", "😀🔥", " ", "", "\t\n", "　"):
+            with self.subTest(q=q):
+                self.assertFalse(has_letter_or_digit(q))
+
+    def test_any_letter_or_digit_counts(self) -> None:
+        for q in ("a", "불", "漢", "カ", "1", "３", "Ⅳ", "C++", "3.1", "🔥불", " x ", "!a!", "ㄱ"):
+            with self.subTest(q=q):
+                self.assertTrue(has_letter_or_digit(q))
+
+    def test_none_is_no_text(self) -> None:
+        self.assertFalse(has_letter_or_digit(None))
+
+    def test_boundary_characters(self) -> None:
+        """경계 — 결합 문자만 있으면 글자가 아니다. 동그라미 · 위첨자 · 분수 숫자(No)와 키캡 이모지(숫자 포함)는
+        숫자로 본다(뜻 검색을 켜는 쪽이 보수적이다)."""
+        self.assertFalse(has_letter_or_digit("\u0301"))   # 결합 악센트만
+        self.assertFalse(has_letter_or_digit("\u200b"))   # 폭 없는 공백
+        for q in ("①", "²", "½", "1\ufe0f\u20e3", "\u1100\u1161"):  # 키캡 1 · 첫가끝 자모
+            with self.subTest(q=q):
+                self.assertTrue(has_letter_or_digit(q))
 
 
 if __name__ == "__main__":

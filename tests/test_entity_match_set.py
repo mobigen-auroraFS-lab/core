@@ -268,12 +268,38 @@ class TestSemanticBranch(unittest.TestCase):
     def test_게이트_차단을_로그로_알린다(self) -> None:
         """조용히 사라지면 "왜 못 찾지"를 추적할 수 없다 — 격차·임계를 함께 남긴다."""
         c = _FakeClient([_hit("작품", "훈민정음")], knn_hits=_KNN_BLOCK)
-        with self.assertLogs("src.search.entity_search_os", level="WARNING") as log:
+        # 게이트 차단은 「뜻으로 맞는 개체가 없다」는 **정상 판정**이라 정보(INFO) 수준이다 — 경고로 두면
+        # 경고 로그 대부분을 차지해 진짜 이상이 묻힌다(spec 110).
+        with self.assertLogs("src.search.entity_search_os", level="INFO") as log:
             entity_search_os.match_entity_keys(c, "mm_entities", query="한글", query_vector=_VEC)
+        gate = [r for r in log.records if "게이트" in r.getMessage()]
+        self.assertEqual([r.levelname for r in gate], ["INFO"])
         line = " ".join(log.output)
         self.assertIn("게이트", line)
         # 무엇에 막혔는지 알려면 **적용된 하한**이 로그에 있어야 한다.
         self.assertIn(str(search_constants.ENTITY_SET_GATE_FLOOR_DEFAULT), line)
+
+    def test_글자_없는_질의는_뜻_갈래를_돌리지_않는다(self) -> None:
+        """기호만 있는 질의는 임베딩이 무관한 개체를 끌어온다 — 뜻 갈래를 아예 돌리지 않는다(spec 110).
+
+        의도된 동작이라 「벡터가 없다」 경고도 남기지 않는다.
+        """
+        for q in ("\\", ".", "...", "🔥"):
+            with self.subTest(q=q):
+                c = _FakeClient([], knn_hits=_KNN_PASS)  # 뜻 갈래를 돌렸다면 통과 표본이 들어왔을 것
+                with self.assertNoLogs("src.search.entity_search_os", level="WARNING"):
+                    got = entity_search_os.match_entity_keys(c, "mm_entities", query=q, query_vector=_VEC)
+                self.assertEqual(got.keys, frozenset())
+                self.assertEqual(got.semantic_keys, frozenset())
+                self.assertFalse(got.semantic_gate_passed)
+                self.assertFalse(any("knn" in json.dumps(b, ensure_ascii=False) for b in c.bodies))
+
+    def test_글자_없는_질의도_낱말로_맞은_개체는_남긴다(self) -> None:
+        """이름에 이모지가 실제로 든 개체는 낱말 갈래로 찾힌다 — 뜻 갈래만 끈다."""
+        c = _FakeClient([_hit("작품", "🔥레이디")], knn_hits=_KNN_PASS)
+        got = entity_search_os.match_entity_keys(c, "mm_entities", query="🔥", query_vector=_VEC)
+        self.assertEqual(got.keys, frozenset({("작품", "🔥레이디")}))
+        self.assertEqual(got.text_keys, got.keys)
 
     def test_게이트_차단을_반환값으로도_읽을_수_있다(self) -> None:
         """로그는 사후 추적용이다. 호출부가 화면에 근거를 싣고 싶으면 **값**이 필요하다."""

@@ -49,3 +49,22 @@ def normalize_text_key(s: str) -> str:
     # split() 은 인자 없이 부르면 유니코드 공백 전부(스페이스·탭·개행)를 기준으로 쪼갠다 —
     # 이어 붙이면 "모든 공백 제거"가 된다.
     return "".join(normalized.split()).casefold()
+
+
+def has_letter_or_digit(text: str | None) -> bool:
+    """글자(유니코드 문자 · 숫자)가 하나라도 있는가 — 뜻 검색을 할 만한 질의인지 가르는 규칙.
+
+    기호 · 이모지 · 공백만 있는 질의(``\\`` · ``...`` · ``🔥``)는 임베딩이 뜻을 담지 못해 뜻 검색이 무관한
+    자료를 끌어온다. 이런 질의는 뜻 갈래를 끄고 단어 · 개체 갈래만 쓴다(이름에 🔥 가 실제로 든 자료는
+    단어로 찾힌다). 한글 · 한자 · 가나 · 전각 숫자처럼 영문 밖의 글자도 글자다. 파일 검색과 개체 검색이
+    **같은 규칙**을 써야 하므로 이 중립 모듈에 둔다.
+
+    Args:
+        text: 검색어. ``None`` 이면 글자가 없는 것으로 본다.
+
+    Returns:
+        유니코드 범주가 문자(L*) 또는 숫자(N*)인 글자가 하나라도 있으면 ``True``.
+
+    설계 배경: `specs/110-semantic-needs-text`
+    """
+    return any(unicodedata.category(ch)[0] in ("L", "N") for ch in (text or ""))
