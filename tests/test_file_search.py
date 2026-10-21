@@ -192,6 +192,83 @@ class TestScope(unittest.TestCase):
         self.assertIs(build_rank_body("김치", [0.0])["track_total_hits"], False)
 
 
+class TestQueryWithoutText(unittest.TestCase):
+    """글자(문자 · 숫자)가 없는 질의는 뜻 갈래를 넣지 않는다 — 기호의 임베딩이 무관한 자료를 끌어온다(spec 110).
+
+    집합 절이 하나라 개수 · 칩 · 순위 · 훑기가 모두 같이 바뀐다. 단어 · 개체 갈래는 그대로다(이름에 🔥 가 든
+    파일은 계속 찾힌다).
+    """
+
+    def _semantic_terms(self, clause: dict) -> list:
+        return [c for c in clause["bool"]["should"] if "asset_id" in c.get("terms", {})]
+
+    def test_facet_set_has_no_semantic_clause(self) -> None:
+        for q in ("\\", ".", "...", "!?", "🔥"):
+            with self.subTest(q=q):
+                clause = build_facet_body(q, SEM)["query"]
+                self.assertEqual(self._semantic_terms(clause), [])
+                self.assertIn("bool", clause["bool"]["should"][0])  # 단어 갈래는 남는다
+
+    def test_rank_vector_side_is_scoped_without_semantic_clause(self) -> None:
+        rank = build_rank_body("\\", VEC, semantic_ids=SEM)["query"]["hybrid"]["queries"]
+        self.assertEqual(self._semantic_terms(rank[1]["knn"]["embedding"]["filter"]), [])
+        field = build_rank_body(".", VEC, semantic_ids=SEM, sort="name_asc")["query"]
+        self.assertEqual(self._semantic_terms(field), [])
+
+    def test_browse_scope_has_no_semantic_clause(self) -> None:
+        from src.search.file_search import browse_scope_clause
+
+        self.assertEqual(self._semantic_terms(browse_scope_clause("~", SEM)), [])
+
+    def test_text_query_keeps_semantic_clause(self) -> None:
+        for q in ("김치", "a", "1", "C++", "🔥불"):
+            with self.subTest(q=q):
+                self.assertEqual(self._semantic_terms(build_facet_body(q, SEM)["query"]),
+                                 [{"terms": {"asset_id": list(SEM)}}])
+
+    def test_search_files_skips_vector_search(self) -> None:
+        client = _FakeClient([_facet_resp(0)])
+        out = search_files(client, "assets", query="\\", query_vector=[0.0])
+        # 호출은 집계 하나뿐 — 뜻 검색(``_source: [asset_id]`` 인 벡터 이웃 질의)이 없다.
+        self.assertEqual(len(client.calls), 1, "뜻 검색(벡터 이웃) 호출을 건너뛰어야 한다")
+        body = client.calls[0]["body"]
+        self.assertEqual(body["size"], 0)                                   # 집계 질의다
+        self.assertEqual(self._semantic_terms(body["query"]), [])           # 집합 절에 뜻 id 목록이 없다
+        self.assertEqual((out["total"], out["rows"]), (0, []))
+
+    def test_browse_files_skips_vector_search(self) -> None:
+        """훑기 경로(이어 받기)도 같은 판정 — 글자 없는 질의면 벡터 이웃 질의를 보내지 않는다."""
+        from src.search.file_search import browse_files
+
+        sent: list[dict] = []
+
+        class _Rec:
+            def search(self, index, body, params=None):
+                sent.append(body)
+                return {"hits": {"total": {"value": 0, "relation": "eq"}, "hits": []}, "aggregations": {}}
+
+            def msearch(self, index, body, params=None):
+                sent.extend(body[1::2])
+                return {"responses": [{"hits": {"total": {"value": 0, "relation": "eq"}, "hits": []},
+                                       "aggregations": {}} for _ in body[1::2]]}
+
+        browse_files(_Rec(), "assets", query="...", query_vector=list(VEC), sort="created_desc", size=1,
+                     scope="q=|refine=|modality=[]")
+        self.assertTrue(sent, "질의가 하나도 나가지 않았다")
+        self.assertFalse([b for b in sent if b.get("_source") == ["asset_id"]], "뜻 검색 질의가 나갔다")
+        self.assertNotIn("knn", str(sent))
+
+        sent.clear()
+        browse_files(_Rec(), "assets", query="불", query_vector=list(VEC), sort="created_desc", size=1,
+                     scope="q=|refine=|modality=[]")
+        self.assertTrue([b for b in sent if "knn" in str(b)], "글자 있는 질의는 뜻 검색을 해야 한다")
+
+    def test_search_files_text_query_still_runs_vector_search(self) -> None:
+        client = _FakeClient([_sem_resp("s1"), _facet_resp(0)])
+        search_files(client, "assets", query="불", query_vector=[0.0])
+        self.assertEqual(client.calls[0]["body"]["_source"], ["asset_id"])  # 뜻 검색이 먼저 돈다
+
+
 class TestDeterminism(unittest.TestCase):
     """정렬·상한이 못 박혀 있다."""
 

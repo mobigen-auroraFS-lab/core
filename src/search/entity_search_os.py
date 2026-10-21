@@ -73,6 +73,7 @@ from src.config.search_constants import (
     ENTITY_SEMANTIC_GATE_EPS_DEFAULT,
     ENTITY_SET_GATE_FLOOR_DEFAULT,
 )
+from src.domain.text_norm import has_letter_or_digit
 from src.search.fusion import (
     gate_signal,
     knn_score_to_cosine,
@@ -313,7 +314,8 @@ class EntityMatchSet(NamedTuple):
             상위를 앞자리에 세울 때 쓴다 — 집합만으로는 무엇이 상위인지 알 수 없다. 의미를 껐거나
             막혔으면 빈 튜플이다.
         semantic_gate_passed: ② 가 게이트를 통과했는지. ``False`` 이면 ``semantic_keys`` 가 빈
-            집합이며, "막혔다"·"후보가 없다"·"껐다"의 구분은 경고 로그가 말한다.
+            집합이다. "막혔다"(정보 로그) · "후보가 없다" · "벡터가 없어 껐다"(경고 로그) · "글자 없는 질의라
+            일부러 껐다"(경고 없음)는 같은 값이라, 구분이 필요하면 로그를 본다.
     """
 
     keys: frozenset[tuple[str, str]]
@@ -454,10 +456,14 @@ def match_entity_keys(
         → `영릉`). 근거를 못 보이면 사용자는 검색을 의심한다. 이미 따로 계산된 값이라 **질의는
         늘지 않는다**(낱말 1회 + 의미 1회 · 종전과 같다).
 
-    로그로 드러나는 것 셋(조용한 실패 방지): ① 낱말 갈래가 상한에서 잘림 · ② 의미 갈래가 게이트에
-    막힘(격차·임계 동봉) · ③ 의미 갈래가 아예 꺼짐(벡터 미제공 또는 후보 0건). ②③ 은 반환값
-    (``semantic_gate_passed``·빈 ``semantic_keys``)으로도 읽을 수 있고, 진단 수치(top·baseline)가
+    로그로 드러나는 것 셋(조용한 실패 방지): ① 낱말 갈래가 상한에서 잘림(경고) · ② 의미 갈래가 게이트에
+    막힘(정상 판정이라 정보 로그 · 격차·임계 동봉) · ③ 의미 갈래가 아예 꺼짐(벡터 미제공 또는 후보 0건 · 경고).
+    ②③ 은 반환값(``semantic_gate_passed``·빈 ``semantic_keys``)으로도 읽을 수 있고, 진단 수치(top·baseline)가
     필요하면 ``semantic_entity_keys`` 를 직접 부른다.
+
+    글자(문자 · 숫자)가 없는 질의는 의미 갈래를 **일부러 돌리지 않는다** — 기호 · 이모지의 임베딩은 뜻을 담지
+    못해 무관한 개체를 끌어온다(파일 검색 집합 절과 같은 규칙). 낱말 갈래만 쓰고 경고를 남기지 않으며,
+    벡터가 없어도(``query_vector=None``) 이 경우는 경고하지 않는다.
     """
     clause = entity_match_clause(query)
     if clause is None:
@@ -479,6 +485,15 @@ def match_entity_keys(
                      total, len(rows), int(max_hits))
     text_keys = frozenset((etype, uid) for _doc_id, etype, uid, _score in rows if uid)
 
+    if not has_letter_or_digit(query):
+        # 글자(문자 · 숫자)가 없는 질의는 임베딩이 뜻을 담지 못해 무관한 개체를 끌어온다 — 뜻 갈래를 돌리지
+        # 않는다(파일 검색 집합 절과 같은 규칙). 의도된 동작이라 경고가 아니다.
+        _LOG.debug("개체 집합 판정 — 글자 없는 질의라 의미(kNN) 갈래를 돌리지 않는다(낱말 매칭 %d건만)",
+                   len(text_keys))
+        return EntityMatchSet(keys=text_keys, text_keys=text_keys,
+                              semantic_keys=frozenset(), semantic_gate_passed=False,
+                              semantic_ranked=())
+
     if query_vector is None:
         # 의미 갈래를 끈 채로 도는 상태는 **이례적**이다 — `발효`→김치 류를 못 찾게 되므로 남긴다.
         _LOG.warning("개체 집합 판정에서 의미(kNN) 갈래가 꺼졌다 — 질의 벡터가 없다(낱말 매칭 %d건만)",
@@ -494,12 +509,13 @@ def match_entity_keys(
                      "(낱말 매칭 %d건만)", len(text_keys))
     elif not semantic.gate_passed:
         # 게이트 차단은 "정답이 없다"는 판정이라 **정상 동작**이지만, 조용하면 "왜 못 찾지"를
-        # 추적할 수 없다. 격차와 임계를 함께 남겨 사후에 판정을 재현할 수 있게 한다.
+        # 추적할 수 없다. 격차와 임계를 함께 남겨 사후에 판정을 재현할 수 있게 한다. 정상 동작이라 정보(INFO)
+        # 수준으로 남긴다 — 경고로 두면 경고 로그 대부분을 차지해 진짜 이상이 묻힌다.
         # 주판정이 절대 하한이므로 **하한과 top 을** 먼저 남긴다 — 격차는 참고값으로 뒤에 붙인다.
-        _LOG.warning("개체 의미(kNN) 갈래가 게이트에 막혔다 — top=%.4f < 하한=%s "
-                     "(배경=%.4f 격차=%.4f · 후보 %d건) · 낱말 매칭 %d건만 남긴다",
-                     semantic.top, gate_floor, semantic.baseline,
-                     semantic.top - semantic.baseline, semantic.sample_size, len(text_keys))
+        _LOG.info("개체 의미(kNN) 갈래가 게이트에 막혔다 — top=%.4f < 하한=%s "
+                  "(배경=%.4f 격차=%.4f · 후보 %d건) · 낱말 매칭 %d건만 남긴다",
+                  semantic.top, gate_floor, semantic.baseline,
+                  semantic.top - semantic.baseline, semantic.sample_size, len(text_keys))
     # 🔴 ``keys`` 는 **파생값**이다 — 갈래를 따로 싣는다고 결과 집합이 달라지지 않는다.
     return EntityMatchSet(keys=text_keys | semantic.keys, text_keys=text_keys,
                           semantic_keys=semantic.keys,
