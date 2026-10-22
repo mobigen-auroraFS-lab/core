@@ -11,6 +11,12 @@
 | **MINOR** | 공개 API **추가** — 기존 호출은 그대로 동작 |
 | **PATCH** | 공개 API 무변경 — 내부 수정·버그 수정 |
 
+## [Unreleased] — 2026-10-22 (114 요약이 자료 제목을 참고한다)
+
+### 추가 (MINOR — 기존 호출 무변경)
+- `config.filename_util.summary_title` — 요약기에 참고로 줄 제목(뜻 없는 · 일반어뿐인 이름은 `None` · 해시태그 · 이모지 제거).
+- 요약기 `title=` 인자(기본 `None` 이면 프롬프트 · 반환이 지금과 글자 그대로 같다): `llm.text_summarizer.summarize_and_extract_keywords` · `summarize_and_extract_keywords_from_audio` · `llm.image_summarizer.summarize_image_caption_keywords_objects` · `llm.video_summarizer.summarize_video_from_scene_results`. 주면 같은 호출에서 제목이 내용과 맞는지 판단해 반환에 `title_match`(yes · no · unsure)가 붙고, yes 일 때만 제목의 고유명 · 형식을 반영한다. 빈 STT 음성 + 제목이면 제목만으로 한 문장 요약(`title_only=True`).
+
 ## [Unreleased] — 2026-10-21 (113 개체 목록과 총 건수를 한 질의로)
 
 ### 추가 (MINOR — 기존 호출 무변경)

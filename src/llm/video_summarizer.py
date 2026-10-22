@@ -10,14 +10,18 @@ per-asset 파이프라인에서 ``video_skill`` 이 호출한다. 영상 extract
 
 from __future__ import annotations
 
-from typing import TypedDict
-
 from src.config.settings import get_current_settings
 from src.llm.client import complete_json
 from src.llm.summary_postprocess import promote_objects_to_keywords
+from src.llm.title_hint import (
+    TitleMatchField,
+    build_title_block,
+    insert_title_block,
+    parse_title_match,
+)
 
 
-class VideoSummaryResult(TypedDict):
+class VideoSummaryResult(TitleMatchField):
     """영상 전체 요약 결과.
 
     ``objects`` 는 영상 전반에 걸쳐 등장한 주요 객체를 중복 없이 나열한 것이다.
@@ -85,6 +89,8 @@ def _build_video_summary_prompt(
 
 def summarize_video_from_scene_results(
     scene_results: list[dict],
+    *,
+    title: str | None = None,
 ) -> VideoSummaryResult:
     """장면별 이미지 요약 결과를 종합해 영상 전체 요약을 생성한다.
 
@@ -96,6 +102,9 @@ def summarize_video_from_scene_results(
             ⚠️ **순서를 그대로 쓴다** — 시간 흐름이 요약에 반영되어야 한다.
             ⚠️ 프레임 이미지 바이트는 **이미 제거된 상태**여야 한다(여기서 참조하지 않으며,
             남아 있으면 메모리만 붙잡는다).
+        title: 참고로 줄 제목(``summary_title`` 통과분 · spec 114). ``None``(기본)이면 프롬프트가 지금과 글자
+            그대로 같다. 주면 「장면 결과」 앞에 제목 블록(외형 묘사 유지 줄 포함)이 들어가고 반환에
+            ``title_match`` 가 붙는다. 장면이 없으면 제목이 있어도 빈 결과다(대조할 내용이 없다).
 
     Returns:
         영상 전체 요약·키워드·객체. 장면이 하나도 없으면 빈 결과.
@@ -138,6 +147,8 @@ def summarize_video_from_scene_results(
         v2=v2,
     )
 
+    if title:
+        prompt = insert_title_block(prompt, "\n장면 결과:", build_title_block(title, keep_appearance=True))
     data = complete_json(prompt)
 
     summary = str(data.get("summary", "")).strip()[: cfg.summary_max_chars]
@@ -170,5 +181,8 @@ def summarize_video_from_scene_results(
             if len(keywords) >= cfg.top_k_keywords:
                 break
 
-    return {"summary": summary, "keywords": keywords, "objects": objects}
+    result: VideoSummaryResult = {"summary": summary, "keywords": keywords, "objects": objects}
+    if title:
+        result["title_match"] = parse_title_match(data.get("title_match"))
+    return result
 

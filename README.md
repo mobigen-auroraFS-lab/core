@@ -245,7 +245,7 @@ pipeline 과 service 가 불러 쓰는 이름입니다.
 | 설정 | `src.config.bootstrap` | `bootstrap_env` |
 | 상수 | `src.config.embedding_constants` | `FIX_EMBEDDING_DIMENSION` · `EMBEDDING_KIND_ST` · `EMBEDDING_KIND_CLIP` · `DEFAULT_CLIP_MODEL_NAME` |
 | 상수 | `src.config.search_constants` | `TAG_FACET_TOP_N_DEFAULT` · `TAG_FACET_MIN_COUNT_DEFAULT` · `ENTITY_INDEX_DEFAULT` |
-| 파일명 | `src.config.filename_util` | `basename_of` · `strip_asset_id_prefix` · `display_file_name` |
+| 파일명 | `src.config.filename_util` | `basename_of` · `strip_asset_id_prefix` · `display_file_name` · `summary_title` |
 | 검색 모달리티 | `src.config.search_modalities` | `VALID_SEARCH_MODALITIES` · `parse_modalities_csv` · `MODALITY_TO_BUCKET` · `BUCKET_TO_MODALITY` |
 | DB | `src.database.postgres_util` | `PostgresUtil` |
 | DB | `src.database.ids` | `uuid7` |

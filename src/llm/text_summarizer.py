@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import TypedDict
 
 from src.config.settings import get_current_settings
 from src.file.data_loader import (
@@ -21,6 +20,13 @@ from src.file.data_loader import (
     normalize_file_kind,
 )
 from src.llm.client import complete_json
+from src.llm.title_hint import (
+    TitleMatchField,
+    build_title_block,
+    build_title_only_prompt,
+    insert_title_block,
+    parse_title_match,
+)
 
 # 무내용 가드 임계(spec 065 FR-701·SC-08) — trim 후 이 글자 수 미만인 전사(STT)/텍스트는 "요약할
 # 내용 없음"으로 보고 요약기 LLM 을 아예 호출하지 않는다(placeholder 요약 "제시된 텍스트 내용 없음"
@@ -50,7 +56,13 @@ def _is_contentful(text: str | None) -> bool:
     return bool(text and len(str(text).strip()) >= _min_self_text_chars())
 
 
-class SummaryKeywords(TypedDict):
+class _TitleFields(TitleMatchField, total=False):
+    """문서 · 음성 요약의 선택 키 — 제목 판단 + 빈 STT 를 제목만으로 요약했는지(spec 114)."""
+
+    title_only: bool
+
+
+class SummaryKeywords(_TitleFields):
     """문서·STT 요약 결과의 공유 형태.
 
     ``stt`` 는 오디오 경로에서만 전사 원문을 담는다. 문서 경로 반환값은 ``stt`` 키를 아예 넣지 않으므로
@@ -150,6 +162,7 @@ def _summarize_chunk_only(
     chunk_text: str,
     *,
     summary_max_chars: int,
+    title_block: str | None = None,
 ) -> str:
     """청크 하나를 요약해 문자열로 돌려준다(LLM 단일 통로 경유).
 
@@ -157,11 +170,14 @@ def _summarize_chunk_only(
         chunk_text: 요약할 청크.
         summary_max_chars: 요약 길이 상한. **응답도 이 길이로 잘라 낸다** — 모델이 지시를
             넘겨 답할 수 있어 프롬프트만으로는 보장되지 않는다.
+        title_block: 제목 블록(spec 114). ``None`` 이면 프롬프트가 지금과 글자 그대로 같다.
 
     Returns:
         요약 문자열(빈 응답이면 빈 문자열).
     """
     prompt = _build_chunk_summary_prompt(chunk_text, summary_max_chars=summary_max_chars)
+    if title_block:
+        prompt = insert_title_block(prompt, "\n텍스트:", title_block)
     data = complete_json(prompt)
     return str(data.get("summary", "")).strip()[:summary_max_chars]
 
@@ -170,6 +186,7 @@ def summarize_and_extract_keywords(
     file_path: str | Path,
     *,
     file_kind: str,
+    title: str | None = None,
 ) -> SummaryKeywords:
     """문서 요약·키워드 추출. LLM 은 설정된 단일 온프레미스 엔드포인트(cfg.openai_*)를 사용한다.
 
@@ -180,9 +197,12 @@ def summarize_and_extract_keywords(
     Args:
         file_path: 요약할 문서 경로.
         file_kind: 파일 종류. 청크로 쪼개는 방식이 여기서 갈린다.
+        title: 참고로 줄 제목(``summary_title`` 통과분 · spec 114). ``None``(기본)이면 프롬프트가 지금과 글자
+            그대로 같다. 주면 청크 · 종합 프롬프트 모두에 제목 블록이 들어가고 반환에 ``title_match`` 가 붙는다
+            (종합 응답 기준 — 청크는 요약만 쓴다).
 
     Returns:
-        요약·키워드. ⚠️ **전사 필드는 채우지 않는다**(선언에는 있지만 문서 경로에는 없는 값이라,
+        요약·키워드(+ 제목을 줬으면 ``title_match``). ⚠️ **전사 필드는 채우지 않는다**(선언에는 있지만 문서 경로에는 없는 값이라,
         소비자는 ``.get()`` 으로 조회해야 한다). 오디오는 전용 함수를 쓸 것.
     """
     path = Path(file_path)
@@ -194,6 +214,7 @@ def summarize_and_extract_keywords(
         raise ValueError("file_kind는 필수입니다.")
 
     cfg = get_current_settings()
+    block = build_title_block(title, keep_appearance=False) if title else None
 
     partial_summaries: list[str] = []
     for _i, ch in enumerate(
@@ -206,7 +227,7 @@ def summarize_and_extract_keywords(
             max_input_chars=MAX_INPUT_CHARS,
         )
     ):
-        s = _summarize_chunk_only(ch, summary_max_chars=cfg.summary_max_chars)
+        s = _summarize_chunk_only(ch, summary_max_chars=cfg.summary_max_chars, title_block=block)
         if s:
             partial_summaries.append(s)
 
@@ -217,6 +238,8 @@ def summarize_and_extract_keywords(
     final_prompt = _build_reduce_prompt(
         merged, summary_max_chars=cfg.summary_max_chars, top_k_keywords=cfg.top_k_keywords
     )
+    if block:
+        final_prompt = insert_title_block(final_prompt, "\n청크 요약 목록:", block)
     data = complete_json(final_prompt)
 
     summary = str(data.get("summary", "")).strip()
@@ -232,29 +255,67 @@ def summarize_and_extract_keywords(
         if len(keywords) >= cfg.top_k_keywords:
             break
 
-    return {"summary": summary, "keywords": keywords}
+    result: SummaryKeywords = {"summary": summary, "keywords": keywords}
+    if title:
+        result["title_match"] = parse_title_match(data.get("title_match"))
+    return result
+
+
+def _clean_keyword_list(raw: object, limit: int) -> list[str]:
+    """응답의 keywords 를 문자열 목록으로(빈 값 · 중복 제거 · 상한) — 순수.
+
+    Args:
+        raw: 응답 dict 의 ``keywords`` 값(아무 형이나).
+        limit: 키워드 상한.
+    """
+    keywords: list[str] = []
+    for kw in raw if isinstance(raw, list) else []:
+        k = str(kw).strip()
+        if k and k not in keywords:
+            keywords.append(k)
+        if len(keywords) >= limit:
+            break
+    return keywords
 
 
 def summarize_and_extract_keywords_from_audio(
     text: str,
+    *,
+    title: str | None = None,
 ) -> SummaryKeywords:
     """STT 전사 텍스트를 받아 요약·키워드를 추출하고 ``stt`` 필드도 채워 반환한다.
 
     오디오 skill 에서 Whisper STT 결과 전문(full transcript)을 그대로 넘기면
     하나의 프롬프트로 처리된다(청크 분할 없음 — 긴 STT 의 경우 max_input_chars 주의).
     ``stt`` 필드에는 원본 전사 텍스트를 그대로 보존해 embed 슬롯이 재사용할 수 있도록 한다.
+
+    Args:
+        text: STT 전사 전문.
+        title: 참고로 줄 제목(``summary_title`` 통과분 · spec 114). ``None``(기본)이면 지금과 똑같다. 주면
+            제목 블록이 들어가고 반환에 ``title_match`` 가 붙는다. 전사가 비었는데 제목이 있으면 **제목만으로**
+            한 문장 요약을 만든다(``title_only=True`` · ``title_match="unsure"`` — 제목을 대조할 내용이 없다).
     """
     # 무내용 가드(FR-701·SC-08): 전사(STT)가 비었거나 임계 미만으로 얇으면 요약기 LLM 을 호출하지
     # 않고 빈 요약을 돌려준다(기악 오디오 등 → placeholder 요약 원천 차단). stt 원문은 얇더라도 그대로
     # 보존해 임베딩 슬롯(_embed_audio) 이 재사용할 수 있게 한다(빈 self_text → 자기주제 미부여).
+    # spec 114: 제목이 있으면 예외 — 노래 음원은 STT 가 비어도 제목에 가수 · 곡명이 있다.
     if not _is_contentful(text):
-        return {"summary": "", "keywords": [], "stt": text}
+        if not title:
+            return {"summary": "", "keywords": [], "stt": text}
+        cfg = get_current_settings()
+        data = complete_json(build_title_only_prompt(
+            title, summary_max_chars=cfg.summary_max_chars, top_k_keywords=cfg.top_k_keywords))
+        return {"summary": str(data.get("summary", "")).strip()[: cfg.summary_max_chars],
+                "keywords": _clean_keyword_list(data.get("keywords"), cfg.top_k_keywords),
+                "stt": text, "title_only": True, "title_match": "unsure"}
 
     cfg = get_current_settings()
 
     final_prompt = _build_audio_prompt(
         text, summary_max_chars=cfg.summary_max_chars, top_k_keywords=cfg.top_k_keywords
     )
+    if title:
+        final_prompt = insert_title_block(final_prompt, "\n텍스트:", build_title_block(title, keep_appearance=False))
     data = complete_json(final_prompt)
 
     summary = str(data.get("summary", "")).strip()
@@ -270,4 +331,7 @@ def summarize_and_extract_keywords_from_audio(
         if len(keywords) >= cfg.top_k_keywords:
             break
 
-    return {"summary": summary, "keywords": keywords, "stt": text}
+    result: SummaryKeywords = {"summary": summary, "keywords": keywords, "stt": text}
+    if title:
+        result["title_match"] = parse_title_match(data.get("title_match"))
+    return result

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import re
+import unicodedata
 
 # registered_dest 가 붙이는 ``{asset_id}__{원본명}`` 프리픽스(UUIDv7 + '__')의 역패턴.
 # 표시용 파일명 산출 시 이 프리픽스만 벗겨 원본 파일명을 복원한다(아카이브 이동으로 fs_path 가
@@ -175,3 +176,69 @@ def file_name_candidates(stem: str | None, *, limit: int = _CANDIDATE_MAX) -> tu
         if len(picked) >= limit:
             break
     return tuple(picked)
+
+
+# ── 요약에 쓸 제목 게이트(spec 114) ──────────────────────────────────────────────
+# 「뜻 있는 이름」(``meaningful_file_name``)보다 한 단계 엄격하다 — 요약기는 제목을 **문장에 반영**하므로,
+# 개체 판정이 참고로 보는 것보다 잘못 실렸을 때의 피해가 크다(예: 빈 STT 음성에 「새 녹음 3」이 실리면
+# 「새 녹음 3이라는 제목의 녹음 파일입니다」 같은 쓸모없는 요약이 생긴다).
+# 일반어(닫힌 목록) — 이것들만 남는 이름은 무엇에 관한 자료인지 말해 주지 않는다. 소문자로 비교한다.
+_GENERIC_TITLE_WORDS = frozenset({
+    "새", "녹음", "녹화", "음성", "메모", "영상", "동영상", "비디오", "사진", "이미지", "그림", "다운로드",
+    "최종", "최종본", "수정", "수정본", "편집", "편집본", "복사본", "사본", "원본", "문서", "파일", "자료",
+    "첨부", "스캔", "캡처", "스크린샷", "클립", "제목", "없음", "무제", "테스트", "샘플", "임시", "버전",
+    "final", "copy", "draft", "new", "file", "document", "doc", "recording", "record", "audio", "video",
+    "image", "img", "photo", "pic", "download", "untitled", "scan", "temp", "tmp", "test", "sample",
+    "ver", "version", "edit", "edited", "clip",
+})
+_VERSION_WORD = re.compile(r"(?:v|ver|rev)?\d+(?:\.\d+)*", re.IGNORECASE)
+_TITLE_WORD_SPLIT = re.compile(r"[\s_\-.,()\[\]{}《》〈〉「」『』'\"·:]+")
+_HASHTAG_ANY = re.compile(r"#\S+")
+_TITLE_MAX = 150            # 프롬프트에 싣는 제목 상한(글자) — 유튜브 제목이 길어도 앞쪽에 이름이 있다
+
+
+def _strip_decorations(text: str) -> str:
+    """이모지 · 장식 기호(★ · 🔥 · ｜ 등 기호류)와 보이지 않는 문자를 공백으로 바꾸고 공백을 접는다(순수).
+
+    Args:
+        text: 정리할 문자열.
+    """
+    kept = []
+    for ch in text:
+        cat = unicodedata.category(ch)
+        # S*(기호 · 이모지) · C*(제어 · 형식) · 이모지 변형 선택자(FE0F · 결합 문자)는 뺀다. 글자 · 숫자 · 문장부호는 둔다.
+        kept.append(" " if cat[0] in "SC" or ch in "\ufe0f\u200d" else ch)
+    return " ".join("".join(kept).split())
+
+
+def summary_title(fs_path: str | None) -> str | None:
+    """요약기에 참고로 줄 **제목**(순수 · 결정적). 쓸 만하지 않으면 ``None`` — 그때 요약기는 지금과 똑같이 동작한다.
+
+    절차: ``meaningful_file_name`` 통과 → 해시태그 제거(제목 전체가 해시태그면 「#」만 뗀다 — 「#살아있다」는
+    영화 제목이다) → 이모지 · 장식 기호 제거 → **일반어 · 번호 · 판 표기만 남으면 버린다** → 앞 150자.
+
+    왜 해시태그를 걷나: 해시태그를 작품명에 붙여 없는 작품을 만드는 일이 생긴다(예: 「드라마 2화 #명장면」 →
+    「명장면 드라마」). 해시태그는 대개 홍보 문구 · 인물 꼬리표라
+    요약에 반영할 제목이 아니다(인물 이름은 개체 판정이 파일명 후보로 따로 본다).
+
+    왜 먼저 NFC 로 모으나: macOS 에서 만든 파일명은 한글이 자모로 풀린 꼴(NFD)로 저장되기도 한다. 풀린 꼴은
+    한글 판정에 걸리지 않아 멀쩡한 제목이 조용히 ``None`` 이 된다.
+
+    Args:
+        fs_path: 자산 파일 경로(또는 파일명). 자산 id 접두는 벗기고 본다.
+
+    Returns:
+        정리된 제목(확장자 제외 · 150자 이내 · NFC). 뜻 없는 이름 · 일반어뿐인 이름이면 ``None``.
+    """
+    stem = meaningful_file_name(unicodedata.normalize("NFC", fs_path) if fs_path else fs_path)
+    if stem is None:
+        return None
+    no_tags = _HASHTAG_ANY.sub(" ", stem)
+    text = no_tags if (_HANGUL_RUN.search(no_tags) or _LATIN_RUN.search(no_tags)) else stem.replace("#", " ")
+    text = _strip_decorations(text)
+    words = [w for w in _TITLE_WORD_SPLIT.split(text.casefold()) if w]
+    meaningful = [w for w in words if w not in _GENERIC_TITLE_WORDS and not _VERSION_WORD.fullmatch(w)]
+    if not any(_HANGUL_RUN.search(w) or _LATIN_RUN.search(w) for w in meaningful):
+        return None
+    return text[:_TITLE_MAX].strip() or None
+

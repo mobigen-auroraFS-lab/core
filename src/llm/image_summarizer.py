@@ -13,16 +13,21 @@ from __future__ import annotations
 import base64
 from io import BytesIO
 from pathlib import Path
-from typing import TypedDict
 
 from PIL import Image
 
 from src.config.settings import get_current_settings
 from src.llm.client import complete_vision_json
 from src.llm.summary_postprocess import promote_objects_to_keywords
+from src.llm.title_hint import (
+    TitleMatchField,
+    build_title_block,
+    insert_title_block,
+    parse_title_match,
+)
 
 
-class ImageSummaryResult(TypedDict):
+class ImageSummaryResult(TitleMatchField):
     """이미지 요약 문장(summary), 키워드, 객체 목록."""
 
     summary: str
@@ -145,6 +150,7 @@ def summarize_image_caption_keywords_objects(
     *,
     max_side: int = 1024,
     jpeg_quality: int = 85,
+    title: str | None = None,
 ) -> ImageSummaryResult:
     """이미지 한 장에서 캡션·키워드·객체 목록을 뽑는다(LLM 호출).
 
@@ -152,6 +158,8 @@ def summarize_image_caption_keywords_objects(
         file_path: 이미지 경로.
         max_side: 보낼 이미지의 긴 변 최대 픽셀(요청 크기 억제).
         jpeg_quality: 재인코딩 품질.
+        title: 참고로 줄 제목(``summary_title`` 통과분 · spec 114). ``None``(기본)이면 프롬프트가 지금과 글자
+            그대로 같다. 주면 제목 블록(외형 묘사 유지 줄 포함)이 들어가고 반환에 ``title_match`` 가 붙는다.
 
     Returns:
         요약 결과.
@@ -164,7 +172,7 @@ def summarize_image_caption_keywords_objects(
         raise FileNotFoundError(str(path))
 
     image_url = _encode_image_as_jpeg_data_url(path, max_side=max_side, jpeg_quality=jpeg_quality)
-    return _summarize_image_caption_keywords_objects_from_data_url(image_data_url=image_url)
+    return _summarize_image_caption_keywords_objects_from_data_url(image_data_url=image_url, title=title)
 
 
 def summarize_image_caption_keywords_objects_from_jpeg_bytes(
@@ -192,6 +200,7 @@ def summarize_image_caption_keywords_objects_from_jpeg_bytes(
 def _summarize_image_caption_keywords_objects_from_data_url(
     *,
     image_data_url: str,
+    title: str | None = None,
 ) -> ImageSummaryResult:
     """data URL 형태의 이미지에서 캡션·키워드·객체를 LLM 비전으로 추출한다.
 
@@ -199,6 +208,10 @@ def _summarize_image_caption_keywords_objects_from_data_url(
     ``summarize_image_caption_keywords_objects_from_jpeg_bytes`` 가
     인코딩 방식만 다를 뿐 이 함수로 수렴한다 — 비전 프롬프트와 후처리 로직이 한 곳에만 존재한다.
     ``objects`` 는 CLIP 제로샷 라벨 후보로 쓰인 후 최종 메타에서는 제거된다(→ image_skill 참고).
+
+    Args:
+        image_data_url: ``data:image/jpeg;base64,...`` 형태의 이미지.
+        title: 참고 제목(spec 114). ``None`` 이면 프롬프트 · 반환이 지금과 같다.
     """
     cfg = get_current_settings()
 
@@ -209,6 +222,9 @@ def _summarize_image_caption_keywords_objects_from_data_url(
     prompt = _build_image_caption_prompt(
         summary_max_chars=cfg.summary_max_chars, top_k_keywords=cfg.top_k_keywords, v2=v2
     )
+
+    if title:
+        prompt = insert_title_block(prompt, "개수/비율/합계", build_title_block(title, keep_appearance=True))
 
     data = complete_vision_json(text=prompt, image_data_url=image_data_url)
 
@@ -242,8 +258,11 @@ def _summarize_image_caption_keywords_objects_from_data_url(
             if len(keywords) >= cfg.top_k_keywords:
                 break
 
-    return {
+    result: ImageSummaryResult = {
         "summary": summary,
         "keywords": keywords,
         "objects": objects,
     }
+    if title:
+        result["title_match"] = parse_title_match(data.get("title_match"))
+    return result
