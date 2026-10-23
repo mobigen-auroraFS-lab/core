@@ -116,6 +116,7 @@ from src.mm_meta.persist import (
     parse_member_reason,
     register_mm_meta,
     resolve_registered_aliases,
+    resolve_registered_contained,
     upsert_entity_edges,
     upsert_meta_description,
 )
@@ -211,6 +212,7 @@ __all__ = [
     "register_mm_meta",
     "replace_entity_labels",
     "resolve_registered_aliases",
+    "resolve_registered_contained",
     "select_label_work",
     "type_names",
     "upsert_entity_edges",
