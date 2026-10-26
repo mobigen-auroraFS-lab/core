@@ -824,11 +824,10 @@ def resolve_registered_aliases(
     return tuple(resolved)
 
 
-# 포함 이름 잇기에서 쓰지 않는 **일반 이름** — 여러 대상이 같은 이름을 쓰는 건물 · 유형명. 이 이름의 등록 개체로
-# 이으면 다른 절 · 다른 유물이 한 묶음에 들어간다(예: 「보성 대원사 극락전」 → 「극락전」 · 「양평 용문사
-# 금동관음보살좌상」 → 「금동관음보살좌상」 · 「함양 심진동 용추폭포」 → 「용추폭포」). 재질 · 호칭 낱말도 넣는다 — 「도기
-# 기마인물형 뿔잔」이 인물로 등록된 「도기」에, 「항아 당의」가 「항아」에 묶이는 일을 막는다. 닫힌 목록이다.
-_GENERIC_ENTITY_NAMES = frozenset(normalize_text_key(name) for name in """
+# 포함 이름 잇기 **제외어** — 여러 대상이 같은 이름을 쓰는 건물 · 유형명과 재질 · 호칭 낱말. 이 이름의 등록 개체로
+# 이으면 다른 절 · 다른 유물이 한 묶음에 들어간다(예: 「○○사 극락전」이 다른 절의 「극락전」 개체로 · 「도기 ○○형 뿔잔」이
+# 인물로 등록된 「도기」로). 닫힌 목록이다 — 도메인 어휘라 코어 밖(도메인 팩 · 등록 어휘)으로 옮길 후속 항목이 있다.
+_CONTAIN_EXCLUDED_NAMES = frozenset(normalize_text_key(name) for name in """
 극락전 극락보전 대웅전 대웅보전 명부전 천왕문 일주문 금강문 해탈문 불이문 설선당 응진전 나한전 영산전 팔상전 관음전 원통전
 약사전 미륵전 대적광전 비로전 산신각 칠성각 삼성각 독성각 범종각 범종루 요사채 심검당 적묵당 종각 대성전 명륜당 동무 서무
 동재 서재 강당 사당 재실 정자 고택 종택 석탑 삼층석탑 오층석탑 승탑 부도 당간지주 석등 비석 사리탑 금목걸이 금귀걸이 금관
@@ -854,7 +853,7 @@ def _is_generic_entity_name(key: str) -> bool:
     Args:
         key: ``normalize_text_key`` 결과.
     """
-    return key in _GENERIC_ENTITY_NAMES or bool(_GENERIC_BUDDHIST_IMAGE.match(key))
+    return key in _CONTAIN_EXCLUDED_NAMES or bool(_GENERIC_BUDDHIST_IMAGE.match(key))
 
 
 def resolve_registered_contained(
@@ -870,8 +869,12 @@ def resolve_registered_contained(
 
     규칙: 판정 이름을 낱말로 나눠 **긴 구간부터 · 겹치지 않게** 등록 표기와 맞춰 본다. 구간이 **한 종류에만** 등록돼
     있으면(동음이의면 잇지 않는다) 그 등록 개체를 더한다 — 종류는 등록 개체의 것이다(작품 이름 안의 인물). 원래 판정은
-    그대로 남긴다(propose 모드에서는 미등록 후보로 보고된다). 잇지 않는 것: 이름 전체(그건 별칭 치환의 일) · 일반 이름
-    (``_GENERIC_ENTITY_NAMES`` · 불상 유형명) · 정규화 키 3자 미만(인물은 맨 앞 낱말일 때 2자까지).
+    그대로 남긴다(propose 모드에서는 미등록 후보로 보고된다). 잇지 않는 것: 이름 전체(그건 별칭 치환의 일) · 제외어
+    (``_CONTAIN_EXCLUDED_NAMES`` · 불상 유형명) · 정규화 키 3자 미만(인물은 맨 앞 낱말일 때 2자까지) · 같은 구간이 여러
+    종류로 등록된 경우(길이 조건보다 **먼저** 센다 — 2자 이름이 인물 · 장소 둘로 등록돼 있으면 잇지 않는다).
+
+    한계: 판정 이름 전체가 **다른 종류**로 등록돼 있어도 쪼개 본다(종류를 고쳐 잇지는 않는다). 맨 앞 2자 낱말이 인물 이름과
+    같으면 그 인물로 잇는다 — 인물 이름으로 시작하는 장소 · 작품 이름이 인물에 붙을 수 있다(제외어로 막는다).
 
     **호출 순서**: ``resolve_registered_aliases`` 바로 뒤.
 
@@ -899,16 +902,15 @@ def resolve_registered_contained(
                 key = normalize_text_key(" ".join(tokens[start:start + size]))
                 if not key or _is_generic_entity_name(key):
                     continue
-                hits = [
-                    (t, alias_index[(t, key)]) for t in entity_types
-                    if (t, key) in alias_index and (
-                        len(key) >= _CONTAIN_MIN_KEY_LEN
-                        or (t == _CONTAIN_PERSON_TYPE and start == 0 and len(key) >= 2)
-                    )
-                ]
-                if len(hits) != 1:
-                    continue  # 없거나 여러 종류(동음이의) — 잇지 않는다
-                target_type, target = hits[0]
+                registered = [t for t in entity_types if (t, key) in alias_index]
+                if len(registered) != 1:
+                    continue  # 없거나 여러 종류(동음이의) — 길이 조건 전에 센다
+                target_type = registered[0]
+                if len(key) < _CONTAIN_MIN_KEY_LEN and not (
+                    target_type == _CONTAIN_PERSON_TYPE and start == 0 and len(key) >= 2
+                ):
+                    continue
+                target = alias_index[(target_type, key)]
                 for i in range(start, start + size):
                     used[i] = True
                 added = replace(entity, entity_type=target_type, name=target)

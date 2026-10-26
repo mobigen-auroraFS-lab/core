@@ -85,6 +85,12 @@ class ResolveRegisteredContainedTest(unittest.TestCase):
         out, links = resolve_registered_contained([_ent("백두산 사진첩")], _IDX, _TYPES)
         self.assertEqual((), links)
 
+    def test_두_글자_동음이의는_길이_조건보다_먼저_막는다(self) -> None:
+        # 2자 이름이 인물 · 장소 둘로 등록돼 있으면, 장소가 길이 조건에서 빠져 인물만 남는 일이 없어야 한다.
+        idx = _index(("인물", "임장"), ("장소", "임장"))
+        _, links = resolve_registered_contained([_ent("임장 초상")], idx, _TYPES)
+        self.assertEqual((), links)
+
     def test_두_글자_인물은_맨_앞_낱말일_때만(self) -> None:
         out, _ = resolve_registered_contained([_ent("임장 초상")], _IDX, _TYPES)
         self.assertIn("인물:임장", _names(out))
