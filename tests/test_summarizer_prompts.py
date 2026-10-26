@@ -56,10 +56,12 @@ class ImagePromptTopicTest(unittest.TestCase):
         )
         for key in ("summary", "keywords", "objects"):
             self.assertIn(key, prompt)
+        # spec 114: 필수 키는 그대로이고, 선택 키는 제목 판단(title_match) 하나뿐이다.
         self.assertEqual(
-            set(image_summarizer.ImageSummaryResult.__annotations__),
+            set(image_summarizer.ImageSummaryResult.__required_keys__),
             {"summary", "keywords", "objects"},
         )
+        self.assertEqual(set(image_summarizer.ImageSummaryResult.__optional_keys__), {"title_match"})
 
 
 class VideoPromptTopicTest(unittest.TestCase):
@@ -77,10 +79,12 @@ class VideoPromptTopicTest(unittest.TestCase):
         )
         for key in ("summary", "keywords", "objects"):
             self.assertIn(key, prompt)
+        # spec 114: 필수 키는 그대로이고, 선택 키는 제목 판단(title_match) 하나뿐이다.
         self.assertEqual(
-            set(video_summarizer.VideoSummaryResult.__annotations__),
+            set(video_summarizer.VideoSummaryResult.__required_keys__),
             {"summary", "keywords", "objects"},
         )
+        self.assertEqual(set(video_summarizer.VideoSummaryResult.__optional_keys__), {"title_match"})
 
 
 class TextPromptTopicTest(unittest.TestCase):
@@ -118,10 +122,12 @@ class TextPromptTopicTest(unittest.TestCase):
         reduce = text_summarizer._build_reduce_prompt("m", summary_max_chars=500, top_k_keywords=10)
         for key in ("summary", "keywords"):
             self.assertIn(key, reduce)
+        # spec 114: 필수 키는 그대로이고, 선택 키는 제목 판단(title_match) · 제목만 요약 표시(title_only)뿐이다.
         self.assertEqual(
-            set(text_summarizer.SummaryKeywords.__annotations__),
+            set(text_summarizer.SummaryKeywords.__required_keys__),
             {"summary", "keywords", "stt"},
         )
+        self.assertEqual(set(text_summarizer.SummaryKeywords.__optional_keys__), {"title_match", "title_only"})
 
 
 if __name__ == "__main__":

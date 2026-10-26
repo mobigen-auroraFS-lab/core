@@ -768,6 +768,29 @@ class TestVlmSummaryPromptV2Settings(unittest.TestCase):
                 _build_settings("dev")
 
 
+class TestSummaryTitleHintSettings(unittest.TestCase):
+    """spec 114: 요약기 「제목 참고」 켜기 ``vlm.summary_title_hint`` — 기본 **False**(켜기 전엔 적재 동작이 지금과 같다).
+
+    코드가 먼저 머지 · 배포되더라도 운영 적재는 이 값을 켤 때까지 바뀌지 않는다 — 결과 판정이 끝난 뒤
+    사람이 켠다. 불리언 형식 오류는 즉시 ``ValueError``.
+    """
+
+    def test_기본은_꺼짐(self) -> None:
+        with _env():
+            s = _build_settings("dev")
+        self.assertIs(s.vlm.summary_title_hint, False)
+
+    def test_켜기(self) -> None:
+        with _env(SUMMARY_TITLE_HINT="1"):
+            s = _build_settings("dev")
+        self.assertIs(s.vlm.summary_title_hint, True)
+
+    def test_형식_오류는_즉시_실패(self) -> None:
+        with _env(SUMMARY_TITLE_HINT="maybe"):
+            with self.assertRaises(ValueError):
+                _build_settings("dev")
+
+
 class TestTopicCanonicalizeEnabledSettings(unittest.TestCase):
     """058 G4(FR-401): 관계 topic 정본화 배선 토글 ``topic_canonicalize_enabled``.
 

@@ -135,6 +135,9 @@ class VlmConfig:
     # 049: VLM 요약 프롬프트 v2 토글(기본 False=v1 바이트 동일·회귀 안전판·FR-102).
     summary_prompt_v2: bool
     summary_ab_judge: bool          # A/B 측정 하니스 LLM-judge 옵션(평가용·추출 무영향)
+    # spec 114: 요약기 4종(문서 · 사진 · 영상 · 음성)에 자료 제목을 참고로 줄지(기본 False = 지금과 같음).
+    #   켜면 같은 호출에서 제목이 맞는지(title_match)도 판단한다. 결과 판정 뒤 사람이 켠다.
+    summary_title_hint: bool
     image_labels_meta_top_k: int    # 이미지 CLIP 라벨 메타 상한
     labels_score_min: float         # image/video 공통 CLIP 라벨 점수 하한
 
@@ -846,6 +849,7 @@ _FIELD_SPECS: tuple[_Spec, ...] = (
     # ── vlm(요약·이미지 라벨) ──
     _Spec("vlm", "summary_prompt_v2", "VLM_SUMMARY_PROMPT_V2", _opt_bool(False)),
     _Spec("vlm", "summary_ab_judge", "VLM_SUMMARY_AB_JUDGE", _opt_bool(False)),
+    _Spec("vlm", "summary_title_hint", "SUMMARY_TITLE_HINT", _opt_bool(False)),
     _Spec("vlm", "image_labels_meta_top_k", "IMAGE_LABELS_META_TOP_K", _opt_int(10)),
     _Spec("vlm", "labels_score_min", "LABELS_SCORE_MIN", _opt_float(0.1)),
     # ── topic ──
